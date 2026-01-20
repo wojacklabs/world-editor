@@ -111,7 +111,10 @@ uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform float uAmbientIntensity;
 uniform sampler2D uSplatMap;
+uniform sampler2D uWaterMask;
 uniform float uTerrainSize;
+uniform float uUseSplatMap;  // Debug toggle: 0.0 = disable splat, 1.0 = normal
+uniform int uDebugMode;  // 0=normal, 1=splatmap, 2=watermask, 3=grass, 4=dirt, 5=rock, 6=sand, 7=normals, 8=normals_detail, 9=normals_final, 10=rock_ao, 11=macro_var, 12=depth, 13=slope, 14=uv, 15=diffuse, 16=specular, 17=ao, 18=base_color
 
 // Material colors (fallback)
 uniform vec3 uGrassColor;
@@ -134,6 +137,10 @@ uniform float uNormalStrength;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uFogStart;
+
+// Water/Underwater
+uniform float uWaterLevel;
+uniform float uTime;
 
 // Varyings
 varying vec3 vPosition;
@@ -204,18 +211,18 @@ vec3 grassPattern(vec2 pos, vec3 baseColor) {
     float large = fbm(pos * 0.5, 2) * 0.15;
     float medium = fbm(pos * 2.0, 2) * 0.1;
     float small = fbm(pos * 8.0, 2) * 0.08;
-    
+
     // Grass blade hints
     float blades = noise(pos * 15.0) * 0.05;
-    
+
     // Color variation (yellow-green to dark green)
     vec3 lightGrass = baseColor * 1.15;
     vec3 darkGrass = baseColor * 0.85;
     float colorMix = fbm(pos * 1.5, 2);
-    
+
     vec3 color = mix(darkGrass, lightGrass, colorMix);
     color *= (1.0 + large + medium + small + blades);
-    
+
     return color;
 }
 
@@ -302,27 +309,49 @@ TriplanarUVs calculateTriplanarUVs(vec3 worldPos, vec3 worldNormal, float scale)
     return result;
 }
 
-// Sample texture using triplanar mapping
-vec4 sampleTriplanar(sampler2D tex, TriplanarUVs uvs) {
-    vec4 colX = texture2D(tex, uvs.uvX);
-    vec4 colY = texture2D(tex, uvs.uvY);
-    vec4 colZ = texture2D(tex, uvs.uvZ);
-    
+// Triplanar sampling functions for specific textures
+// WebGPU/WGSL does not support passing samplers as function parameters,
+// so we create specific functions for each texture
+
+// Triplanar sample rock diffuse texture
+vec3 sampleTriplanarRockDiffuse(TriplanarUVs uvs) {
+    vec3 colX = texture2D(uRockDiffuse, uvs.uvX).rgb;
+    vec3 colY = texture2D(uRockDiffuse, uvs.uvY).rgb;
+    vec3 colZ = texture2D(uRockDiffuse, uvs.uvZ).rgb;
+
     return colX * uvs.weights.x + colY * uvs.weights.y + colZ * uvs.weights.z;
 }
 
-// Sample normal map using triplanar mapping with proper tangent space handling
-vec3 sampleTriplanarNormal(sampler2D normalTex, TriplanarUVs uvs, vec3 worldNormal, float strength) {
+// Triplanar sample rock ARM texture
+vec3 sampleTriplanarRockARM(TriplanarUVs uvs) {
+    vec3 colX = texture2D(uRockARM, uvs.uvX).rgb;
+    vec3 colY = texture2D(uRockARM, uvs.uvY).rgb;
+    vec3 colZ = texture2D(uRockARM, uvs.uvZ).rgb;
+
+    return colX * uvs.weights.x + colY * uvs.weights.y + colZ * uvs.weights.z;
+}
+
+// Triplanar sample rock displacement texture
+float sampleTriplanarRockDisp(TriplanarUVs uvs) {
+    float colX = texture2D(uRockDisp, uvs.uvX).r;
+    float colY = texture2D(uRockDisp, uvs.uvY).r;
+    float colZ = texture2D(uRockDisp, uvs.uvZ).r;
+
+    return colX * uvs.weights.x + colY * uvs.weights.y + colZ * uvs.weights.z;
+}
+
+// Triplanar sample rock normal with proper tangent space handling
+vec3 sampleTriplanarRockNormal(TriplanarUVs uvs, vec3 worldNormal, float strength) {
     // Sample normal maps for each projection
-    vec3 normalX = texture2D(normalTex, uvs.uvX).rgb * 2.0 - 1.0;
-    vec3 normalY = texture2D(normalTex, uvs.uvY).rgb * 2.0 - 1.0;
-    vec3 normalZ = texture2D(normalTex, uvs.uvZ).rgb * 2.0 - 1.0;
-    
+    vec3 normalX = texture2D(uRockNormal, uvs.uvX).rgb * 2.0 - 1.0;
+    vec3 normalY = texture2D(uRockNormal, uvs.uvY).rgb * 2.0 - 1.0;
+    vec3 normalZ = texture2D(uRockNormal, uvs.uvZ).rgb * 2.0 - 1.0;
+
     // Apply strength
     normalX.xy *= strength;
     normalY.xy *= strength;
     normalZ.xy *= strength;
-    
+
     // Swizzle normals to match world space for each projection axis
     // X projection: tangent space (Y, Z) -> world space (Y, Z, X)
     vec3 worldNormalX = vec3(normalX.z, normalX.xy);
@@ -330,17 +359,17 @@ vec3 sampleTriplanarNormal(sampler2D normalTex, TriplanarUVs uvs, vec3 worldNorm
     vec3 worldNormalY = vec3(normalY.x, normalY.z, normalY.y);
     // Z projection: tangent space (X, Y) -> world space (X, Y, Z)
     vec3 worldNormalZ = vec3(normalZ.xy, normalZ.z);
-    
+
     // Flip normals based on the sign of the geometry normal for each axis
     worldNormalX *= sign(worldNormal.x);
     worldNormalY *= sign(worldNormal.y);
     worldNormalZ *= sign(worldNormal.z);
-    
+
     // Blend the normals
-    vec3 blendedNormal = worldNormalX * uvs.weights.x + 
-                         worldNormalY * uvs.weights.y + 
+    vec3 blendedNormal = worldNormalX * uvs.weights.x +
+                         worldNormalY * uvs.weights.y +
                          worldNormalZ * uvs.weights.z;
-    
+
     return normalize(blendedNormal);
 }
 
@@ -368,7 +397,7 @@ MacroVariation calculateMacroVariation(vec2 worldPos) {
     // Brightness variation: subtle darkening in some areas
     // Range: 0.85 - 1.1 (±15% variation)
     mv.brightness = 0.9 + macroNoise1 * 0.2;
-    
+
     // Saturation variation: some areas more/less saturated
     // Range: 0.9 - 1.1
     mv.saturation = 0.95 + macroNoise2 * 0.15;
@@ -485,9 +514,77 @@ vec3 sandPattern(vec2 pos, vec3 baseColor) {
 }
 
 void main() {
-    // Sample splat map
+    // Sample splat map and water mask
     vec4 splat = texture2D(uSplatMap, vUV);
+    float waterMaskValue = texture2D(uWaterMask, vUV).r;
     vec2 worldPos = vPosition.xz;
+
+    // Debug render modes (early exit for basic modes)
+    if (uDebugMode >= 1 && uDebugMode <= 7) {
+        vec3 debugColor = vec3(0.5);
+
+        if (uDebugMode == 1) {
+            // Splatmap raw RGBA visualization
+            debugColor = splat.rgb;
+        } else if (uDebugMode == 2) {
+            // Water mask visualization
+            debugColor = vec3(waterMaskValue, waterMaskValue * 0.5, 1.0 - waterMaskValue);
+        } else if (uDebugMode == 3) {
+            // Grass weight (R channel)
+            debugColor = vec3(0.0, splat.r, 0.0);
+        } else if (uDebugMode == 4) {
+            // Dirt weight (G channel)
+            debugColor = vec3(splat.g * 0.6, splat.g * 0.4, splat.g * 0.2);
+        } else if (uDebugMode == 5) {
+            // Rock weight (B channel)
+            debugColor = vec3(splat.b * 0.5, splat.b * 0.5, splat.b * 0.6);
+        } else if (uDebugMode == 6) {
+            // Sand weight (A channel)
+            debugColor = vec3(splat.a * 0.9, splat.a * 0.8, splat.a * 0.5);
+        } else if (uDebugMode == 7) {
+            // Geometry normals (before any perturbation)
+            debugColor = normalize(vNormal) * 0.5 + 0.5;
+        }
+
+        gl_FragColor = vec4(debugColor, 1.0);
+        return;
+    }
+
+    // Debug modes 12-14 (basic info)
+    if (uDebugMode >= 12 && uDebugMode <= 14) {
+        vec3 debugColor = vec3(0.5);
+
+        if (uDebugMode == 12) {
+            // Height/depth visualization
+            float normalizedHeight = (vHeight + 5.0) / 20.0;
+            debugColor = vec3(normalizedHeight);
+        } else if (uDebugMode == 13) {
+            // Slope visualization
+            debugColor = vec3(vSlope, 1.0 - vSlope, 0.0);
+        } else if (uDebugMode == 14) {
+            // UV visualization
+            debugColor = vec3(vUV.x, vUV.y, 0.0);
+        }
+
+        gl_FragColor = vec4(debugColor, 1.0);
+        return;
+    }
+
+    // Debug mode: disable splatmap (show uniform gray)
+    if (uUseSplatMap < 0.5) {
+        // Show debug gray color with basic lighting
+        vec3 debugColor = vec3(0.5, 0.5, 0.55);
+        float NdotL = max(dot(normalize(vNormal), uSunDirection), 0.0);
+        float diffuse = NdotL * 0.6 + 0.4;
+        vec3 color = debugColor * (uAmbientIntensity + diffuse * uSunColor);
+        gl_FragColor = vec4(color, 1.0);
+        return;
+    }
+
+    // Suppress grass in water areas, boost sand near water
+    splat.r *= (1.0 - waterMaskValue);  // Reduce grass where water exists
+    float sandBoost = smoothstep(0.0, 0.5, waterMaskValue) * 0.5;
+    splat.a += sandBoost;  // Boost sand near water edges
 
     // Normalize splat weights to ensure they sum to 1.0
     float totalWeight = splat.r + splat.g + splat.b + splat.a;
@@ -511,26 +608,38 @@ void main() {
     
     // Rock color: blend between planar and triplanar based on slope
     vec3 rockColorPlanar = rockPattern(texUV, worldPos, uRockColor);
-    vec3 rockColorTriplanar = sampleTriplanar(uRockDiffuse, triUVs).rgb;
+    // Inline triplanar rock diffuse sampling (avoid function calls for WebGPU compatibility)
+    vec3 rockColorTriplanar =
+        texture2D(uRockDiffuse, triUVs.uvX).rgb * triUVs.weights.x +
+        texture2D(uRockDiffuse, triUVs.uvY).rgb * triUVs.weights.y +
+        texture2D(uRockDiffuse, triUVs.uvZ).rgb * triUVs.weights.z;
     // Add subtle variation to triplanar rock
     float triVariation = fbm(worldPos * 0.3, 2) * 0.1;
     rockColorTriplanar *= (0.95 + triVariation);
     vec3 rockColor = mix(rockColorPlanar, rockColorTriplanar, triplanarBlend);
-    
+
     // Get texture data for rock (blend planar/triplanar for ARM as well)
     vec3 rockARMPlanar = getRockARM(texUV);
-    vec3 rockARMTriplanar = sampleTriplanar(uRockARM, triUVs).rgb;
+    // Inline triplanar rock ARM sampling
+    vec3 rockARMTriplanar =
+        texture2D(uRockARM, triUVs.uvX).rgb * triUVs.weights.x +
+        texture2D(uRockARM, triUVs.uvY).rgb * triUVs.weights.y +
+        texture2D(uRockARM, triUVs.uvZ).rgb * triUVs.weights.z;
     vec3 rockARM = mix(rockARMPlanar, rockARMTriplanar, triplanarBlend);
     float rockAO = rockARM.r;
     float rockRoughness = rockARM.g;
     // float rockMetallic = rockARM.b;  // Not used for rock (non-metallic)
-    
+
     // Dirt height (planar only - dirt doesn't appear on steep slopes)
     float dirtHeight = getDirtHeight(texUV);
-    
+
     // Rock height: blend planar/triplanar
     float rockHeightPlanar = getRockHeight(texUV);
-    float rockHeightTriplanar = sampleTriplanar(uRockDisp, triUVs).r;
+    // Inline triplanar rock displacement sampling
+    float rockHeightTriplanar =
+        texture2D(uRockDisp, triUVs.uvX).r * triUVs.weights.x +
+        texture2D(uRockDisp, triUVs.uvY).r * triUVs.weights.y +
+        texture2D(uRockDisp, triUVs.uvZ).r * triUVs.weights.z;
     float rockHeight = mix(rockHeightPlanar, rockHeightTriplanar, triplanarBlend);
 
     // Blend materials based on normalized splat map weights
@@ -559,9 +668,23 @@ void main() {
     // Get tangent-space normals from textures (planar)
     vec3 rockNormalPlanar = getRockNormal(texUV);
     vec3 dirtNormalTex = getDirtNormal(texUV);
-    
-    // Get triplanar normal for rock on steep surfaces
-    vec3 rockNormalTriplanar = sampleTriplanarNormal(uRockNormal, triUVs, geometryNormal, uNormalStrength);
+
+    // Inline triplanar normal sampling for rock on steep surfaces (WebGPU compatibility)
+    vec3 triNormalX = texture2D(uRockNormal, triUVs.uvX).rgb * 2.0 - 1.0;
+    vec3 triNormalY = texture2D(uRockNormal, triUVs.uvY).rgb * 2.0 - 1.0;
+    vec3 triNormalZ = texture2D(uRockNormal, triUVs.uvZ).rgb * 2.0 - 1.0;
+    triNormalX.xy *= uNormalStrength;
+    triNormalY.xy *= uNormalStrength;
+    triNormalZ.xy *= uNormalStrength;
+    // Swizzle normals to match world space for each projection axis
+    vec3 worldNormalX = vec3(triNormalX.z, triNormalX.xy) * sign(geometryNormal.x);
+    vec3 worldNormalY = vec3(triNormalY.x, triNormalY.z, triNormalY.y) * sign(geometryNormal.y);
+    vec3 worldNormalZ = vec3(triNormalZ.xy, triNormalZ.z) * sign(geometryNormal.z);
+    vec3 rockNormalTriplanar = normalize(
+        worldNormalX * triUVs.weights.x +
+        worldNormalY * triUVs.weights.y +
+        worldNormalZ * triUVs.weights.z
+    );
     
     // Transform planar normals from tangent space to world space using TBN matrix
     vec3 rockPerturbedPlanar = vTBN * rockNormalPlanar;
@@ -584,7 +707,29 @@ void main() {
     
     // Apply macro normal variation for world-scale undulations
     vec3 normal = calculateMacroNormal(worldPos, perturbedNormal, macroVar.normalStrength);
-    
+
+    // Debug modes 8-11 (normal/AO/macro related - need computed values)
+    if (uDebugMode >= 8 && uDebugMode <= 11) {
+        vec3 debugColor = vec3(0.5);
+
+        if (uDebugMode == 8) {
+            // Normal map detail (tangent space normals from rock texture)
+            debugColor = rockNormalPlanar * 0.5 + 0.5;
+        } else if (uDebugMode == 9) {
+            // Final perturbed normals (after all blending and macro)
+            debugColor = normalize(normal) * 0.5 + 0.5;
+        } else if (uDebugMode == 10) {
+            // Rock AO texture
+            debugColor = vec3(rockAO);
+        } else if (uDebugMode == 11) {
+            // Macro variation (brightness)
+            debugColor = vec3(macroVar.brightness);
+        }
+
+        gl_FragColor = vec4(debugColor, 1.0);
+        return;
+    }
+
     // Enhanced lighting using ARM texture
     float NdotL = max(dot(normal, uSunDirection), 0.0);
 
@@ -610,6 +755,28 @@ void main() {
     // Blend in texture AO for rock areas (texture AO provides crevice detail)
     float ao = mix(geometricAO, geometricAO * rockAO, rockWeight);
 
+    // Debug modes 15-18 (lighting related)
+    if (uDebugMode >= 15 && uDebugMode <= 18) {
+        vec3 debugColor = vec3(0.5);
+
+        if (uDebugMode == 15) {
+            // Diffuse lighting only
+            debugColor = vec3(diffuse);
+        } else if (uDebugMode == 16) {
+            // Specular highlight only (amplified for visibility)
+            debugColor = vec3(specular * 10.0);
+        } else if (uDebugMode == 17) {
+            // Ambient occlusion
+            debugColor = vec3(ao);
+        } else if (uDebugMode == 18) {
+            // Base color before lighting
+            debugColor = baseColor;
+        }
+
+        gl_FragColor = vec4(debugColor, 1.0);
+        return;
+    }
+
     // Final color composition
     vec3 color = baseColor * (uAmbientIntensity + diffuse * uSunColor) * ao;
     color += specular * uSunColor;
@@ -623,6 +790,58 @@ void main() {
     // Tone mapping and gamma
     color = color / (color + vec3(1.0)) * 1.1; // Simple Reinhard
     color = pow(color, vec3(0.95));
+
+    // Wet sand/shore effect - only apply near actual water (where water mask exists)
+    // This prevents the wet effect from applying to all terrain at similar heights
+    if (waterMaskValue > 0.1) {
+        float heightAboveWater = vHeight - uWaterLevel;
+        float wetZoneHeight = 0.5; // How high above water the wet effect extends
+        if (heightAboveWater > 0.0 && heightAboveWater < wetZoneHeight) {
+            // Calculate wetness factor (1.0 at water level, 0.0 at top of wet zone)
+            float wetness = 1.0 - (heightAboveWater / wetZoneHeight);
+            wetness = pow(wetness, 0.7); // Non-linear falloff for more natural look
+            wetness *= waterMaskValue; // Scale by water mask proximity
+
+            // Wet terrain is darker and more saturated
+            color *= mix(1.0, 0.7, wetness);
+
+            // Add slight specular/sheen to wet areas
+            vec3 viewDir = vViewDirection;  // Already normalized in vertex shader
+            vec3 lightDir = normalize(vec3(0.5, 0.8, 0.3));
+            vec3 halfVec = normalize(viewDir + lightDir);
+            float wetSpecular = pow(max(dot(vNormal, halfVec), 0.0), 32.0);
+            color += vec3(0.1, 0.12, 0.15) * wetSpecular * wetness * 0.3;
+        }
+    }
+
+    // Underwater effect - only apply where water actually exists
+    if (waterMaskValue > 0.1) {
+        float underwaterDepth = uWaterLevel - vHeight;
+        if (underwaterDepth > 0.0) {
+            // Calculate how deep underwater (0 = at surface, 1 = fully submerged)
+            float depthFactor = clamp(underwaterDepth / 4.0, 0.0, 1.0);
+            depthFactor *= waterMaskValue; // Scale by water mask
+
+            // Underwater tint (blue-green)
+            vec3 underwaterColor = vec3(0.1, 0.3, 0.4);
+            color = mix(color, underwaterColor, depthFactor * 0.6);
+
+            // Caustics effect (animated light patterns)
+            vec2 causticUV = vPosition.xz * 0.15;
+            float caustic1 = sin(causticUV.x * 3.0 + uTime * 0.8) * cos(causticUV.y * 2.5 + uTime * 0.6);
+            float caustic2 = sin(causticUV.x * 2.0 - uTime * 0.5) * cos(causticUV.y * 3.5 + uTime * 0.9);
+            float caustics = (caustic1 + caustic2) * 0.5 + 0.5;
+            caustics = pow(caustics, 2.0) * 0.3;
+
+            // Caustics fade with depth (stronger near surface)
+            float causticFade = 1.0 - depthFactor;
+            color += vec3(caustics * causticFade * 0.15);
+
+            // Reduce saturation underwater
+            float gray = dot(color, vec3(0.299, 0.587, 0.114));
+            color = mix(color, vec3(gray), depthFactor * 0.3);
+        }
+    }
 
     gl_FragColor = vec4(color, 1.0);
 }
@@ -658,9 +877,14 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
         "uFogColor",
         "uFogDensity",
         "uFogStart",
+        "uWaterLevel",
+        "uTime",
+        "uUseSplatMap",
+        "uDebugMode",
       ],
       samplers: [
         "uSplatMap",
+        "uWaterMask",
         "uRockDiffuse",
         "uRockNormal",
         "uRockDisp",
@@ -708,6 +932,14 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
   material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
   material.setFloat("uFogDensity", 0.008);
   material.setFloat("uFogStart", 50);
+
+  // Water/underwater settings
+  material.setFloat("uWaterLevel", -100);  // Default below terrain, updated by EditorEngine when water is active
+  material.setFloat("uTime", 0);
+
+  // Debug settings
+  material.setFloat("uUseSplatMap", 1.0);  // Default: splatmap enabled
+  material.setInt("uDebugMode", 0);  // Default: normal rendering
 
   material.backFaceCulling = false;
 

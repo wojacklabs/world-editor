@@ -31,6 +31,7 @@ export class TerrainMesh {
   private shaderMaterial: ShaderMaterial | null = null;
   private simpleMaterial: StandardMaterial | null = null;
   private splatTexture: RawTexture | null = null;
+  private waterMaskTexture: RawTexture | null = null;
   private useShader = true;
 
   // Displacement strength (GPU shader based)
@@ -367,6 +368,10 @@ export class TerrainMesh {
     this.splatTexture = this.createSplatTexture();
     console.log("[TerrainMesh] Splat texture created");
 
+    // Create water mask texture
+    this.waterMaskTexture = this.createWaterMaskTexture();
+    console.log("[TerrainMesh] Water mask texture created");
+
     // Create shader material
     try {
       this.shaderMaterial = createTerrainMaterial(
@@ -375,6 +380,7 @@ export class TerrainMesh {
         resolution
       );
       this.shaderMaterial.setTexture("uSplatMap", this.splatTexture);
+      this.shaderMaterial.setTexture("uWaterMask", this.waterMaskTexture);
       // Set initial displacement strength
       this.shaderMaterial.setFloat("uDispStrength", this.dispStrength);
       console.log("[TerrainMesh] Shader material created successfully");
@@ -415,6 +421,58 @@ export class TerrainMesh {
     texture.wrapV = Texture.CLAMP_ADDRESSMODE;
 
     return texture;
+  }
+
+  private createWaterMaskTexture(): RawTexture {
+    const resolution = this.splatMap.getResolution();
+    const waterMask = this.splatMap.getWaterMask();
+    // Use RGBA format for compatibility - store water value in R channel
+    const uint8Data = new Uint8Array(resolution * resolution * 4);
+
+    for (let i = 0; i < resolution * resolution; i++) {
+      const value = Math.floor(waterMask[i] * 255);
+      uint8Data[i * 4] = value;      // R
+      uint8Data[i * 4 + 1] = value;  // G
+      uint8Data[i * 4 + 2] = value;  // B
+      uint8Data[i * 4 + 3] = 255;    // A
+    }
+
+    const texture = new RawTexture(
+      uint8Data,
+      resolution,
+      resolution,
+      Engine.TEXTUREFORMAT_RGBA,
+      this.scene,
+      false,
+      false,
+      Texture.BILINEAR_SAMPLINGMODE
+    );
+
+    texture.wrapU = Texture.CLAMP_ADDRESSMODE;
+    texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+
+    return texture;
+  }
+
+  updateWaterMaskTexture(): void {
+    if (!this.waterMaskTexture) {
+      console.warn("[TerrainMesh] updateWaterMaskTexture: No waterMaskTexture!");
+      return;
+    }
+
+    const resolution = this.splatMap.getResolution();
+    const waterMask = this.splatMap.getWaterMask();
+    const uint8Data = new Uint8Array(resolution * resolution * 4);
+
+    for (let i = 0; i < resolution * resolution; i++) {
+      const value = Math.floor(waterMask[i] * 255);
+      uint8Data[i * 4] = value;      // R
+      uint8Data[i * 4 + 1] = value;  // G
+      uint8Data[i * 4 + 2] = value;  // B
+      uint8Data[i * 4 + 3] = 255;    // A
+    }
+
+    this.waterMaskTexture.update(uint8Data);
   }
 
   updateSplatTexture(): void {
@@ -522,6 +580,18 @@ export class TerrainMesh {
     }
     if (this.simpleMaterial) {
       this.simpleMaterial.wireframe = enabled;
+    }
+  }
+
+  setSplatMapEnabled(enabled: boolean): void {
+    if (this.shaderMaterial) {
+      this.shaderMaterial.setFloat("uUseSplatMap", enabled ? 1.0 : 0.0);
+    }
+  }
+
+  setDebugMode(mode: number): void {
+    if (this.shaderMaterial) {
+      this.shaderMaterial.setInt("uDebugMode", mode);
     }
   }
 
@@ -672,6 +742,10 @@ export class TerrainMesh {
     if (this.splatTexture) {
       this.splatTexture.dispose();
       this.splatTexture = null;
+    }
+    if (this.waterMaskTexture) {
+      this.waterMaskTexture.dispose();
+      this.waterMaskTexture = null;
     }
   }
 }
