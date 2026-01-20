@@ -1,5 +1,49 @@
 import type { MaterialType } from "../types/EditorTypes";
 
+// Simple tileable noise for natural boundaries
+function hash(x: number, y: number): number {
+  const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function smoothNoise(x: number, y: number): number {
+  const ix = Math.floor(x);
+  const iy = Math.floor(y);
+  const fx = x - ix;
+  const fy = y - iy;
+
+  // Smoothstep interpolation
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+
+  const n00 = hash(ix, iy);
+  const n10 = hash(ix + 1, iy);
+  const n01 = hash(ix, iy + 1);
+  const n11 = hash(ix + 1, iy + 1);
+
+  const nx0 = n00 * (1 - sx) + n10 * sx;
+  const nx1 = n01 * (1 - sx) + n11 * sx;
+
+  return nx0 * (1 - sy) + nx1 * sy;
+}
+
+// Fractal noise with multiple octaves
+function fractalNoise(x: number, y: number, octaves: number = 3): number {
+  let value = 0;
+  let amplitude = 1;
+  let frequency = 1;
+  let maxValue = 0;
+
+  for (let i = 0; i < octaves; i++) {
+    value += smoothNoise(x * frequency, y * frequency) * amplitude;
+    maxValue += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+
+  return value / maxValue;
+}
+
 export class SplatMap {
   private resolution: number;
   private data: Float32Array; // RGBA: grass, dirt, rock, sand
@@ -236,11 +280,11 @@ export class SplatMap {
       bytes[i] = binary.charCodeAt(i);
     }
     const view = new Float32Array(bytes.buffer);
-    
+
     const maskSize = this.resolution * this.resolution;
     const expectedLengthV3 = this.data.length + maskSize * 3; // v3: all masks
     const expectedLengthV2 = this.data.length + maskSize;     // v2: water only
-    
+
     if (view.length === expectedLengthV3) {
       // V3 format: includes all masks
       let offset = 0;
@@ -264,5 +308,416 @@ export class SplatMap {
       this.wetnessMask.fill(0);
       this.roadMask.fill(0);
     }
+  }
+
+  /**
+   * Make splat map seamless for infinite tiling.
+   * EXTENDS biomes from one edge to the opposite edge so same biomes connect.
+   * Steps:
+   * 1. Make edges exactly match by taking MAX of both edges
+   * 2. Blend edge values into the interior with smooth transition
+   */
+  makeSeamless(): void {
+    const res = this.resolution;
+    const blendWidth = Math.max(8, Math.floor(res * 0.15)); // 15% blend zone
+
+    // Process main splat data (4 channels: grass, dirt, rock, sand)
+    this.makeDataSeamless(this.data, 4, res, blendWidth);
+
+    // Add noisy dissolve to biome boundaries for natural look
+    this.dissolveBiomeBoundaries();
+
+    // Process water mask - special handling with noisy boundaries
+    this.makeWaterMaskSeamless(this.waterMask, res, blendWidth);
+
+    // Process wetness mask
+    this.makeMaskSeamless(this.wetnessMask, res, blendWidth);
+
+    // Process road mask
+    this.makeMaskSeamless(this.roadMask, res, blendWidth);
+  }
+
+  /**
+   * Add noise-based dissolve effect to biome boundaries.
+   * Makes transitions between biomes look natural and irregular.
+   */
+  private dissolveBiomeBoundaries(): void {
+    const res = this.resolution;
+    const channels = 4;
+    const noiseScale = 0.08; // Smaller = larger noise features
+    const dissolveStrength = 0.4; // How much to shift boundaries
+    const edgeThreshold = 0.15; // Detect biome boundaries
+
+    const newData = new Float32Array(this.data);
+
+    for (let z = 1; z < res - 1; z++) {
+      for (let x = 1; x < res - 1; x++) {
+        const idx = (z * res + x) * channels;
+
+        // Get current pixel's dominant biome
+        let maxWeight = 0;
+        let dominantChannel = 0;
+        for (let c = 0; c < channels; c++) {
+          if (this.data[idx + c] > maxWeight) {
+            maxWeight = this.data[idx + c];
+            dominantChannel = c;
+          }
+        }
+
+        // Check if this pixel is near a biome boundary
+        // by comparing with neighbors
+        let isNearBoundary = false;
+        const neighbors = [
+          [-1, 0], [1, 0], [0, -1], [0, 1],
+          [-1, -1], [1, -1], [-1, 1], [1, 1]
+        ];
+
+        for (const [dx, dz] of neighbors) {
+          const nIdx = ((z + dz) * res + (x + dx)) * channels;
+          let nMaxWeight = 0;
+          let nDominant = 0;
+          for (let c = 0; c < channels; c++) {
+            if (this.data[nIdx + c] > nMaxWeight) {
+              nMaxWeight = this.data[nIdx + c];
+              nDominant = c;
+            }
+          }
+          if (nDominant !== dominantChannel) {
+            isNearBoundary = true;
+            break;
+          }
+        }
+
+        if (!isNearBoundary) continue;
+
+        // Get noise value for this position
+        const noise = fractalNoise(x * noiseScale, z * noiseScale, 4);
+
+        // Sample a neighbor based on noise
+        // This creates the irregular boundary effect
+        const angle = noise * Math.PI * 2;
+        const sampleDist = 1 + Math.floor(noise * 2);
+        const sampleX = Math.round(x + Math.cos(angle) * sampleDist);
+        const sampleZ = Math.round(z + Math.sin(angle) * sampleDist);
+
+        if (sampleX >= 0 && sampleX < res && sampleZ >= 0 && sampleZ < res) {
+          const sampleIdx = (sampleZ * res + sampleX) * channels;
+
+          // Blend current pixel towards the sampled neighbor based on noise
+          const blendAmount = dissolveStrength * (noise > 0.5 ? noise - 0.5 : 0.5 - noise) * 2;
+
+          for (let c = 0; c < channels; c++) {
+            newData[idx + c] = this.data[idx + c] * (1 - blendAmount) +
+                               this.data[sampleIdx + c] * blendAmount;
+          }
+        }
+      }
+    }
+
+    // Copy back
+    this.data.set(newData);
+
+    // Normalize weights
+    for (let i = 0; i < res * res; i++) {
+      const idx = i * channels;
+      let sum = 0;
+      for (let c = 0; c < channels; c++) {
+        sum += this.data[idx + c];
+      }
+      if (sum > 0) {
+        for (let c = 0; c < channels; c++) {
+          this.data[idx + c] /= sum;
+        }
+      }
+    }
+
+    // Ensure edges still match after dissolve
+    // Copy left edge to right and top edge to bottom
+    for (let z = 0; z < res; z++) {
+      for (let c = 0; c < channels; c++) {
+        const leftVal = this.data[(z * res + 0) * channels + c];
+        const rightVal = this.data[(z * res + (res - 1)) * channels + c];
+        const avgVal = (leftVal + rightVal) / 2;
+        this.data[(z * res + 0) * channels + c] = avgVal;
+        this.data[(z * res + (res - 1)) * channels + c] = avgVal;
+      }
+    }
+
+    for (let x = 0; x < res; x++) {
+      for (let c = 0; c < channels; c++) {
+        const topVal = this.data[(0 * res + x) * channels + c];
+        const bottomVal = this.data[((res - 1) * res + x) * channels + c];
+        const avgVal = (topVal + bottomVal) / 2;
+        this.data[(0 * res + x) * channels + c] = avgVal;
+        this.data[((res - 1) * res + x) * channels + c] = avgVal;
+      }
+    }
+  }
+
+  /**
+   * Make multi-channel data (biomes) seamless with noisy natural boundaries.
+   * Uses fractal noise to create irregular, natural-looking transitions.
+   */
+  private makeDataSeamless(
+    data: Float32Array,
+    channels: number,
+    res: number,
+    blendWidth: number
+  ): void {
+    const smoothstep = (t: number): number => t * t * (3 - 2 * t);
+    const noiseScale = 0.15; // Controls noise frequency
+    const noiseStrength = 0.5; // How much noise affects blend boundary (0-1)
+
+    // Step 1: Calculate unified edge values (MAX of both edges for each position)
+    const leftRightEdge: Float32Array[] = [];
+    const topBottomEdge: Float32Array[] = [];
+
+    for (let c = 0; c < channels; c++) {
+      leftRightEdge[c] = new Float32Array(res);
+      topBottomEdge[c] = new Float32Array(res);
+
+      for (let z = 0; z < res; z++) {
+        const leftIdx = (z * res + 0) * channels + c;
+        const rightIdx = (z * res + (res - 1)) * channels + c;
+        leftRightEdge[c][z] = Math.max(data[leftIdx], data[rightIdx]);
+      }
+
+      for (let x = 0; x < res; x++) {
+        const topIdx = (0 * res + x) * channels + c;
+        const bottomIdx = ((res - 1) * res + x) * channels + c;
+        topBottomEdge[c][x] = Math.max(data[topIdx], data[bottomIdx]);
+      }
+    }
+
+    // Step 2: Apply with noisy blend boundaries
+    const newData = new Float32Array(data);
+
+    for (let z = 0; z < res; z++) {
+      for (let x = 0; x < res; x++) {
+        const idx = (z * res + x) * channels;
+
+        // Get noise value for this position (tileable)
+        const noise = fractalNoise(x * noiseScale, z * noiseScale, 3);
+        const noiseOffset = (noise - 0.5) * 2 * noiseStrength * blendWidth;
+
+        // Distance from each edge with noise-modulated blend width
+        const distFromLeft = x;
+        const distFromRight = res - 1 - x;
+        const distFromTop = z;
+        const distFromBottom = res - 1 - z;
+
+        // Effective blend width varies with noise
+        const effectiveBlendLeft = Math.max(4, blendWidth + noiseOffset);
+        const effectiveBlendRight = Math.max(4, blendWidth - noiseOffset);
+        const effectiveBlendTop = Math.max(4, blendWidth + noiseOffset);
+        const effectiveBlendBottom = Math.max(4, blendWidth - noiseOffset);
+
+        // Blend factors with noisy boundaries
+        const leftBlend = distFromLeft < effectiveBlendLeft
+          ? smoothstep(1 - distFromLeft / effectiveBlendLeft) : 0;
+        const rightBlend = distFromRight < effectiveBlendRight
+          ? smoothstep(1 - distFromRight / effectiveBlendRight) : 0;
+        const topBlend = distFromTop < effectiveBlendTop
+          ? smoothstep(1 - distFromTop / effectiveBlendTop) : 0;
+        const bottomBlend = distFromBottom < effectiveBlendBottom
+          ? smoothstep(1 - distFromBottom / effectiveBlendBottom) : 0;
+
+        for (let c = 0; c < channels; c++) {
+          let value = data[idx + c];
+
+          if (leftBlend > 0 || rightBlend > 0) {
+            const edgeVal = leftRightEdge[c][z];
+            const blend = Math.max(leftBlend, rightBlend);
+            value = value * (1 - blend) + edgeVal * blend;
+          }
+
+          if (topBlend > 0 || bottomBlend > 0) {
+            const edgeVal = topBottomEdge[c][x];
+            const blend = Math.max(topBlend, bottomBlend);
+            value = value * (1 - blend) + edgeVal * blend;
+          }
+
+          newData[idx + c] = value;
+        }
+      }
+    }
+
+    // Step 3: Copy back and ensure exact edge equality
+    data.set(newData);
+
+    // Force edges to be exactly equal (necessary for seamless tiling)
+    for (let z = 0; z < res; z++) {
+      for (let c = 0; c < channels; c++) {
+        const edgeVal = leftRightEdge[c][z];
+        data[(z * res + 0) * channels + c] = edgeVal;
+        data[(z * res + (res - 1)) * channels + c] = edgeVal;
+      }
+    }
+
+    for (let x = 0; x < res; x++) {
+      for (let c = 0; c < channels; c++) {
+        const edgeVal = topBottomEdge[c][x];
+        data[(0 * res + x) * channels + c] = edgeVal;
+        data[((res - 1) * res + x) * channels + c] = edgeVal;
+      }
+    }
+
+    // Normalize weights
+    for (let i = 0; i < res * res; i++) {
+      const idx = i * channels;
+      let sum = 0;
+      for (let c = 0; c < channels; c++) {
+        sum += data[idx + c];
+      }
+      if (sum > 0) {
+        for (let c = 0; c < channels; c++) {
+          data[idx + c] /= sum;
+        }
+      }
+    }
+  }
+
+  /**
+   * Make single-channel mask (water, wetness, road) seamless.
+   * Same strategy: make edges match with MAX, then blend into interior.
+   */
+  private makeMaskSeamless(
+    mask: Float32Array,
+    res: number,
+    blendWidth: number
+  ): void {
+    const smoothstep = (t: number): number => t * t * (3 - 2 * t);
+
+    // Step 1: Calculate unified edge values (MAX of both edges)
+    const leftRightEdge = new Float32Array(res);
+    const topBottomEdge = new Float32Array(res);
+
+    for (let z = 0; z < res; z++) {
+      const leftVal = mask[z * res + 0];
+      const rightVal = mask[z * res + (res - 1)];
+      leftRightEdge[z] = Math.max(leftVal, rightVal);
+    }
+
+    for (let x = 0; x < res; x++) {
+      const topVal = mask[0 * res + x];
+      const bottomVal = mask[(res - 1) * res + x];
+      topBottomEdge[x] = Math.max(topVal, bottomVal);
+    }
+
+    // Step 2: Blend edge values into interior
+    const newMask = new Float32Array(mask);
+
+    for (let z = 0; z < res; z++) {
+      for (let x = 0; x < res; x++) {
+        const idx = z * res + x;
+
+        const distFromLeft = x;
+        const distFromRight = res - 1 - x;
+        const distFromTop = z;
+        const distFromBottom = res - 1 - z;
+
+        const leftBlend = distFromLeft < blendWidth ? smoothstep(1 - distFromLeft / blendWidth) : 0;
+        const rightBlend = distFromRight < blendWidth ? smoothstep(1 - distFromRight / blendWidth) : 0;
+        const topBlend = distFromTop < blendWidth ? smoothstep(1 - distFromTop / blendWidth) : 0;
+        const bottomBlend = distFromBottom < blendWidth ? smoothstep(1 - distFromBottom / blendWidth) : 0;
+
+        let value = mask[idx];
+
+        // Blend with left-right unified edge
+        if (leftBlend > 0 || rightBlend > 0) {
+          const edgeVal = leftRightEdge[z];
+          const blend = Math.max(leftBlend, rightBlend);
+          value = value * (1 - blend) + edgeVal * blend;
+        }
+
+        // Blend with top-bottom unified edge
+        if (topBlend > 0 || bottomBlend > 0) {
+          const edgeVal = topBottomEdge[x];
+          const blend = Math.max(topBlend, bottomBlend);
+          value = value * (1 - blend) + edgeVal * blend;
+        }
+
+        newMask[idx] = Math.max(0, Math.min(1, value));
+      }
+    }
+
+    // Step 3: Copy back and force exact edge equality
+    mask.set(newMask);
+
+    for (let z = 0; z < res; z++) {
+      const edgeVal = leftRightEdge[z];
+      mask[z * res + 0] = edgeVal;
+      mask[z * res + (res - 1)] = edgeVal;
+    }
+
+    for (let x = 0; x < res; x++) {
+      const edgeVal = topBottomEdge[x];
+      mask[0 * res + x] = edgeVal;
+      mask[(res - 1) * res + x] = edgeVal;
+    }
+  }
+
+  /**
+   * Make water mask seamless.
+   * Water basins are already created by EditorEngine.mirrorWaterAtEdges(),
+   * so here we just ensure edges match exactly.
+   */
+  private makeWaterMaskSeamless(
+    mask: Float32Array,
+    res: number,
+    blendWidth: number
+  ): void {
+    // Simply average the edges and ensure they match
+    // Left-Right edges
+    for (let z = 0; z < res; z++) {
+      const leftVal = mask[z * res + 0];
+      const rightVal = mask[z * res + (res - 1)];
+      const avgVal = (leftVal + rightVal) / 2;
+      mask[z * res + 0] = avgVal;
+      mask[z * res + (res - 1)] = avgVal;
+    }
+
+    // Top-Bottom edges
+    for (let x = 0; x < res; x++) {
+      const topVal = mask[0 * res + x];
+      const bottomVal = mask[(res - 1) * res + x];
+      const avgVal = (topVal + bottomVal) / 2;
+      mask[0 * res + x] = avgVal;
+      mask[(res - 1) * res + x] = avgVal;
+    }
+  }
+
+  /**
+   * Get edge data for debugging tile boundary connections
+   */
+  getEdgeDebugData(): {
+    left: { biome: number[]; water: number }[];
+    right: { biome: number[]; water: number }[];
+    top: { biome: number[]; water: number }[];
+    bottom: { biome: number[]; water: number }[];
+  } {
+    const res = this.resolution;
+    const sampleCount = Math.min(10, res);
+    const step = Math.floor(res / sampleCount);
+
+    const sample = (x: number, z: number) => ({
+      biome: Array.from(this.getWeights(x, z)),
+      water: this.getWaterWeight(x, z),
+    });
+
+    const left: { biome: number[]; water: number }[] = [];
+    const right: { biome: number[]; water: number }[] = [];
+    const top: { biome: number[]; water: number }[] = [];
+    const bottom: { biome: number[]; water: number }[] = [];
+
+    for (let i = 0; i < sampleCount; i++) {
+      const pos = i * step;
+      left.push(sample(0, pos));
+      right.push(sample(res - 1, pos));
+      top.push(sample(pos, 0));
+      bottom.push(sample(pos, res - 1));
+    }
+
+    return { left, right, top, bottom };
   }
 }
