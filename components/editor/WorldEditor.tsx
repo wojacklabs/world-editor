@@ -26,6 +26,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     assetSettings,
     showGrid,
     showWireframe,
+    debugVisibility,
+    debugRenderMode,
     setModified,
     randomizeAssetSeed,
     pendingAsset,
@@ -124,6 +126,23 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       engineRef.current.setWireframe(showWireframe);
     }
   }, [showWireframe]);
+
+  // Update debug visibility
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.setTerrainVisible(debugVisibility.terrain);
+      engineRef.current.setSplatMapEnabled(debugVisibility.splatMap);
+      engineRef.current.setWaterVisible(debugVisibility.water);
+      engineRef.current.setFoliageVisible(debugVisibility.foliage);
+    }
+  }, [debugVisibility]);
+
+  // Update debug render mode
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.setDebugRenderMode(debugRenderMode);
+    }
+  }, [debugRenderMode]);
 
   // Props tool: Create preview when entering props mode or when type/seed changes
   useEffect(() => {

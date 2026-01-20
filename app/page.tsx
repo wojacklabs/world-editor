@@ -6,12 +6,14 @@ import { EditorEngine } from "@/lib/editor/core/EditorEngine";
 import EditorToolbar from "@/components/editor/EditorToolbar";
 import EditorSidebar from "@/components/editor/EditorSidebar";
 import PropertiesPanel from "@/components/editor/PropertiesPanel";
+import TilePanel from "@/components/editor/TilePanel";
 import AssetChatPanel from "@/components/editor/AssetChatPanel";
 import AssetLibraryPanel from "@/components/editor/AssetLibraryPanel";
 import PlacedAssetPanel from "@/components/editor/PlacedAssetPanel";
 import { useEditorStore } from "@/lib/editor/store/editorStore";
 import { SavedAsset } from "@/lib/editor/assets/AssetLibrary";
 import { MeshData, createMeshFromData } from "@/lib/editor/assets/CustomMeshBuilder";
+import { getManualTileManager, type SeamlessDirection } from "@/lib/editor/tiles/ManualTileManager";
 
 import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
@@ -43,6 +45,9 @@ export default function EditorPage() {
   const [projectName, setProjectName] = useState("terrain-project");
   const [dispStrength, setDispStrength] = useState(0.5);
   const [terrainResolution, setTerrainResolution] = useState(512);
+  const [tileMode, setTileMode] = useState<"clone" | "mirror">("mirror");
+  const [activeTileId, setActiveTileId] = useState<string | null>(null);
+  const [tileDirty, setTileDirty] = useState(false);
   const { setModified, resetState } = useEditorStore();
 
   // Placed assets management
@@ -182,14 +187,21 @@ export default function EditorPage() {
   const handleMakeSeamless = useCallback(() => {
     if (!engine) return;
 
-    const heightmap = engine.getHeightmap();
-    const terrainMesh = engine.getTerrainMesh();
+    // Use the comprehensive makeSeamless that handles
+    // heightmap, splat map (biomes), water, and regenerates foliage
+    engine.makeSeamless();
+    setModified(true);
+  }, [engine, setModified]);
 
-    if (heightmap && terrainMesh) {
-      heightmap.makeSeamless();
-      terrainMesh.updateFromHeightmap();
-      setModified(true);
+  const handleMakeSeamlessDirection = useCallback((direction: "left" | "right" | "top" | "bottom" | "all") => {
+    if (!engine) return;
+
+    if (direction === "all") {
+      engine.makeSeamless();
+    } else {
+      engine.makeSeamlessDirection(direction);
     }
+    setModified(true);
   }, [engine, setModified]);
 
   const handleDispStrengthChange = useCallback((value: number) => {
@@ -218,6 +230,126 @@ export default function EditorPage() {
       engine.toggleGameMode();
     }
   }, [engine]);
+
+  const handleTileModeChange = useCallback((mode: "clone" | "mirror") => {
+    setTileMode(mode);
+    if (engine) {
+      engine.setTileMode(mode);
+    }
+  }, [engine]);
+
+  // ============================================
+  // Manual Tile Management Handlers
+  // ============================================
+
+  const handleSaveTile = useCallback((name: string, existingId?: string) => {
+    if (!engine) return;
+
+    const tileData = engine.getCurrentTileData();
+    if (!tileData) return;
+
+    const tileManager = getManualTileManager();
+    const newId = tileManager.saveTileFromCurrent(
+      name,
+      tileData.heightmapData,
+      tileData.splatmapData,
+      tileData.waterMaskData,
+      tileData.resolution,
+      tileData.size,
+      tileData.seaLevel,
+      tileData.waterDepth,
+      existingId
+    );
+
+    setActiveTileId(newId);
+    setTileDirty(false);
+    console.log(`[Page] Tile saved: ${name} (${newId})`);
+  }, [engine]);
+
+  const handleLoadTile = useCallback((tileId: string) => {
+    if (!engine) return;
+
+    const tileManager = getManualTileManager();
+    const tile = tileManager.loadTile(tileId);
+    if (!tile) return;
+
+    engine.loadTileData(
+      tile.heightmapData,
+      tile.splatmapData,
+      tile.waterMaskData,
+      tile.resolution,
+      tile.size,
+      tile.seaLevel,
+      tile.waterDepth
+    );
+
+    setActiveTileId(tileId);
+    setTileDirty(false);
+    console.log(`[Page] Tile loaded: ${tile.name} (${tileId})`);
+  }, [engine]);
+
+  const handleCreateNewTile = useCallback((name: string) => {
+    if (!engine) return;
+
+    const tileManager = getManualTileManager();
+    const newId = tileManager.createTile(name, terrainResolution, 64);
+
+    // Load the newly created tile
+    const tile = tileManager.loadTile(newId);
+    if (tile) {
+      engine.loadTileData(
+        tile.heightmapData,
+        tile.splatmapData,
+        tile.waterMaskData,
+        tile.resolution,
+        tile.size,
+        tile.seaLevel,
+        tile.waterDepth
+      );
+    }
+
+    setActiveTileId(newId);
+    setTileDirty(false);
+    console.log(`[Page] New tile created: ${name} (${newId})`);
+  }, [engine, terrainResolution]);
+
+  const handleConnectSeamless = useCallback((direction: SeamlessDirection, targetTileId: string) => {
+    if (!engine || !activeTileId) return;
+
+    const tileManager = getManualTileManager();
+
+    // Get edge data from target tile
+    const oppositeDir: Record<SeamlessDirection, SeamlessDirection> = {
+      left: "right",
+      right: "left",
+      top: "bottom",
+      bottom: "top",
+    };
+    const edgeData = tileManager.getEdgeData(targetTileId, oppositeDir[direction]);
+    if (!edgeData) {
+      console.warn("Failed to get edge data from target tile");
+      return;
+    }
+
+    // Apply to current tile
+    engine.applyConnectedEdgeData(direction, edgeData.heights, edgeData.splats, edgeData.water);
+
+    // Connect tiles in manager
+    tileManager.connectTiles(activeTileId, targetTileId, direction);
+
+    setTileDirty(true);
+    console.log(`[Page] Tiles connected: ${activeTileId} -> ${targetTileId} (${direction})`);
+  }, [engine, activeTileId]);
+
+  // Mark tile dirty when modified
+  useEffect(() => {
+    if (engine) {
+      engine.setOnModified(() => {
+        setModified(true);
+        setTileDirty(true);
+      });
+    }
+  }, [engine, setModified]);
 
   // Handle mesh generated from Claude Code
   const handleMeshGenerated = useCallback((meshData: MeshData) => {
@@ -525,14 +657,28 @@ export default function EditorPage() {
         </div>
 
         {!isGameMode && (
-          <div className="flex flex-col bg-zinc-950">
+          <div className="flex flex-col bg-zinc-950 overflow-y-auto">
             <PropertiesPanel
               onMakeSeamless={handleMakeSeamless}
+              onMakeSeamlessDirection={handleMakeSeamlessDirection}
               dispStrength={dispStrength}
               onDispStrengthChange={handleDispStrengthChange}
               terrainResolution={terrainResolution}
               onTerrainResolutionChange={handleTerrainResolutionChange}
+              tileMode={tileMode}
+              onTileModeChange={handleTileModeChange}
             />
+            <div className="mx-4 h-px bg-zinc-800/50" />
+            {/* Tile Management Panel */}
+            <TilePanel
+              onSaveTile={handleSaveTile}
+              onLoadTile={handleLoadTile}
+              onCreateNewTile={handleCreateNewTile}
+              onConnectSeamless={handleConnectSeamless}
+              activeTileId={activeTileId}
+              isDirty={tileDirty}
+            />
+            <div className="mx-4 h-px bg-zinc-800/50" />
             {/* Placed Asset Panel */}
             <PlacedAssetPanel
               assets={placedAssets}
