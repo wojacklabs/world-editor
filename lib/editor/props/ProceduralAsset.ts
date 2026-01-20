@@ -107,7 +107,6 @@ void main() {
 `;
 
 Effect.ShadersStore["foliageWindFragmentShader"] = `
-#extension GL_OES_standard_derivatives : enable
 precision highp float;
 
 uniform vec3 baseColor;
@@ -238,7 +237,6 @@ void main() {
 `;
 
 Effect.ShadersStore["proceduralAssetFragmentShader"] = `
-#extension GL_OES_standard_derivatives : enable
 precision highp float;
 
 uniform vec3 baseColor;
