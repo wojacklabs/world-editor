@@ -8,6 +8,8 @@ import type {
   ProceduralAssetType,
   ProceduralAssetSettings,
   PendingAsset,
+  DebugVisibility,
+  DebugRenderMode,
 } from "../types/EditorTypes";
 import { DEFAULT_EDITOR_STATE, DEFAULT_ASSET_SETTINGS } from "../types/EditorTypes";
 
@@ -36,6 +38,11 @@ interface EditorStore extends EditorState {
   // View actions
   toggleGrid: () => void;
   toggleWireframe: () => void;
+
+  // Debug visibility actions
+  toggleDebugVisibility: (key: keyof DebugVisibility) => void;
+  setDebugVisibility: (visibility: Partial<DebugVisibility>) => void;
+  setDebugRenderMode: (mode: DebugRenderMode) => void;
 
   // Placement mode
   setPendingAsset: (asset: PendingAsset | null) => void;
@@ -110,6 +117,21 @@ export const useEditorStore = create<EditorStore>((set) => ({
   toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
 
   toggleWireframe: () => set((state) => ({ showWireframe: !state.showWireframe })),
+
+  toggleDebugVisibility: (key) =>
+    set((state) => ({
+      debugVisibility: {
+        ...state.debugVisibility,
+        [key]: !state.debugVisibility[key],
+      },
+    })),
+
+  setDebugVisibility: (visibility) =>
+    set((state) => ({
+      debugVisibility: { ...state.debugVisibility, ...visibility },
+    })),
+
+  setDebugRenderMode: (mode) => set({ debugRenderMode: mode }),
 
   setPendingAsset: (asset) => set({ pendingAsset: asset }),
   clearPendingAsset: () => set({ pendingAsset: null }),

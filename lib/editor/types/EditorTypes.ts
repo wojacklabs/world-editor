@@ -99,6 +99,36 @@ export interface PendingAsset {
   assetType?: ProceduralAssetType;
 }
 
+// Debug visibility settings for troubleshooting rendering issues
+export interface DebugVisibility {
+  water: boolean;
+  foliage: boolean;
+  terrain: boolean;
+  splatMap: boolean;
+}
+
+// Debug render mode for shader visualization
+export type DebugRenderMode =
+  | "normal"           // Normal rendering
+  | "splatmap_raw"     // Show splatmap RGBA as color
+  | "water_mask"       // Show water mask
+  | "grass_weight"     // Show grass channel (R)
+  | "dirt_weight"      // Show dirt channel (G)
+  | "rock_weight"      // Show rock channel (B)
+  | "sand_weight"      // Show sand channel (A)
+  | "normals"          // Show world normals (geometry)
+  | "normals_detail"   // Show normal map detail
+  | "normals_final"    // Show final perturbed normals
+  | "rock_ao"          // Show rock AO texture
+  | "macro_var"        // Show macro variation
+  | "diffuse"          // Show diffuse lighting only
+  | "specular"         // Show specular only
+  | "ao"               // Show ambient occlusion
+  | "base_color"       // Show base color before lighting
+  | "depth"            // Show height as grayscale
+  | "slope"            // Show slope intensity
+  | "uv";              // Show UV coordinates
+
 // Editor state
 export interface EditorState {
   activeTool: ToolType;
@@ -111,6 +141,9 @@ export interface EditorState {
   isModified: boolean;
   showGrid: boolean;
   showWireframe: boolean;
+  // Debug visibility
+  debugVisibility: DebugVisibility;
+  debugRenderMode: DebugRenderMode;
   // Placement mode
   pendingAsset: PendingAsset | null;
 }
@@ -131,6 +164,13 @@ export const DEFAULT_ASSET_SETTINGS: ProceduralAssetSettings = {
   noiseAmplitude: 0.2,
 };
 
+export const DEFAULT_DEBUG_VISIBILITY: DebugVisibility = {
+  water: true,
+  foliage: true,
+  terrain: true,
+  splatMap: true,
+};
+
 export const DEFAULT_EDITOR_STATE: EditorState = {
   activeTool: "heightmap",
   activeHeightmapTool: "raise",
@@ -142,6 +182,8 @@ export const DEFAULT_EDITOR_STATE: EditorState = {
   isModified: false,
   showGrid: true,
   showWireframe: false,
+  debugVisibility: DEFAULT_DEBUG_VISIBILITY,
+  debugRenderMode: "normal",
   pendingAsset: null,
 };
 
