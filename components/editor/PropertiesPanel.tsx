@@ -2,22 +2,32 @@
 
 import { useEditorStore } from "@/lib/editor/store/editorStore";
 
+export type TileMode = "clone" | "mirror";
+
+export type SeamlessDirection = "left" | "right" | "top" | "bottom" | "all";
+
 interface PropertiesPanelProps {
   onMakeSeamless: () => void;
+  onMakeSeamlessDirection?: (direction: SeamlessDirection) => void;
   dispStrength: number;
   onDispStrengthChange: (value: number) => void;
   terrainResolution: number;
   onTerrainResolutionChange: (value: number) => void;
+  tileMode: TileMode;
+  onTileModeChange: (mode: TileMode) => void;
 }
 
 const RESOLUTION_OPTIONS = [128, 256, 512, 1024, 2048, 4096];
 
 export default function PropertiesPanel({
   onMakeSeamless,
+  onMakeSeamlessDirection,
   dispStrength,
   onDispStrengthChange,
   terrainResolution,
   onTerrainResolutionChange,
+  tileMode,
+  onTileModeChange,
 }: PropertiesPanelProps) {
   const {
     activeTool,
@@ -169,8 +179,77 @@ export default function PropertiesPanel({
           onClick={onMakeSeamless}
           className="w-full mt-4 py-2 text-xs text-zinc-400 border border-zinc-800 rounded hover:border-zinc-700 hover:text-zinc-300 transition-colors"
         >
-          Make Seamless
+          Make Seamless (All)
         </button>
+
+        {/* Direction-specific seamless */}
+        {onMakeSeamlessDirection && (
+          <div className="mt-2">
+            <div className="text-[10px] text-zinc-600 mb-1.5">Direction:</div>
+            <div className="grid grid-cols-4 gap-1">
+              <button
+                onClick={() => onMakeSeamlessDirection("left")}
+                className="py-1.5 text-[10px] text-zinc-500 border border-zinc-800 rounded hover:border-zinc-600 hover:text-zinc-300 transition-colors"
+                title="Make left edge seamless"
+              >
+                ←
+              </button>
+              <button
+                onClick={() => onMakeSeamlessDirection("right")}
+                className="py-1.5 text-[10px] text-zinc-500 border border-zinc-800 rounded hover:border-zinc-600 hover:text-zinc-300 transition-colors"
+                title="Make right edge seamless"
+              >
+                →
+              </button>
+              <button
+                onClick={() => onMakeSeamlessDirection("top")}
+                className="py-1.5 text-[10px] text-zinc-500 border border-zinc-800 rounded hover:border-zinc-600 hover:text-zinc-300 transition-colors"
+                title="Make top edge seamless"
+              >
+                ↑
+              </button>
+              <button
+                onClick={() => onMakeSeamlessDirection("bottom")}
+                className="py-1.5 text-[10px] text-zinc-500 border border-zinc-800 rounded hover:border-zinc-600 hover:text-zinc-300 transition-colors"
+                title="Make bottom edge seamless"
+              >
+                ↓
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Tile Mode for Game Preview */}
+        <div className="mt-4">
+          <div className="flex justify-between items-baseline mb-2">
+            <span className="text-xs text-zinc-500">Tile Mode</span>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => onTileModeChange("mirror")}
+              className={`flex-1 py-1.5 text-xs rounded transition-all ${
+                tileMode === "mirror"
+                  ? "bg-zinc-700 text-zinc-200"
+                  : "text-zinc-500 border border-zinc-800 hover:text-zinc-300 hover:border-zinc-700"
+              }`}
+            >
+              Mirror
+            </button>
+            <button
+              onClick={() => onTileModeChange("clone")}
+              className={`flex-1 py-1.5 text-xs rounded transition-all ${
+                tileMode === "clone"
+                  ? "bg-zinc-700 text-zinc-200"
+                  : "text-zinc-500 border border-zinc-800 hover:text-zinc-300 hover:border-zinc-700"
+              }`}
+            >
+              Clone
+            </button>
+          </div>
+          <p className="mt-1.5 text-[10px] text-zinc-600">
+            {tileMode === "mirror" ? "Symmetric tiles for seamless water" : "Simple tile repetition"}
+          </p>
+        </div>
       </section>
 
       <div className="mx-4 h-px bg-zinc-800/50" />
