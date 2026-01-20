@@ -7,19 +7,19 @@ import {
   Color3,
   Texture,
 } from "@babylonjs/core";
-import { WaterMaterial } from "@babylonjs/materials";
 import { Heightmap } from "./Heightmap";
 import { TerrainMesh } from "./TerrainMesh";
+import { WaterSystem, WaterConfig, DEFAULT_WATER_CONFIG } from "./WaterShader";
 
 export class BiomeDecorator {
   private scene: Scene;
   private heightmap: Heightmap;
   private terrainMesh: TerrainMesh;
 
-  // Water
-  private waterMesh: Mesh | null = null;
-  private waterMaterial: WaterMaterial | null = null;
-  private waterLevel: number = 0;
+  // Water (Enterprise-grade water system)
+  private waterSystem: WaterSystem | null = null;
+  private waterLevel: number = -100;  // Default below terrain, synced with EditorEngine.seaLevel
+  private useFixedSeaLevel: boolean = false;  // If true, use waterLevel directly instead of calculating
 
   constructor(scene: Scene, heightmap: Heightmap, terrainMesh: TerrainMesh) {
     this.scene = scene;
@@ -116,86 +116,54 @@ export class BiomeDecorator {
   }
 
   /**
-   * Water biome: WaterMaterial on water regions
-   * Following official Babylon.js WaterMaterial documentation
+   * Water biome: Enterprise-grade water with Gerstner waves
+   * Features: Fresnel, depth-based transparency, foam, realistic waves
    */
   private buildWater(): void {
     // Collect water positions from dedicated water mask
     const validPositions = this.collectWaterPositions(0.3);
-    
+
     if (validPositions.length < 4) {
       return;
     }
 
     // Calculate bounding box of water region
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    let totalHeight = 0;
-    let minHeight = Infinity;
 
     for (const pos of validPositions) {
       minX = Math.min(minX, pos.x);
       maxX = Math.max(maxX, pos.x);
       minZ = Math.min(minZ, pos.z);
       maxZ = Math.max(maxZ, pos.z);
-      const h = this.heightmap.getInterpolatedHeight(pos.x, pos.z);
-      totalHeight += h;
-      minHeight = Math.min(minHeight, h);
     }
 
-    // Water level: above the average terrain height in the painted region
-    const avgHeight = totalHeight / validPositions.length;
-    this.waterLevel = avgHeight + 0.5;  // Water sits above the terrain
+    // Use fixed sea level (set by EditorEngine)
+    // The terrain has been carved by carveWaterBasin, so water sits at seaLevel
+    // and terrain goes below it
 
-    // Create water plane matching the painted area closely
-    const padding = 0.5; // Small padding around painted area
-    const waterWidth = Math.max(maxX - minX + padding * 2, 2);
-    const waterDepth = Math.max(maxZ - minZ + padding * 2, 2);
+    // Create water plane matching the painted area with generous padding
+    // The padding ensures water extends beyond the painted area for smooth edges
+    const padding = 3.0;
+    const waterWidth = Math.max(maxX - minX + padding * 2, 4);
+    const waterDepth = Math.max(maxZ - minZ + padding * 2, 4);
     const centerX = (minX + maxX) / 2;
     const centerZ = (minZ + maxZ) / 2;
 
-    // Create a simple flat ground for water (as per Babylon.js docs)
-    this.waterMesh = MeshBuilder.CreateGround(
-      "waterMesh",
-      {
-        width: waterWidth,
-        height: waterDepth,
-        subdivisions: 32,  // Smooth subdivisions for wave effect
-      },
-      this.scene
-    );
-
-    this.waterMesh.position.set(centerX, this.waterLevel, centerZ);
-
-    // Create WaterMaterial following official documentation
-    // Reference: https://doc.babylonjs.com/toolsAndResources/assetLibraries/materialsLibrary/waterMat/
-    this.waterMaterial = new WaterMaterial("waterMaterial", this.scene, new Vector2(512, 512));
-    
-    // Bump texture is required for water to render properly
-    this.waterMaterial.bumpTexture = new Texture("/textures/waterbump.png", this.scene);
-    
-    // Water appearance settings - gentler waves
-    this.waterMaterial.windForce = -5;         // Reduced wind strength
-    this.waterMaterial.waveHeight = 0.1;       // Lower wave amplitude (was 0.5)
-    this.waterMaterial.bumpHeight = 0.1;       // Bump intensity
-    this.waterMaterial.waveLength = 0.1;       // Lower wave frequency
-    this.waterMaterial.windDirection = new Vector2(1.0, 1.0);
-    
-    // Water color
-    this.waterMaterial.waterColor = new Color3(0.1, 0.3, 0.5);
-    this.waterMaterial.waterColor2 = new Color3(0.1, 0.3, 0.5);
-    this.waterMaterial.colorBlendFactor = 0.3;
-    
-    // Transparency and blending
-    this.waterMaterial.alpha = 0.9;
-    this.waterMaterial.backFaceCulling = true;
-
-    // Add meshes to render list for reflections/refractions
-    const terrainMesh = this.terrainMesh.getMesh();
-    if (terrainMesh) {
-      this.waterMaterial.addToRenderList(terrainMesh);
+    // Initialize water system if needed
+    if (!this.waterSystem) {
+      this.waterSystem = new WaterSystem(this.scene, this.heightmap);
     }
 
-    this.waterMesh.material = this.waterMaterial;
+    // Create water with the fixed sea level
+    this.waterSystem.createWater(
+      centerX,
+      centerZ,
+      waterWidth,
+      waterDepth,
+      this.waterLevel  // Use the seaLevel set by EditorEngine
+    );
+
+    console.log(`[BiomeDecorator] Water created at level ${this.waterLevel}, size: ${waterWidth}x${waterDepth}`);
   }
 
   /**
@@ -203,8 +171,8 @@ export class BiomeDecorator {
    */
   setWaterLevel(level: number): void {
     this.waterLevel = level;
-    if (this.waterMesh) {
-      this.waterMesh.position.y = level;
+    if (this.waterSystem) {
+      this.waterSystem.setWaterLevel(level);
     }
   }
 
@@ -213,16 +181,28 @@ export class BiomeDecorator {
   }
 
   /**
-   * Dispose water mesh and material
+   * Get the water system for external access
+   */
+  getWaterSystem(): WaterSystem | null {
+    return this.waterSystem;
+  }
+
+  /**
+   * Set visibility of all biome decorations (for debugging)
+   * Note: Water visibility is handled separately via setWaterVisible
+   */
+  setVisible(visible: boolean): void {
+    // Currently BiomeDecorator doesn't create visible meshes other than water
+    // Water is controlled separately via EditorEngine.setWaterVisible
+    // This method is for future decoration meshes (grass clumps, etc.)
+  }
+
+  /**
+   * Dispose water system
    */
   private disposeDecorations(): void {
-    if (this.waterMesh) {
-      this.waterMesh.dispose();
-      this.waterMesh = null;
-    }
-    if (this.waterMaterial) {
-      this.waterMaterial.dispose();
-      this.waterMaterial = null;
+    if (this.waterSystem) {
+      this.waterSystem.dispose();
     }
   }
 
@@ -231,5 +211,9 @@ export class BiomeDecorator {
    */
   dispose(): void {
     this.disposeDecorations();
+    if (this.waterSystem) {
+      this.waterSystem.disposeAll();
+      this.waterSystem = null;
+    }
   }
 }
