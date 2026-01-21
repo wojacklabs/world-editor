@@ -1319,6 +1319,9 @@ export class EditorEngine {
   enterGameMode(): void {
     if (this.isGameMode || !this.heightmap || !this.terrainMesh) return;
 
+    // Disable terrain LOD FIRST so getMesh() returns the full resolution mesh
+    this.terrainMesh.setLODEnabled(false);
+
     const mesh = this.terrainMesh.getMesh();
     if (!mesh) return;
 
@@ -1343,9 +1346,6 @@ export class EditorEngine {
     );
     this.gamePreview.enable(mesh);
 
-    // Enable debug visualization for tile boundaries
-    this.gamePreview.setDebugEnabled(true);
-
     this.isGameMode = true;
     this.onGameModeChange?.(true);
   }
@@ -1357,6 +1357,11 @@ export class EditorEngine {
     if (this.gamePreview) {
       this.gamePreview.disable();
       this.gamePreview = null;
+    }
+
+    // Re-enable terrain LOD
+    if (this.terrainMesh) {
+      this.terrainMesh.setLODEnabled(true);
     }
 
     // Restore editor camera

@@ -1,19 +1,14 @@
 import {
   Scene,
-  UniversalCamera,
   Vector3,
   Mesh,
   MeshBuilder,
   StandardMaterial,
+  ShaderMaterial,
   Color3,
   Color4,
-  HemisphericLight,
-  DirectionalLight,
   FreeCamera,
   KeyboardEventTypes,
-  PointerEventTypes,
-  LinesMesh,
-  DynamicTexture,
 } from "@babylonjs/core";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
@@ -57,11 +52,6 @@ export class GamePreview {
   private keyboardObserver: any = null;
   private updateBound: (() => void) | null = null;
 
-  // Debug visualization
-  private debugEnabled: boolean = false;
-  private debugMeshes: Mesh[] = [];
-  private debugLines: LinesMesh[] = [];
-
   constructor(
     scene: Scene,
     heightmap: Heightmap,
@@ -89,11 +79,28 @@ export class GamePreview {
   enable(terrainMesh: Mesh): void {
     this.originalMesh = terrainMesh;
 
+    // Note: Terrain LOD is disabled by EditorEngine before calling enable()
+    // to ensure we get the full resolution mesh for cloning
+
     // Create 3x3 tile grid for terrain
     this.createTileGrid();
 
     // Extend foliage to cover all tiles
     this.extendFoliage();
+
+    // Adjust foliage LOD distances for game mode
+    // Use smaller distances for performance - foliage fades into fog
+    const size = this.heightmap.getScale();
+    if (this.foliageSystem) {
+      this.foliageSystem.setLODDistances(
+        size * 0.25,  // near: 25% of terrain size (full detail)
+        size * 0.35,  // mid: 35% of terrain size (reduced)
+        size * 0.5    // far: 50% of terrain size (culled)
+      );
+      // Force initial visibility update
+      const startPos = new Vector3(size / 2, 0, size / 2);
+      this.foliageSystem.updateVisibility(startPos);
+    }
 
     // Create unified water plane
     this.createUnifiedWater();
@@ -104,13 +111,30 @@ export class GamePreview {
     // Setup input
     this.setupInput();
 
-    // Change scene background for game feel
-    this.scene.clearColor = new Color4(0.4, 0.6, 0.9, 1); // Sky blue
+    // Change scene background for game feel - sky/horizon color
+    const skyColor = new Color3(0.55, 0.7, 0.9);  // Soft sky blue
+    this.scene.clearColor = new Color4(skyColor.r, skyColor.g, skyColor.b, 1);
 
-    // Add fog for depth
+    // Atmospheric fog - blends objects into the sky at distance
+    // Using same color as sky creates natural depth effect
+    const fogDensity = 0.015;  // Higher density for visible fog effect
     this.scene.fogMode = Scene.FOGMODE_EXP2;
-    this.scene.fogDensity = 0.005;
-    this.scene.fogColor = new Color3(0.6, 0.7, 0.85);
+    this.scene.fogDensity = fogDensity;
+    this.scene.fogColor = skyColor;
+
+    // Sync terrain shader fog with scene fog (same color = seamless blend)
+    if (this.terrainMeshRef) {
+      const material = this.terrainMeshRef.getMaterial() as ShaderMaterial | null;
+      if (material && material.setFloat && material.setColor3) {
+        material.setFloat("uFogDensity", fogDensity);
+        material.setColor3("uFogColor", skyColor);
+      }
+    }
+
+    // Sync foliage system fog with scene fog for consistent blending
+    if (this.foliageSystem) {
+      this.foliageSystem.syncFogSettings(skyColor, fogDensity);
+    }
 
     // Register update loop
     this.updateBound = this.update.bind(this);
@@ -145,8 +169,25 @@ export class GamePreview {
       this.updateBound = null;
     }
 
-    // Restore original foliage matrices
+    // Restore original foliage matrices and LOD distances
     this.restoreFoliage();
+    if (this.foliageSystem) {
+      this.foliageSystem.setLODDistances(30, 60, 100);
+
+      // Reset fog to editor defaults (minimal fog in editor mode)
+      this.foliageSystem.syncFogSettings(new Color3(0.6, 0.75, 0.9), 0.008);
+    }
+
+    // Re-enable terrain LOD and restore shader fog settings
+    if (this.terrainMeshRef) {
+      this.terrainMeshRef.setLODEnabled(true);
+      const material = this.terrainMeshRef.getMaterial() as ShaderMaterial | null;
+      if (material && material.setFloat && material.setColor3) {
+        // Restore original fog values from TerrainShader.ts
+        material.setFloat("uFogDensity", 0.008);
+        material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+      }
+    }
 
     // Remove unified water and restore original
     if (this.unifiedWater) {
@@ -200,9 +241,6 @@ export class GamePreview {
     // Reset input state
     this.inputMap = {};
     this.canvas = null;
-
-    // Dispose debug visualization
-    this.disposeDebugVisualization();
   }
 
   private createTileGrid(): void {
@@ -279,26 +317,28 @@ export class GamePreview {
         clone.scaling = new Vector3(scaleX, 1, scaleZ);
 
         // Position calculation:
-        // For mirrored tiles, the pivot point is at (0,0) so we need to offset
-        // After mirroring with scaling, the mesh flips around its origin
-        // We need to position it so the mirrored edge touches the original edge
-
-        // For X mirror: tile at x=-1 should have its right edge touch original's left edge
-        // Mirroring flips the mesh, so position needs adjustment
+        // When scaling is -1, the mesh flips around its local origin (0,0)
+        // Original mesh spans (0,0) to (size,size)
+        // After scaling.x=-1: mesh spans (0,0) to (-size,size) in local coords
+        // We need to position it so edges align with the original tile
         let posX: number;
         let posZ: number;
 
         if (mirrorX) {
-          // X-mirrored: position at boundary, mesh extends away
-          posX = tx < 0 ? 0 : size;
+          // X-mirrored: mesh flips around x=0
+          // tx < 0: want tile at x=-size to x=0, so position.x = 0
+          // tx > 0: want tile at x=size to x=2*size, so position.x = 2*size
+          posX = tx < 0 ? 0 : size * 2;
         } else {
           // Not X-mirrored: normal positioning
           posX = tx * size;
         }
 
         if (mirrorZ) {
-          // Z-mirrored: position at boundary
-          posZ = tz < 0 ? 0 : size;
+          // Z-mirrored: mesh flips around z=0
+          // tz < 0: want tile at z=-size to z=0, so position.z = 0
+          // tz > 0: want tile at z=size to z=2*size, so position.z = 2*size
+          posZ = tz < 0 ? 0 : size * 2;
         } else {
           // Not Z-mirrored: normal positioning
           posZ = tz * size;
@@ -698,12 +738,12 @@ export class GamePreview {
     this.camera.position.y += moveDir.y * speed * deltaTime;
     this.camera.position.z += moveDir.z * speed * deltaTime;
 
-    // Wrap position for infinite world feel
-    const wrapMargin = size * 1.5;
-    if (this.camera.position.x > wrapMargin) this.camera.position.x -= size;
-    if (this.camera.position.x < -wrapMargin + size) this.camera.position.x += size;
-    if (this.camera.position.z > wrapMargin) this.camera.position.z -= size;
-    if (this.camera.position.z < -wrapMargin + size) this.camera.position.z += size;
+    // Keep camera within 3x3 tile bounds (-size to 2*size)
+    // No sudden jumps - just clamp to valid range
+    const minBound = -size * 0.5;
+    const maxBound = size * 1.5;
+    this.camera.position.x = Math.max(minBound, Math.min(maxBound, this.camera.position.x));
+    this.camera.position.z = Math.max(minBound, Math.min(maxBound, this.camera.position.z));
 
     // Prevent going below ground
     let checkX = this.camera.position.x % size;
@@ -717,198 +757,21 @@ export class GamePreview {
     if (this.camera.position.y < minY) {
       this.camera.position.y = minY;
     }
+
+    // Update foliage visibility based on camera position (LOD culling)
+    if (this.foliageSystem) {
+      this.foliageSystem.updateVisibility(this.camera.position);
+
+      // Update camera position for fog calculation in grass shader
+      this.foliageSystem.updateCameraPosition(this.camera.position);
+
+      // Update time for wind animation
+      const time = performance.now() / 1000;
+      this.foliageSystem.updateTime(time);
+    }
   };
 
   getCamera(): FreeCamera | null {
     return this.camera;
-  }
-
-  /**
-   * Enable or disable debug visualization for tile boundaries
-   */
-  setDebugEnabled(enabled: boolean): void {
-    this.debugEnabled = enabled;
-    if (enabled) {
-      this.createDebugVisualization();
-    } else {
-      this.disposeDebugVisualization();
-    }
-  }
-
-  /**
-   * Create debug visualization showing tile boundaries, heights, and materials
-   */
-  private createDebugVisualization(): void {
-    this.disposeDebugVisualization();
-
-    const size = this.heightmap.getScale();
-    const sampleCount = 16; // Number of sample points per edge
-
-    // Get splat map for material info
-    const splatMap = this.terrainMeshRef?.getSplatMap();
-
-    // Material colors for visualization
-    const biomeColors = [
-      new Color3(0.2, 0.8, 0.2), // grass - green
-      new Color3(0.6, 0.4, 0.2), // dirt - brown
-      new Color3(0.5, 0.5, 0.5), // rock - gray
-      new Color3(0.9, 0.85, 0.6), // sand - tan
-    ];
-    const waterColor = new Color3(0.2, 0.5, 0.9);
-
-    // Create boundary lines for the center tile (original)
-    const boundaryMat = new StandardMaterial("debug_boundary_mat", this.scene);
-    boundaryMat.emissiveColor = new Color3(1, 1, 0);
-    boundaryMat.disableLighting = true;
-
-    // Log edge data to console
-    console.log("=== TILE BOUNDARY DEBUG INFO ===");
-
-    // Sample and visualize each edge
-    const edges = [
-      { name: "LEFT (X=0)", getPos: (t: number) => ({ x: 0, z: t * size }) },
-      { name: "RIGHT (X=max)", getPos: (t: number) => ({ x: size, z: t * size }) },
-      { name: "TOP (Z=0)", getPos: (t: number) => ({ x: t * size, z: 0 }) },
-      { name: "BOTTOM (Z=max)", getPos: (t: number) => ({ x: t * size, z: size }) },
-    ];
-
-    for (const edge of edges) {
-      console.log(`\n--- ${edge.name} ---`);
-      const heights: number[] = [];
-      const materials: string[] = [];
-
-      for (let i = 0; i <= sampleCount; i++) {
-        const t = i / sampleCount;
-        const pos = edge.getPos(t);
-
-        // Get height
-        const height = this.heightmap.getInterpolatedHeight(
-          Math.min(pos.x, size - 0.01),
-          Math.min(pos.z, size - 0.01)
-        );
-        heights.push(height);
-
-        // Get material info
-        if (splatMap) {
-          const sRes = splatMap.getResolution();
-          const sx = Math.floor((pos.x / size) * (sRes - 1));
-          const sz = Math.floor((pos.z / size) * (sRes - 1));
-          const weights = splatMap.getWeights(
-            Math.min(sx, sRes - 1),
-            Math.min(sz, sRes - 1)
-          );
-          const waterWeight = splatMap.getWaterWeight(
-            Math.min(sx, sRes - 1),
-            Math.min(sz, sRes - 1)
-          );
-
-          // Find dominant material
-          let maxWeight = 0;
-          let dominantIdx = 0;
-          const matNames = ["grass", "dirt", "rock", "sand"];
-          for (let c = 0; c < 4; c++) {
-            if (weights[c] > maxWeight) {
-              maxWeight = weights[c];
-              dominantIdx = c;
-            }
-          }
-          const matName = waterWeight > 0.3 ? "WATER" : matNames[dominantIdx];
-          materials.push(matName);
-
-          // Create debug sphere at sample point
-          const sphereColor = waterWeight > 0.3 ? waterColor : biomeColors[dominantIdx];
-          const sphere = MeshBuilder.CreateSphere(
-            `debug_sphere_${edge.name}_${i}`,
-            { diameter: 0.5 },
-            this.scene
-          );
-          sphere.position = new Vector3(pos.x, height + 0.5, pos.z);
-
-          const sphereMat = new StandardMaterial(`debug_mat_${edge.name}_${i}`, this.scene);
-          sphereMat.emissiveColor = sphereColor;
-          sphereMat.disableLighting = true;
-          sphere.material = sphereMat;
-
-          this.debugMeshes.push(sphere);
-        }
-      }
-
-      // Log edge data
-      console.log(`Heights: min=${Math.min(...heights).toFixed(2)}, max=${Math.max(...heights).toFixed(2)}`);
-      console.log(`Materials: ${[...new Set(materials)].join(", ")}`);
-
-      // Check if edges match (for seamless tiling)
-      if (edge.name.includes("LEFT") || edge.name.includes("RIGHT")) {
-        // Compare left and right
-      }
-    }
-
-    // Create edge comparison
-    console.log("\n=== EDGE COMPARISON ===");
-
-    // Compare LEFT vs RIGHT edges
-    let leftRightMatch = true;
-    let topBottomMatch = true;
-
-    for (let i = 0; i <= sampleCount; i++) {
-      const t = i / sampleCount;
-      const z = t * size;
-      const x_t = t * size;
-
-      // Left vs Right
-      const leftH = this.heightmap.getInterpolatedHeight(0, z);
-      const rightH = this.heightmap.getInterpolatedHeight(size - 0.01, z);
-      if (Math.abs(leftH - rightH) > 0.5) {
-        leftRightMatch = false;
-      }
-
-      // Top vs Bottom
-      const topH = this.heightmap.getInterpolatedHeight(x_t, 0);
-      const bottomH = this.heightmap.getInterpolatedHeight(x_t, size - 0.01);
-      if (Math.abs(topH - bottomH) > 0.5) {
-        topBottomMatch = false;
-      }
-    }
-
-    console.log(`LEFT-RIGHT edges match: ${leftRightMatch ? "YES" : "NO (height mismatch!)"}`);
-    console.log(`TOP-BOTTOM edges match: ${topBottomMatch ? "YES" : "NO (height mismatch!)"}`);
-
-    // Create boundary lines
-    const lineHeight = this.heightmap.getInterpolatedHeight(size / 2, size / 2) + 10;
-    const linePoints = [
-      // Original tile boundaries
-      [new Vector3(0, lineHeight, 0), new Vector3(size, lineHeight, 0)],
-      [new Vector3(size, lineHeight, 0), new Vector3(size, lineHeight, size)],
-      [new Vector3(size, lineHeight, size), new Vector3(0, lineHeight, size)],
-      [new Vector3(0, lineHeight, size), new Vector3(0, lineHeight, 0)],
-    ];
-
-    for (let i = 0; i < linePoints.length; i++) {
-      const line = MeshBuilder.CreateLines(
-        `debug_line_${i}`,
-        { points: linePoints[i] },
-        this.scene
-      );
-      line.color = new Color3(1, 1, 0);
-      this.debugLines.push(line);
-    }
-
-    console.log("=== DEBUG VISUALIZATION CREATED ===");
-  }
-
-  /**
-   * Dispose all debug visualization meshes
-   */
-  private disposeDebugVisualization(): void {
-    for (const mesh of this.debugMeshes) {
-      mesh.material?.dispose();
-      mesh.dispose();
-    }
-    this.debugMeshes = [];
-
-    for (const line of this.debugLines) {
-      line.dispose();
-    }
-    this.debugLines = [];
   }
 }

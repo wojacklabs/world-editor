@@ -111,7 +111,7 @@ interface FoliageChunk {
   visible: boolean;
 }
 
-// Register grass blade shader
+// Register grass blade shader with fog and LOD fade support
 Effect.ShadersStore["grassVertexShader"] = `
 precision highp float;
 
@@ -122,26 +122,31 @@ attribute vec4 color;
 uniform mat4 viewProjection;
 uniform float uTime;
 uniform float uWindStrength;
+uniform vec3 uCameraPosition;
 
 varying vec3 vNormal;
 varying vec4 vColor;
 varying float vHeight;
+varying float vCameraDistance;
 
 void main() {
     // Get instance matrix
     mat4 worldMatrix = world;
-    
+
     vec4 worldPos = worldMatrix * vec4(position, 1.0);
     vHeight = position.y;
-    
+
+    // Calculate camera distance for fog and LOD fade
+    vCameraDistance = length(worldPos.xyz - uCameraPosition);
+
     // Wind animation - affects top of grass more
     float windFactor = position.y * uWindStrength;
     float windX = sin(uTime * 2.0 + worldPos.x * 0.5 + worldPos.z * 0.3) * windFactor;
     float windZ = cos(uTime * 1.5 + worldPos.x * 0.3 + worldPos.z * 0.5) * windFactor * 0.5;
-    
+
     worldPos.x += windX;
     worldPos.z += windZ;
-    
+
     gl_Position = viewProjection * worldPos;
     vNormal = normalize(mat3(worldMatrix) * normal);
     vColor = color;
@@ -154,25 +159,46 @@ precision highp float;
 varying vec3 vNormal;
 varying vec4 vColor;
 varying float vHeight;
+varying float vCameraDistance;
 
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform float uAmbient;
 
+// Fog uniforms
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+
+// LOD fade uniforms
+uniform float uLodFar;
+
 void main() {
     vec3 normal = normalize(vNormal);
     float NdotL = max(dot(normal, uSunDirection), 0.0);
     float diffuse = NdotL * 0.6 + 0.4;
-    
+
     // Darken base, lighten tips
     float heightGradient = mix(0.7, 1.1, vHeight);
-    
+
     vec3 color = vColor.rgb * heightGradient * (uAmbient + diffuse * uSunColor);
-    
+
+    // Apply exponential squared fog (same as scene fog)
+    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * vCameraDistance * vCameraDistance);
+    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    color = mix(color, uFogColor, fogFactor);
+
+    // Distance-based alpha fade for smooth LOD transition
+    // Fade starts at 70% of far distance, fully faded at far
+    float fadeStart = uLodFar * 0.7;
+    float alpha = 1.0 - smoothstep(fadeStart, uLodFar, vCameraDistance);
+
     // Simple alpha test for grass edges
     if (vColor.a < 0.1) discard;
-    
-    gl_FragColor = vec4(color, 1.0);
+
+    // Discard fully faded fragments
+    if (alpha < 0.01) discard;
+
+    gl_FragColor = vec4(color, alpha);
 }
 `;
 
@@ -667,27 +693,113 @@ export class FoliageSystem {
    * Create materials for foliage
    */
   private createMaterials(): void {
-    // Standard material for rocks
+    // Standard material for rocks (uses scene fog automatically)
     this.rockMaterial = new StandardMaterial("foliage_rock_mat", this.scene);
     this.rockMaterial.diffuseColor = new Color3(0.5, 0.48, 0.45);
     this.rockMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
     this.rockMaterial.backFaceCulling = false;
-    
+
     // Apply to rock meshes
     const rockBase = this.baseMeshes.get("rock");
     if (rockBase) rockBase.material = this.rockMaterial;
-    
+
     const pebbleBase = this.baseMeshes.get("pebble");
     if (pebbleBase) pebbleBase.material = this.rockMaterial;
 
-    // Standard material for grass (shader can be added later for wind)
-    const grassMaterial = new StandardMaterial("foliage_grass_mat", this.scene);
-    grassMaterial.diffuseColor = new Color3(0.35, 0.55, 0.2);
-    grassMaterial.specularColor = new Color3(0.05, 0.05, 0.05);
-    grassMaterial.backFaceCulling = false;
-    
+    // Shader material for grass with fog and LOD fade support
+    this.grassMaterial = new ShaderMaterial(
+      "foliage_grass_mat",
+      this.scene,
+      {
+        vertex: "grass",
+        fragment: "grass",
+      },
+      {
+        attributes: ["position", "normal", "color"],
+        uniforms: [
+          "world",
+          "viewProjection",
+          "uTime",
+          "uWindStrength",
+          "uCameraPosition",
+          "uSunDirection",
+          "uSunColor",
+          "uAmbient",
+          "uFogColor",
+          "uFogDensity",
+          "uLodFar",
+        ],
+        needAlphaBlending: true,
+      }
+    );
+
+    // Set default uniform values
+    this.grassMaterial.setFloat("uTime", 0);
+    this.grassMaterial.setFloat("uWindStrength", 0.15);
+    this.grassMaterial.setVector3("uCameraPosition", new Vector3(0, 0, 0));
+    this.grassMaterial.setVector3("uSunDirection", new Vector3(0.5, 1, 0.5).normalize());
+    this.grassMaterial.setColor3("uSunColor", new Color3(1, 0.95, 0.8));
+    this.grassMaterial.setFloat("uAmbient", 0.4);
+
+    // Default fog values (will be synced with scene fog when game mode is enabled)
+    this.grassMaterial.setColor3("uFogColor", new Color3(0.55, 0.7, 0.9));
+    this.grassMaterial.setFloat("uFogDensity", 0.015);
+
+    // LOD far distance
+    this.grassMaterial.setFloat("uLodFar", this.lodDistances.far);
+
+    // Enable transparency for alpha fade
+    this.grassMaterial.backFaceCulling = false;
+    this.grassMaterial.alphaMode = 2; // ALPHA_COMBINE
+
     const grassBase = this.baseMeshes.get("grass");
-    if (grassBase) grassBase.material = grassMaterial;
+    if (grassBase) grassBase.material = this.grassMaterial;
+
+    // Also apply to grass variations
+    for (const mesh of this.grassVariations) {
+      mesh.material = this.grassMaterial;
+    }
+  }
+
+  /**
+   * Sync fog settings with scene fog for consistent appearance
+   * Call this when entering game mode or when scene fog changes
+   */
+  syncFogSettings(fogColor: Color3, fogDensity: number): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setColor3("uFogColor", fogColor);
+      this.grassMaterial.setFloat("uFogDensity", fogDensity);
+    }
+
+    // StandardMaterial uses scene fog automatically, no need to set manually
+  }
+
+  /**
+   * Update camera position for fog calculation in shaders
+   * Call this every frame when in game mode
+   */
+  updateCameraPosition(cameraPosition: Vector3): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setVector3("uCameraPosition", cameraPosition);
+    }
+  }
+
+  /**
+   * Update time uniform for wind animation
+   */
+  updateTime(time: number): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setFloat("uTime", time);
+    }
+  }
+
+  /**
+   * Update LOD far distance in shader for alpha fade
+   */
+  private updateShaderLodDistance(): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setFloat("uLodFar", this.lodDistances.far);
+    }
   }
 
   /**
@@ -1189,20 +1301,27 @@ export class FoliageSystem {
 
   /**
    * Update foliage visibility based on camera position
+   * Supports infinite terrain by wrapping camera position to terrain bounds
    */
   updateVisibility(cameraPosition: Vector3): void {
+    // Wrap camera position to terrain bounds for infinite terrain support
+    let camX = cameraPosition.x % this.terrainScale;
+    let camZ = cameraPosition.z % this.terrainScale;
+    if (camX < 0) camX += this.terrainScale;
+    if (camZ < 0) camZ += this.terrainScale;
+
     for (const [key, chunk] of this.chunks) {
       const chunkCenterX = (chunk.x + 0.5) * this.chunkSize;
       const chunkCenterZ = (chunk.z + 0.5) * this.chunkSize;
-      
+
       const distance = Math.sqrt(
-        Math.pow(cameraPosition.x - chunkCenterX, 2) +
-        Math.pow(cameraPosition.z - chunkCenterZ, 2)
+        Math.pow(camX - chunkCenterX, 2) +
+        Math.pow(camZ - chunkCenterZ, 2)
       );
-      
+
       // Simple distance-based visibility
       const visible = distance < this.lodDistances.far;
-      
+
       if (chunk.visible !== visible) {
         chunk.visible = visible;
         for (const mesh of chunk.mesh.values()) {
@@ -1248,6 +1367,9 @@ export class FoliageSystem {
     this.lodDistances.near = near;
     this.lodDistances.mid = mid;
     this.lodDistances.far = far;
+
+    // Update shader uniform for alpha fade
+    this.updateShaderLodDistance();
   }
 
   /**
