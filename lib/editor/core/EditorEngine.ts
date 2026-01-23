@@ -4664,6 +4664,11 @@ export class EditorEngine {
       // Create default tile (mirrored or flat grass)
       this.createDefaultGrassTilePreview(tile.gridX, tile.gridY, tileSize);
     }
+
+    // Load foliage for Near LOD cells only
+    if (lod === StreamingLOD.Near && this.foliageSystem) {
+      this.foliageSystem.generateCell(cellX, cellZ);
+    }
   }
 
   /**
@@ -4723,6 +4728,11 @@ export class EditorEngine {
 
     // Clear editable tile data
     this.editableTileData.delete(tileKey);
+
+    // Unload foliage cell
+    if (this.foliageSystem) {
+      this.foliageSystem.unloadCell(cellX, cellZ);
+    }
   }
 
   /**
@@ -4736,10 +4746,20 @@ export class EditorEngine {
 
     console.log(`[EditorEngine] Streaming update LOD cell (${cellX},${cellZ}) -> tile (${tile.gridX},${tile.gridY}), LOD=${StreamingLOD[lod]}`);
 
-    // TODO: Phase 3 - implement LOD-based foliage density
-    // Near: full density foliage
-    // Mid: reduced density or impostor
-    // Far: no foliage or impostor only
+    // LOD-based foliage management
+    if (this.foliageSystem) {
+      if (lod === StreamingLOD.Near) {
+        // Load foliage for Near cells
+        if (!this.foliageSystem.isCellLoaded(cellX, cellZ)) {
+          this.foliageSystem.generateCell(cellX, cellZ);
+        }
+      } else {
+        // Unload foliage for Mid/Far cells (save memory)
+        if (this.foliageSystem.isCellLoaded(cellX, cellZ)) {
+          this.foliageSystem.unloadCell(cellX, cellZ);
+        }
+      }
+    }
   }
 
   /**

@@ -327,6 +327,10 @@ export class FoliageSystem {
   // Chunk management
   private chunkSize = 16;  // 16x16 world units per chunk
   private chunks: Map<string, FoliageChunk> = new Map();
+
+  // Cell management for streaming (cells contain multiple chunks)
+  private cellSize = 64;  // 64x64 world units per cell (matches StreamingManager)
+  private loadedCells: Set<string> = new Set();  // Track which cells are loaded
   
   // Base meshes for thin instances
   private baseMeshes: Map<string, Mesh> = new Map();
@@ -1878,11 +1882,157 @@ export class FoliageSystem {
     }
   }
 
+  // ============================================
+  // Cell-based Streaming
+  // ============================================
+
+  /**
+   * Set the cell size (should match StreamingManager)
+   */
+  setCellSize(size: number): void {
+    this.cellSize = size;
+    console.log(`[FoliageSystem] Cell size set to ${size}`);
+  }
+
+  /**
+   * Get cell size
+   */
+  getCellSize(): number {
+    return this.cellSize;
+  }
+
+  /**
+   * Get chunk coordinates that belong to a cell
+   * A cell contains (cellSize / chunkSize)^2 chunks
+   */
+  private getChunksInCell(cellX: number, cellZ: number): Array<{ chunkX: number; chunkZ: number }> {
+    const chunksPerCellEdge = Math.ceil(this.cellSize / this.chunkSize);
+    const result: Array<{ chunkX: number; chunkZ: number }> = [];
+
+    // Cell world bounds
+    const cellWorldStartX = cellX * this.cellSize;
+    const cellWorldStartZ = cellZ * this.cellSize;
+
+    // Convert to chunk coordinates
+    const startChunkX = Math.floor(cellWorldStartX / this.chunkSize);
+    const startChunkZ = Math.floor(cellWorldStartZ / this.chunkSize);
+
+    for (let dx = 0; dx < chunksPerCellEdge; dx++) {
+      for (let dz = 0; dz < chunksPerCellEdge; dz++) {
+        result.push({
+          chunkX: startChunkX + dx,
+          chunkZ: startChunkZ + dz,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Generate foliage for a specific cell
+   * This generates all chunks that belong to the cell
+   */
+  generateCell(cellX: number, cellZ: number): void {
+    const cellKey = `${cellX}_${cellZ}`;
+
+    if (this.loadedCells.has(cellKey)) {
+      console.log(`[FoliageSystem] Cell ${cellKey} already loaded`);
+      return;
+    }
+
+    console.log(`[FoliageSystem] Generating cell (${cellX},${cellZ})...`);
+
+    const chunks = this.getChunksInCell(cellX, cellZ);
+    let generatedCount = 0;
+
+    for (const { chunkX, chunkZ } of chunks) {
+      const chunkKey = `${chunkX}_${chunkZ}`;
+      if (!this.chunks.has(chunkKey)) {
+        this.generateChunk(chunkX, chunkZ);
+        generatedCount++;
+      }
+    }
+
+    this.loadedCells.add(cellKey);
+    console.log(`[FoliageSystem] Cell ${cellKey} loaded with ${generatedCount} new chunks`);
+  }
+
+  /**
+   * Unload foliage for a specific cell
+   * This disposes all chunks that belong to the cell
+   */
+  unloadCell(cellX: number, cellZ: number): void {
+    const cellKey = `${cellX}_${cellZ}`;
+
+    if (!this.loadedCells.has(cellKey)) {
+      return;
+    }
+
+    console.log(`[FoliageSystem] Unloading cell (${cellX},${cellZ})...`);
+
+    const chunks = this.getChunksInCell(cellX, cellZ);
+    let unloadedCount = 0;
+
+    for (const { chunkX, chunkZ } of chunks) {
+      const chunkKey = `${chunkX}_${chunkZ}`;
+      const chunk = this.chunks.get(chunkKey);
+
+      if (chunk) {
+        // Dispose all meshes in this chunk
+        for (const mesh of chunk.mesh.values()) {
+          mesh.dispose();
+        }
+        this.chunks.delete(chunkKey);
+        unloadedCount++;
+      }
+    }
+
+    this.loadedCells.delete(cellKey);
+    console.log(`[FoliageSystem] Cell ${cellKey} unloaded (${unloadedCount} chunks disposed)`);
+  }
+
+  /**
+   * Check if a cell is loaded
+   */
+  isCellLoaded(cellX: number, cellZ: number): boolean {
+    return this.loadedCells.has(`${cellX}_${cellZ}`);
+  }
+
+  /**
+   * Get all loaded cells
+   */
+  getLoadedCells(): Array<{ cellX: number; cellZ: number }> {
+    const result: Array<{ cellX: number; cellZ: number }> = [];
+    for (const key of this.loadedCells) {
+      const [cellX, cellZ] = key.split('_').map(Number);
+      result.push({ cellX, cellZ });
+    }
+    return result;
+  }
+
+  /**
+   * Get cell statistics
+   */
+  getCellStats(): {
+    loadedCells: number;
+    totalChunks: number;
+    chunksPerCell: number;
+  } {
+    const chunksPerCellEdge = Math.ceil(this.cellSize / this.chunkSize);
+    return {
+      loadedCells: this.loadedCells.size,
+      totalChunks: this.chunks.size,
+      chunksPerCell: chunksPerCellEdge * chunksPerCellEdge,
+    };
+  }
+
   /**
    * Full cleanup
    */
   dispose(): void {
     this.disposeAll();
+    this.loadedCells.clear();
 
     for (const mesh of this.baseMeshes.values()) {
       mesh.dispose();
