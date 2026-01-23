@@ -40,6 +40,41 @@ export class BiomeDecorator {
   }
 
   /**
+   * Rebuild biome decorations for a specific cell
+   * Currently a placeholder - biome textures are handled by terrain shader,
+   * and water is a global feature. This method is for future cell-based
+   * decorations (e.g., grass clumps, flowers, etc.)
+   *
+   * @param cellX - Cell X coordinate
+   * @param cellZ - Cell Z coordinate
+   * @param cellSize - Size of the cell in world units
+   */
+  rebuildCell(cellX: number, cellZ: number, cellSize: number = 64): void {
+    // Currently no-op: biome textures are handled per-tile by terrain shader
+    // Water is a global feature managed by buildWater()
+    // This method is a placeholder for future cell-based decorations
+
+    // Calculate cell bounds for future use
+    const _cellWorldStartX = cellX * cellSize;
+    const _cellWorldStartZ = cellZ * cellSize;
+    const _cellWorldEndX = _cellWorldStartX + cellSize;
+    const _cellWorldEndZ = _cellWorldStartZ + cellSize;
+
+    // Future: Generate grass clumps, flowers, etc. within cell bounds
+    // console.log(`[BiomeDecorator] rebuildCell(${cellX},${cellZ}) - placeholder`);
+  }
+
+  /**
+   * Check if a cell needs biome decoration rebuild
+   * Currently always returns false since biome textures are per-tile
+   */
+  cellNeedsRebuild(_cellX: number, _cellZ: number): boolean {
+    // Biome textures are handled by terrain shader per-tile
+    // Water is global and doesn't need per-cell rebuilds
+    return false;
+  }
+
+  /**
    * Collect valid positions from SplatMap where a specific channel has weight above threshold
    */
   private collectValidPositions(channel: number, threshold: number): Array<{x: number, z: number, weight: number}> {
