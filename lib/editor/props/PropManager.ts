@@ -23,6 +23,10 @@ export class PropManager {
   private heightmap: Heightmap;
   private instances: Map<string, PropInstance> = new Map();
 
+  // Tile-based grouping for streaming
+  private propsByTile: Map<string, Set<string>> = new Map();  // tileKey -> Set<propId>
+  private tileSize: number = 64;  // Default tile size
+
   // Preview system
   private previewAsset: ProceduralAsset | null = null;
   private previewMesh: Mesh | null = null;
@@ -32,6 +36,96 @@ export class PropManager {
   constructor(scene: Scene, heightmap: Heightmap) {
     this.scene = scene;
     this.heightmap = heightmap;
+  }
+
+  /**
+   * Set tile size for streaming grouping
+   */
+  setTileSize(tileSize: number): void {
+    this.tileSize = tileSize;
+  }
+
+  /**
+   * Get tile key for a world position
+   */
+  private getTileKey(x: number, z: number): string {
+    const gridX = Math.floor(x / this.tileSize);
+    const gridZ = Math.floor(z / this.tileSize);
+    return `${gridX}_${gridZ}`;
+  }
+
+  /**
+   * Register prop to tile group
+   */
+  private registerPropToTile(propId: string, x: number, z: number): void {
+    const tileKey = this.getTileKey(x, z);
+    let tileProps = this.propsByTile.get(tileKey);
+    if (!tileProps) {
+      tileProps = new Set();
+      this.propsByTile.set(tileKey, tileProps);
+    }
+    tileProps.add(propId);
+  }
+
+  /**
+   * Unregister prop from tile group
+   */
+  private unregisterPropFromTile(propId: string): void {
+    const instance = this.instances.get(propId);
+    if (!instance) return;
+    const tileKey = this.getTileKey(instance.position.x, instance.position.z);
+    const tileProps = this.propsByTile.get(tileKey);
+    if (tileProps) {
+      tileProps.delete(propId);
+      if (tileProps.size === 0) {
+        this.propsByTile.delete(tileKey);
+      }
+    }
+  }
+
+  /**
+   * Unload all props for a specific tile (for streaming)
+   */
+  unloadPropsForTile(gridX: number, gridY: number): void {
+    const tileKey = `${gridX}_${gridY}`;
+    const tileProps = this.propsByTile.get(tileKey);
+    if (!tileProps) return;
+
+    // Dispose all props in this tile
+    for (const propId of tileProps) {
+      const instance = this.instances.get(propId);
+      if (instance?.mesh) {
+        instance.mesh.dispose();
+      }
+      this.instances.delete(propId);
+    }
+    this.propsByTile.delete(tileKey);
+    console.log(`[PropManager] Unloaded ${tileProps.size} props for tile (${gridX},${gridY})`);
+  }
+
+  /**
+   * Get props for a specific tile
+   */
+  getPropsForTile(gridX: number, gridY: number): PropInstance[] {
+    const tileKey = `${gridX}_${gridY}`;
+    const tileProps = this.propsByTile.get(tileKey);
+    if (!tileProps) return [];
+
+    const result: PropInstance[] = [];
+    for (const propId of tileProps) {
+      const instance = this.instances.get(propId);
+      if (instance) {
+        result.push(instance);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Get loaded tile keys
+   */
+  getLoadedTileKeys(): string[] {
+    return Array.from(this.propsByTile.keys());
   }
 
   // Create or update the preview with given params
@@ -206,6 +300,9 @@ export class PropManager {
 
     this.instances.set(id, instance);
 
+    // Register to tile group for streaming
+    this.registerPropToTile(id, x, z);
+
     // Create new preview with different seed for next placement
     const newSeed = this.randomizePreview();
 
@@ -263,6 +360,10 @@ export class PropManager {
     };
 
     this.instances.set(id, instance);
+
+    // Register to tile group for streaming
+    this.registerPropToTile(id, x, z);
+
     return id;
   }
 
@@ -270,6 +371,9 @@ export class PropManager {
   removeProp(id: string): boolean {
     const instance = this.instances.get(id);
     if (!instance) return false;
+
+    // Unregister from tile group
+    this.unregisterPropFromTile(id);
 
     if (instance.mesh) {
       instance.mesh.dispose();
@@ -296,6 +400,7 @@ export class PropManager {
       }
     }
     this.instances.clear();
+    this.propsByTile.clear();
   }
 
   // Export instances for saving

@@ -109,6 +109,9 @@ export class EditorEngine {
   // Tiles that were modified in the current stroke (for edge syncing)
   private modifiedTiles: Set<string> = new Set();
 
+  // Cells being edited (protected from streaming unload)
+  private editingCells: Set<string> = new Set();
+
   // Per-tile dirty flags for streaming auto-save
   private tileDirtyFlags: Map<string, {
     heightmapDirty: boolean;
@@ -338,6 +341,8 @@ export class EditorEngine {
             }
             // Sync tile edges for seamless connections
             this.syncTileEdges();
+            // Release edit protection for cells
+            this.releaseEditProtection();
           }
           break;
         case PointerEventTypes.POINTERMOVE:
@@ -489,6 +494,7 @@ export class EditorEngine {
       this.propManager.dispose();
     }
     this.propManager = new PropManager(this.scene, this.heightmap);
+    this.propManager.setTileSize(size);  // Set tile size for streaming grouping
 
     // Save initial tile as default template for infinite expansion
     this.saveDefaultTileTemplate();
@@ -1099,6 +1105,12 @@ export class EditorEngine {
     const point = this.currentPickInfo.pickedPoint;
     const { gridX, gridY, localX, localZ } = this.getGridPositionFromWorld(point.x, point.z);
 
+    // Protect the editing cell and neighbors from unloading
+    if (this.cellManager) {
+      const cell = this.cellManager.worldToCell(point.x, point.z);
+      this.protectCellForEditing(cell.x, cell.z);
+    }
+
     // Center tile (0,0) - use main heightmap
     if (gridX === 0 && gridY === 0) {
       const modified = this.heightmap.applyBrush(
@@ -1558,6 +1570,12 @@ export class EditorEngine {
 
     const point = this.currentPickInfo.pickedPoint;
     const { gridX, gridY, localX, localZ } = this.getGridPositionFromWorld(point.x, point.z);
+
+    // Protect the editing cell and neighbors from unloading
+    if (this.cellManager) {
+      const cell = this.cellManager.worldToCell(point.x, point.z);
+      this.protectCellForEditing(cell.x, cell.z);
+    }
 
     // Center tile (0,0) - use main splatmap
     if (gridX === 0 && gridY === 0) {
@@ -2982,13 +3000,16 @@ export class EditorEngine {
     this.camera.detachControl();
 
     // Create and enable game preview with foliage and water systems
+    // Use streaming mode if streaming is enabled (more dynamic tile loading)
+    const useStreaming = this.streamingEnabled && this.streamingManager !== null;
     this.gamePreview = new GamePreview(
       this.scene,
       this.heightmap,
       this.terrainMesh,
       this.foliageSystem,
       this.biomeDecorator,
-      this.tileMode
+      this.tileMode,
+      useStreaming
     );
     this.gamePreview.enable(mesh);
 
@@ -3183,6 +3204,7 @@ export class EditorEngine {
       this.propManager.dispose();
     }
     this.propManager = new PropManager(this.scene, this.heightmap);
+    this.propManager.setTileSize(this.heightmap.getScale());  // Set tile size for streaming grouping
 
     console.log("[EditorEngine] Tile data loaded");
   }
@@ -3577,6 +3599,9 @@ export class EditorEngine {
 
       // Render foliage for neighbor tile if available
       this.createNeighborFoliage(gridX, gridY, tileData.foliageData, tileSize);
+
+      // Create water mesh if tile has water
+      this.createNeighborWaterMesh(gridX, gridY, tileSize, waterMaskData, waterMaskResolution);
     } catch (error) {
       console.error(`[EditorEngine] ERROR creating neighbor tile (${gridX},${gridY}):`, error);
     }
@@ -4733,6 +4758,11 @@ export class EditorEngine {
     if (this.foliageSystem) {
       this.foliageSystem.unloadCell(cellX, cellZ);
     }
+
+    // Unload props for this tile
+    if (this.propManager) {
+      this.propManager.unloadPropsForTile(tile.gridX, tile.gridY);
+    }
   }
 
   /**
@@ -4782,6 +4812,48 @@ export class EditorEngine {
       this.streamingManager.setEnabled(false);
       console.log("[EditorEngine] Streaming disabled");
     }
+  }
+
+  /**
+   * Protect a cell from being unloaded during editing
+   * Also protects adjacent cells to ensure edge syncing works
+   */
+  private protectCellForEditing(cellX: number, cellZ: number): void {
+    if (!this.streamingManager || !this.cellManager) return;
+
+    const key = this.cellManager.getCellKey(cellX, cellZ);
+
+    // Skip if already protected
+    if (this.editingCells.has(key)) return;
+
+    // Protect this cell
+    this.streamingManager.protectCell(cellX, cellZ);
+    this.editingCells.add(key);
+
+    // Protect adjacent cells (for edge syncing)
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dz = -1; dz <= 1; dz++) {
+        if (dx === 0 && dz === 0) continue;
+        const adjKey = this.cellManager.getCellKey(cellX + dx, cellZ + dz);
+        if (!this.editingCells.has(adjKey)) {
+          this.streamingManager.protectCell(cellX + dx, cellZ + dz);
+          this.editingCells.add(adjKey);
+        }
+      }
+    }
+  }
+
+  /**
+   * Release edit protection for all cells (called on pointer up)
+   */
+  private releaseEditProtection(): void {
+    if (!this.streamingManager || !this.cellManager) return;
+
+    for (const key of this.editingCells) {
+      const [x, z] = key.split('_').map(Number);
+      this.streamingManager.unprotectCell(x, z);
+    }
+    this.editingCells.clear();
   }
 
   /**
