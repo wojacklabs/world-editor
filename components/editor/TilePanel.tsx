@@ -32,6 +32,7 @@ interface TilePanelProps {
   onTileModeChange: (mode: TileMode) => void;
   // World Grid callbacks
   onWorldGridChange?: () => void;
+  onSelectGridCell?: (gridX: number, gridY: number) => void;
 }
 
 const RESOLUTION_OPTIONS = [128, 256, 512, 1024, 2048, 4096];
@@ -442,9 +443,11 @@ function TerrainSettingsSection({
 function WorldGridSection({
   tiles,
   onWorldGridChange,
+  onSelectGridCell,
 }: {
   tiles: TileRef[];
   onWorldGridChange?: () => void;
+  onSelectGridCell?: (gridX: number, gridY: number) => void;
 }) {
   const tileManager = getManualTileManager();
   const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
@@ -613,7 +616,10 @@ function WorldGridSection({
           return (
             <button
               key={i}
-              onClick={() => setSelectedCell({ x, y })}
+              onClick={() => {
+                setSelectedCell({ x, y });
+                onSelectGridCell?.(x, y);
+              }}
               className={`aspect-square flex items-center justify-center text-[10px] font-medium transition-colors ${
                 isCenter
                   ? "bg-blue-600/80 text-white"
@@ -689,6 +695,7 @@ export default function TilePanel({
   tileMode,
   onTileModeChange,
   onWorldGridChange,
+  onSelectGridCell,
 }: TilePanelProps) {
   const [activeTab, setActiveTab] = useState<TabType>("tile");
   const [tiles, setTiles] = useState<TileRef[]>([]);
@@ -842,7 +849,7 @@ export default function TilePanel({
               <p className="text-[10px] text-zinc-600 mb-3">
                 기본 지형으로 무한 확장됩니다. 특정 위치에 다른 타일을 지정하려면 그리드를 클릭하세요.
               </p>
-              <WorldGridSection tiles={tiles} onWorldGridChange={onWorldGridChange} />
+              <WorldGridSection tiles={tiles} onWorldGridChange={onWorldGridChange} onSelectGridCell={onSelectGridCell} />
             </CollapsibleSection>
           </>
         )}
