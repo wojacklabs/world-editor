@@ -40,6 +40,7 @@ import { ImpostorSystem } from "../foliage/ImpostorSystem";
 import { initializeKTX2Support } from "./KTX2Setup";
 import { StreamingManager, StreamingLOD } from "../streaming/StreamingManager";
 import { AssetContainerPool } from "../streaming/AssetContainerPool";
+import { CellManager } from "../streaming/CellManager";
 import { getManualTileManager, type TilePlacement, type PoolTileEntry } from "../tiles/ManualTileManager";
 
 export class EditorEngine {
@@ -77,6 +78,7 @@ export class EditorEngine {
   // Streaming system
   private streamingManager: StreamingManager | null = null;
   private assetPool: AssetContainerPool | null = null;
+  private cellManager: CellManager | null = null;
   private streamingEnabled = false;  // Disabled by default for editor mode
 
   // Game preview
@@ -214,6 +216,20 @@ export class EditorEngine {
       midRadius: 2,
       farRadius: 3,
     });
+
+    // Initialize cell manager (will be updated when terrain is created)
+    this.cellManager = new CellManager({
+      cellSize: 64,
+      tileSize: 64,  // Default, updated in createNewTerrain
+    });
+
+    // Setup streaming callbacks (but don't enable yet)
+    this.streamingManager.initialize({
+      onLoadCell: this.handleStreamingLoadCell.bind(this),
+      onUnloadCell: this.handleStreamingUnloadCell.bind(this),
+      onUpdateCellLOD: this.handleStreamingUpdateCellLOD.bind(this),
+    });
+
     console.log("[EditorEngine] Streaming infrastructure initialized");
 
     this.isInitialized = true;
@@ -462,6 +478,11 @@ export class EditorEngine {
     // Save initial tile as default template for infinite expansion
     this.saveDefaultTileTemplate();
     console.log("[EditorEngine] Default tile template saved for infinite expansion");
+
+    // Update CellManager with actual tile size
+    if (this.cellManager) {
+      this.cellManager.updateTileSize(size);
+    }
   }
 
   /**
@@ -4567,6 +4588,167 @@ export class EditorEngine {
       mesh.dispose();
     }
     this.neighborWaterMeshes.clear();
+  }
+
+  // ============================================================================
+  // STREAMING CALLBACKS
+  // ============================================================================
+
+  /**
+   * StreamingManager callback: Cell 로드 요청
+   * 해당 Cell에 속한 Tile들을 로드
+   */
+  private async handleStreamingLoadCell(cellX: number, cellZ: number, lod: StreamingLOD): Promise<void> {
+    if (!this.cellManager) return;
+
+    const tile = this.cellManager.cellToTile(cellX, cellZ);
+    const tileKey = this.cellManager.getTileKey(tile.gridX, tile.gridY);
+
+    console.log(`[EditorEngine] Streaming load cell (${cellX},${cellZ}) -> tile (${tile.gridX},${tile.gridY}), LOD=${StreamingLOD[lod]}`);
+
+    // Skip center tile (0,0) - always loaded
+    if (tile.gridX === 0 && tile.gridY === 0) {
+      return;
+    }
+
+    // Check if tile is already loaded
+    if (this.neighborTileMeshes.has(tileKey)) {
+      console.log(`[EditorEngine] Tile ${tileKey} already loaded, skipping`);
+      return;
+    }
+
+    // Load tile data from ManualTileManager or create default
+    // TODO: Phase 2 - implement proper tile loading
+    // For now, use existing neighbor tile loading logic
+    const tileSize = this.heightmap?.getScale() || 64;
+
+    // Check if tile data exists in manual placements
+    const tileManager = getManualTileManager();
+    const worldConfig = await tileManager.getWorldConfig();
+    const placement = worldConfig?.manualPlacements?.find(
+      (p: TilePlacement) => p.gridX === tile.gridX && p.gridY === tile.gridY
+    );
+
+    if (placement) {
+      // Load existing tile from manual placement
+      this.createNeighborTilePreview(tile.gridX, tile.gridY, placement.tileId, tileSize);
+    } else {
+      // Create default tile (mirrored or flat grass)
+      this.createDefaultGrassTilePreview(tile.gridX, tile.gridY, tileSize);
+    }
+  }
+
+  /**
+   * StreamingManager callback: Cell 언로드 요청
+   * 해당 Cell에 속한 Tile들을 언로드
+   */
+  private handleStreamingUnloadCell(cellX: number, cellZ: number): void {
+    if (!this.cellManager) return;
+
+    const tile = this.cellManager.cellToTile(cellX, cellZ);
+    const tileKey = this.cellManager.getTileKey(tile.gridX, tile.gridY);
+
+    console.log(`[EditorEngine] Streaming unload cell (${cellX},${cellZ}) -> tile (${tile.gridX},${tile.gridY})`);
+
+    // Skip center tile (0,0) - always loaded
+    if (tile.gridX === 0 && tile.gridY === 0) {
+      return;
+    }
+
+    // TODO: Phase 2 - check dirty flag and auto-save before unload
+
+    // Dispose tile mesh
+    const tileMesh = this.neighborTileMeshes.get(tileKey);
+    if (tileMesh) {
+      if (tileMesh.material) {
+        tileMesh.material.dispose();
+      }
+      tileMesh.dispose();
+      this.neighborTileMeshes.delete(tileKey);
+    }
+
+    // Dispose foliage meshes
+    const foliageMeshes = this.neighborFoliageMeshes.get(tileKey);
+    if (foliageMeshes) {
+      for (const mesh of foliageMeshes) {
+        // Don't dispose shared material
+        mesh.dispose();
+      }
+      this.neighborFoliageMeshes.delete(tileKey);
+    }
+
+    // Dispose water mesh
+    const waterMesh = this.neighborWaterMeshes.get(tileKey);
+    if (waterMesh) {
+      if (waterMesh.material && waterMesh.material instanceof StandardMaterial) {
+        waterMesh.material.dispose();
+      }
+      waterMesh.dispose();
+      this.neighborWaterMeshes.delete(tileKey);
+    }
+
+    // Clear editable tile data
+    this.editableTileData.delete(tileKey);
+  }
+
+  /**
+   * StreamingManager callback: Cell LOD 업데이트
+   * Foliage 밀도 조절 등
+   */
+  private handleStreamingUpdateCellLOD(cellX: number, cellZ: number, lod: StreamingLOD): void {
+    if (!this.cellManager) return;
+
+    const tile = this.cellManager.cellToTile(cellX, cellZ);
+
+    console.log(`[EditorEngine] Streaming update LOD cell (${cellX},${cellZ}) -> tile (${tile.gridX},${tile.gridY}), LOD=${StreamingLOD[lod]}`);
+
+    // TODO: Phase 3 - implement LOD-based foliage density
+    // Near: full density foliage
+    // Mid: reduced density or impostor
+    // Far: no foliage or impostor only
+  }
+
+  /**
+   * Enable streaming mode (usually for game preview)
+   */
+  enableStreaming(): void {
+    if (this.streamingManager) {
+      this.streamingEnabled = true;
+      this.streamingManager.setEnabled(true);
+      console.log("[EditorEngine] Streaming enabled");
+    }
+  }
+
+  /**
+   * Disable streaming mode (return to editor mode)
+   */
+  disableStreaming(): void {
+    if (this.streamingManager) {
+      this.streamingEnabled = false;
+      this.streamingManager.setEnabled(false);
+      console.log("[EditorEngine] Streaming disabled");
+    }
+  }
+
+  /**
+   * Get streaming status
+   */
+  isStreamingEnabled(): boolean {
+    return this.streamingEnabled;
+  }
+
+  /**
+   * Get CellManager for external use
+   */
+  getCellManager(): CellManager | null {
+    return this.cellManager;
+  }
+
+  /**
+   * Get StreamingManager for external use
+   */
+  getStreamingManager(): StreamingManager | null {
+    return this.streamingManager;
   }
 
   /**
