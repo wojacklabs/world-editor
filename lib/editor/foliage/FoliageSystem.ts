@@ -1479,6 +1479,7 @@ export class FoliageSystem {
   /**
    * Update foliage visibility based on camera position
    * Supports infinite terrain by wrapping camera position to terrain bounds (when useWrapping is true)
+   * Optimized: uses squared distance to avoid sqrt per chunk
    */
   updateVisibility(cameraPosition: Vector3): void {
     // Camera position for distance calculation
@@ -1501,18 +1502,20 @@ export class FoliageSystem {
     const cameraHeight = Math.max(0, cameraPosition.y - 10);
     const heightBonus = cameraHeight * 1.5;
     const effectiveLodFar = this.lodDistances.far + heightBonus;
+    // Pre-compute squared distance threshold (avoid sqrt per chunk)
+    const effectiveLodFarSq = effectiveLodFar * effectiveLodFar;
 
     for (const [key, chunk] of this.chunks) {
       const chunkCenterX = (chunk.x + 0.5) * this.chunkSize;
       const chunkCenterZ = (chunk.z + 0.5) * this.chunkSize;
 
-      const distance = Math.sqrt(
-        Math.pow(camX - chunkCenterX, 2) +
-        Math.pow(camZ - chunkCenterZ, 2)
-      );
+      // Use squared distance (no sqrt needed)
+      const dx = camX - chunkCenterX;
+      const dz = camZ - chunkCenterZ;
+      const distanceSq = dx * dx + dz * dz;
 
       // Distance-based visibility with height-adjusted LOD distance
-      const visible = distance < effectiveLodFar;
+      const visible = distanceSq < effectiveLodFarSq;
 
       if (chunk.visible !== visible) {
         chunk.visible = visible;

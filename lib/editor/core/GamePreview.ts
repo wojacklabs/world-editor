@@ -62,6 +62,12 @@ export class GamePreview {
   private keyboardObserver: any = null;
   private updateBound: (() => void) | null = null;
 
+  // Reusable vectors for update loop (avoid GC pressure)
+  private readonly _forward = new Vector3();
+  private readonly _right = new Vector3();
+  private readonly _up = new Vector3(0, 1, 0);
+  private readonly _moveDir = new Vector3();
+
   constructor(
     scene: Scene,
     heightmap: Heightmap,
@@ -901,24 +907,23 @@ export class GamePreview {
 
     // Calculate movement direction - FPS style (horizontal movement only for WASD)
     // Forward/back moves along the direction camera is facing, but always horizontal
-    const forward = new Vector3(
-      Math.sin(this.camera.rotation.y),
-      0,  // No Y component - always move horizontally
-      Math.cos(this.camera.rotation.y)
-    );
-    const right = new Vector3(
-      Math.sin(this.camera.rotation.y + Math.PI / 2),
-      0,
-      Math.cos(this.camera.rotation.y + Math.PI / 2)
-    );
-    const up = new Vector3(0, 1, 0);
+    // Reuse vectors to avoid GC pressure
+    const rotY = this.camera.rotation.y;
+    this._forward.set(Math.sin(rotY), 0, Math.cos(rotY));
+    this._right.set(Math.sin(rotY + Math.PI / 2), 0, Math.cos(rotY + Math.PI / 2));
+    // this._up is already (0, 1, 0)
 
     // Apply movement: WASD for horizontal, Q/E/Space for vertical
-    const moveDir = forward.scale(moveZ).add(right.scale(moveX)).add(up.scale(moveY));
+    // Manual calculation to avoid creating intermediate vectors
+    this._moveDir.set(
+      this._forward.x * moveZ + this._right.x * moveX,
+      moveY,  // up component
+      this._forward.z * moveZ + this._right.z * moveX
+    );
 
-    this.camera.position.x += moveDir.x * speed * deltaTime;
-    this.camera.position.y += moveDir.y * speed * deltaTime;
-    this.camera.position.z += moveDir.z * speed * deltaTime;
+    this.camera.position.x += this._moveDir.x * speed * deltaTime;
+    this.camera.position.y += this._moveDir.y * speed * deltaTime;
+    this.camera.position.z += this._moveDir.z * speed * deltaTime;
 
     // Keep camera within 3x3 tile bounds (-size to 2*size)
     // No sudden jumps - just clamp to valid range
