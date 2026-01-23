@@ -55,6 +55,7 @@ export class GamePreview {
   private onCanvasClick: (() => void) | null = null;
   private onPointerLockChange: (() => void) | null = null;
   private onMouseMove: ((e: MouseEvent) => void) | null = null;
+  private onWheel: ((e: WheelEvent) => void) | null = null;
   private keyboardObserver: any = null;
   private updateBound: (() => void) | null = null;
 
@@ -173,6 +174,17 @@ export class GamePreview {
       }
     }
 
+    // Apply fog to existing neighbor tiles (created by EditorEngine)
+    for (const tile of this.existingTileRefs) {
+      if (tile.material) {
+        const mat = tile.material as ShaderMaterial;
+        if (mat.setFloat && mat.setColor3) {
+          mat.setFloat("uFogDensity", fogDensity);
+          mat.setColor3("uFogColor", skyColor);
+        }
+      }
+    }
+
     // Sync foliage system fog with scene fog for consistent blending
     if (this.foliageSystem) {
       this.foliageSystem.syncFogSettings(skyColor, fogDensity);
@@ -198,6 +210,11 @@ export class GamePreview {
     if (this.onMouseMove) {
       document.removeEventListener("mousemove", this.onMouseMove);
       this.onMouseMove = null;
+    }
+
+    if (this.canvas && this.onWheel) {
+      this.canvas.removeEventListener("wheel", this.onWheel);
+      this.onWheel = null;
     }
 
     if (this.keyboardObserver) {
@@ -334,11 +351,14 @@ export class GamePreview {
       for (let z = -halfGrid; z <= halfGrid; z++) {
         if (x === 0 && z === 0) continue;
 
-        // Check if there's an existing edited neighbor tile mesh
-        const existingTile = this.scene.getMeshByName(`default_tile_${x}_${z}`) as Mesh;
+        // Check if there's an existing neighbor tile mesh (could be default_tile or flat_grass)
+        const existingTile = (
+          this.scene.getMeshByName(`default_tile_${x}_${z}`) ||
+          this.scene.getMeshByName(`flat_grass_${x}_${z}`)
+        ) as Mesh;
 
         if (existingTile) {
-          // Use the existing edited tile
+          // Use the existing tile
           existingTile.isVisible = true;
           existingTile.alwaysSelectAsActiveMesh = true;
           existingTile.refreshBoundingInfo();
@@ -390,11 +410,14 @@ export class GamePreview {
       for (let tz = -halfGrid; tz <= halfGrid; tz++) {
         if (tx === 0 && tz === 0) continue;
 
-        // Check if there's an existing edited neighbor tile mesh
-        const existingTile = this.scene.getMeshByName(`default_tile_${tx}_${tz}`) as Mesh;
+        // Check if there's an existing neighbor tile mesh (could be default_tile or flat_grass)
+        const existingTile = (
+          this.scene.getMeshByName(`default_tile_${tx}_${tz}`) ||
+          this.scene.getMeshByName(`flat_grass_${tx}_${tz}`)
+        ) as Mesh;
 
         if (existingTile) {
-          // Use the existing edited tile - just ensure it's visible and not culled
+          // Use the existing tile - just ensure it's visible and not culled
           existingTile.isVisible = true;
           existingTile.alwaysSelectAsActiveMesh = true;
           existingTile.refreshBoundingInfo();
@@ -683,8 +706,10 @@ export class GamePreview {
    */
   private enableNeighborFoliage(): void {
     // Find all neighbor foliage meshes created by EditorEngine
+    // Includes both neighbor_foliage_ (edited tiles) and default_foliage_ (flat grass tiles)
     const neighborFoliage = this.scene.meshes.filter(
-      (mesh) => mesh.name.startsWith("neighbor_foliage_")
+      (mesh) => mesh.name.startsWith("neighbor_foliage_") ||
+                mesh.name.startsWith("default_foliage_")
     ) as Mesh[];
 
     console.log(`[GamePreview] Found ${neighborFoliage.length} neighbor foliage meshes`);
@@ -813,6 +838,14 @@ export class GamePreview {
     };
     document.addEventListener("mousemove", this.onMouseMove);
 
+    // Block mouse wheel events in game mode (prevents unwanted camera manipulation)
+    this.onWheel = (e: WheelEvent) => {
+      // Prevent default scroll behavior and stop propagation to Babylon.js
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    canvas.addEventListener("wheel", this.onWheel, { passive: false });
+
     // Keyboard input
     this.keyboardObserver = this.scene.onKeyboardObservable.add((kbInfo) => {
       const key = kbInfo.event.key.toLowerCase();
@@ -851,11 +884,12 @@ export class GamePreview {
     // Fast movement with Shift
     const speed = this.inputMap["shift"] ? this.fastMoveSpeed : this.moveSpeed;
 
-    // Calculate movement direction based on camera rotation (free flight)
+    // Calculate movement direction - FPS style (horizontal movement only for WASD)
+    // Forward/back moves along the direction camera is facing, but always horizontal
     const forward = new Vector3(
-      Math.sin(this.camera.rotation.y) * Math.cos(this.camera.rotation.x),
-      -Math.sin(this.camera.rotation.x),
-      Math.cos(this.camera.rotation.y) * Math.cos(this.camera.rotation.x)
+      Math.sin(this.camera.rotation.y),
+      0,  // No Y component - always move horizontally
+      Math.cos(this.camera.rotation.y)
     );
     const right = new Vector3(
       Math.sin(this.camera.rotation.y + Math.PI / 2),
@@ -864,7 +898,7 @@ export class GamePreview {
     );
     const up = new Vector3(0, 1, 0);
 
-    // Apply movement in all directions
+    // Apply movement: WASD for horizontal, Q/E/Space for vertical
     const moveDir = forward.scale(moveZ).add(right.scale(moveX)).add(up.scale(moveY));
 
     this.camera.position.x += moveDir.x * speed * deltaTime;

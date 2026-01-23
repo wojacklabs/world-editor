@@ -13,6 +13,7 @@ import {
   KeyboardEventTypes,
   KeyboardInfo,
   Mesh,
+  LinesMesh,
   MeshBuilder,
   StandardMaterial,
   ShaderMaterial,
@@ -89,7 +90,7 @@ export class EditorEngine {
   private neighborFoliageMeshes: Map<string, Mesh[]> = new Map(); // gridKey -> foliage meshes
   private neighborWaterMeshes: Map<string, Mesh> = new Map(); // gridKey -> water mesh
   private showNeighborTiles = true;
-  private tileHighlightMesh: Mesh | null = null; // Selected tile boundary highlight
+  private tileHighlightMesh: LinesMesh | null = null; // Selected tile boundary highlight
 
   // Editable tile data for each grid position (including neighbors)
   private editableTileData: Map<string, {
@@ -282,6 +283,9 @@ export class EditorEngine {
   private setupInputHandlers(): void {
     // Pointer events
     this.scene.onPointerObservable.add((pointerInfo: PointerInfo) => {
+      // Disable editing in game mode
+      if (this.isGameMode) return;
+
       switch (pointerInfo.type) {
         case PointerEventTypes.POINTERDOWN:
           if (pointerInfo.event.button === 0) {
@@ -495,13 +499,13 @@ export class EditorEngine {
   /**
    * Sync tile edges for seamless connections between adjacent tiles
    * Makes edge heights exactly match and blends smoothly into interior
+   * Also handles diagonal (corner) tiles and splatmap synchronization
    */
   private syncTileEdges(): void {
     if (!this.heightmap) return;
     if (this.modifiedTiles.size === 0) return;
 
     // Very wide blend for extremely gradual transition
-    // Center tile has higher mesh resolution, so needs more blend width to avoid steep slopes
     const blendWidth = 30;
     const processedPairs = new Set<string>();
     const tilesToUpdate = new Set<string>();
@@ -510,7 +514,7 @@ export class EditorEngine {
     for (const tileKey of this.modifiedTiles) {
       const [gx, gy] = tileKey.split(",").map(Number);
 
-      // Adjacent tiles
+      // Adjacent tiles (4-directional)
       const neighbors = [
         { dx: -1, dy: 0 }, // Left
         { dx: 1, dy: 0 },  // Right
@@ -537,6 +541,10 @@ export class EditorEngine {
 
         if (!tile1Data || !tile2Data) continue;
 
+        // Get splatmap data
+        const tile1Splat = this.getTileSplatData(gx, gy);
+        const tile2Splat = this.getTileSplatData(nx, ny);
+
         // Determine which edges to sync
         let tile1Edge: "left" | "right" | "top" | "bottom";
         let tile2Edge: "left" | "right" | "top" | "bottom";
@@ -546,32 +554,78 @@ export class EditorEngine {
         else if (n.dy === -1) { tile1Edge = "top"; tile2Edge = "bottom"; }
         else { tile1Edge = "bottom"; tile2Edge = "top"; }
 
-        // Sync both tiles' edges
-        // Pass info about which tile is center for proper symmetry handling
-        const tile1IsCenter = (gx === 0 && gy === 0);
-        const tile2IsCenter = (nx === 0 && ny === 0);
-
+        // Sync heightmap edges
         this.syncTwoEdgesSmooth(
           tile1Data.heightmapData, tile1Data.resolution, tile1Edge,
           tile2Data.heightmapData, tile2Data.resolution, tile2Edge,
-          blendWidth,
-          tile1IsCenter,
-          tile2IsCenter
+          blendWidth, false, false
         );
+
+        // Sync splatmap edges
+        if (tile1Splat && tile2Splat) {
+          this.syncTwoEdgesSplatmap(
+            tile1Splat.splatmapData, tile1Splat.resolution, tile1Edge,
+            tile2Splat.splatmapData, tile2Splat.resolution, tile2Edge,
+            blendWidth
+          );
+        }
 
         tilesToUpdate.add(tileKey);
         tilesToUpdate.add(`${nx},${ny}`);
       }
+
+      // Diagonal tiles (corners) - sync corner areas
+      const diagonals = [
+        { dx: -1, dy: -1 }, // Top-left
+        { dx: 1, dy: -1 },  // Top-right
+        { dx: -1, dy: 1 },  // Bottom-left
+        { dx: 1, dy: 1 },   // Bottom-right
+      ];
+
+      for (const d of diagonals) {
+        const nx = gx + d.dx;
+        const ny = gy + d.dy;
+
+        const cornerKey = `corner|${Math.min(gx, nx)},${Math.min(gy, ny)}|${Math.max(gx, nx)},${Math.max(gy, ny)}`;
+        if (processedPairs.has(cornerKey)) continue;
+        processedPairs.add(cornerKey);
+
+        const tile1Data = this.getTileHeightData(gx, gy);
+        const tile2Data = this.getTileHeightData(nx, ny);
+
+        if (!tile1Data || !tile2Data) continue;
+
+        // Sync corner area for heightmap
+        this.syncCornerArea(
+          tile1Data.heightmapData, tile1Data.resolution,
+          tile2Data.heightmapData, tile2Data.resolution,
+          d.dx, d.dy, blendWidth
+        );
+
+        // Sync corner area for splatmap
+        const tile1Splat = this.getTileSplatData(gx, gy);
+        const tile2Splat = this.getTileSplatData(nx, ny);
+        if (tile1Splat && tile2Splat) {
+          this.syncCornerAreaSplatmap(
+            tile1Splat.splatmapData, tile1Splat.resolution,
+            tile2Splat.splatmapData, tile2Splat.resolution,
+            d.dx, d.dy, blendWidth
+          );
+        }
+
+        tilesToUpdate.add(`${nx},${ny}`);
+      }
     }
 
-    // Update all affected tile meshes
+    // Update all affected tile meshes and splatmaps
     for (const key of tilesToUpdate) {
       const [gx, gy] = key.split(",").map(Number);
       if (gx === 0 && gy === 0) {
         this.terrainMesh?.updateFromHeightmap();
+        this.terrainMesh?.updateSplatTexture();
       } else {
         this.updateNeighborTileMesh(gx, gy);
-        // Update foliage for neighbor tiles
+        this.updateNeighborTileSplatmap(gx, gy);
         this.updateNeighborTileFoliage(gx, gy);
       }
     }
@@ -580,6 +634,197 @@ export class EditorEngine {
 
     if (tilesToUpdate.size > 0) {
       console.log(`[EditorEngine] Synced edges for ${tilesToUpdate.size} tiles`);
+    }
+  }
+
+  /**
+   * Get splatmap data for any tile
+   */
+  private getTileSplatData(gridX: number, gridY: number): { splatmapData: Float32Array; resolution: number } | null {
+    if (gridX === 0 && gridY === 0) {
+      if (!this.terrainMesh) return null;
+      const splatMap = this.terrainMesh.getSplatMap();
+      return {
+        splatmapData: splatMap.getData(),
+        resolution: splatMap.getResolution(),
+      };
+    } else {
+      const key = `${gridX},${gridY}`;
+      const tileData = this.editableTileData.get(key);
+      if (!tileData) return null;
+      return {
+        splatmapData: tileData.splatmapData,
+        resolution: tileData.splatResolution,
+      };
+    }
+  }
+
+  /**
+   * Sync splatmap edges between two tiles
+   */
+  private syncTwoEdgesSplatmap(
+    splat1: Float32Array, res1: number, edge1: "left" | "right" | "top" | "bottom",
+    splat2: Float32Array, res2: number, edge2: "left" | "right" | "top" | "bottom",
+    blendWidth: number
+  ): void {
+    // Iterate over tile2's edge pixels
+    for (let i2 = 0; i2 < res2; i2++) {
+      const t = i2 / (res2 - 1);
+      const float_i1 = t * (res1 - 1);
+      const i1_0 = Math.floor(float_i1);
+      const i1_1 = Math.min(i1_0 + 1, res1 - 1);
+      const frac = float_i1 - i1_0;
+
+      // Get edge indices
+      const idx1_0 = this.getSplatEdgeIndex(i1_0, res1, edge1);
+      const idx1_1 = this.getSplatEdgeIndex(i1_1, res1, edge1);
+      const idx2 = this.getSplatEdgeIndex(i2, res2, edge2);
+
+      // Interpolate and copy edge values (4 channels)
+      for (let c = 0; c < 4; c++) {
+        const val1 = splat1[idx1_0 * 4 + c] * (1 - frac) + splat1[idx1_1 * 4 + c] * frac;
+        splat2[idx2 * 4 + c] = val1;
+      }
+
+      // Blend interior
+      for (let d = 1; d < blendWidth && d < res2 / 2; d++) {
+        const blend = 1 - d / blendWidth;
+        const interiorIdx = this.getSplatInteriorIndex(i2, d, res2, edge2);
+        const srcIdx0 = this.getSplatInteriorIndex(i1_0, d, res1, edge1);
+        const srcIdx1 = this.getSplatInteriorIndex(i1_1, d, res1, edge1);
+
+        if (interiorIdx >= 0 && interiorIdx < res2 * res2 &&
+            srcIdx0 >= 0 && srcIdx0 < res1 * res1 &&
+            srcIdx1 >= 0 && srcIdx1 < res1 * res1) {
+          for (let c = 0; c < 4; c++) {
+            const srcVal = splat1[srcIdx0 * 4 + c] * (1 - frac) + splat1[srcIdx1 * 4 + c] * frac;
+            const originalVal = splat2[interiorIdx * 4 + c];
+            splat2[interiorIdx * 4 + c] = originalVal * (1 - blend) + srcVal * blend;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Sync corner area between modified tile and diagonal neighbor
+   */
+  private syncCornerArea(
+    heights1: Float32Array, res1: number,
+    heights2: Float32Array, res2: number,
+    dx: number, dy: number, blendWidth: number
+  ): void {
+    // Determine corner positions
+    // dx=1, dy=1: tile1's bottom-right → tile2's top-left
+    const corner1X = dx > 0 ? res1 - 1 : 0;
+    const corner1Y = dy > 0 ? res1 - 1 : 0;
+    const corner2X = dx > 0 ? 0 : res2 - 1;
+    const corner2Y = dy > 0 ? 0 : res2 - 1;
+
+    // Sync corner point
+    const corner1Idx = corner1Y * res1 + corner1X;
+    const corner2Idx = corner2Y * res2 + corner2X;
+    heights2[corner2Idx] = heights1[corner1Idx];
+
+    // Blend corner region with 2D distance-based falloff
+    for (let oy = 0; oy < blendWidth && oy < res2; oy++) {
+      for (let ox = 0; ox < blendWidth && ox < res2; ox++) {
+        if (ox === 0 && oy === 0) continue; // Already set corner
+
+        const dist = Math.sqrt(ox * ox + oy * oy);
+        if (dist >= blendWidth) continue;
+
+        const blend = 1 - dist / blendWidth;
+
+        // Target position in tile2
+        const t2x = corner2X + (dx > 0 ? ox : -ox);
+        const t2y = corner2Y + (dy > 0 ? oy : -oy);
+        if (t2x < 0 || t2x >= res2 || t2y < 0 || t2y >= res2) continue;
+
+        // Source position in tile1
+        const t1x = corner1X + (dx > 0 ? -ox : ox);
+        const t1y = corner1Y + (dy > 0 ? -oy : oy);
+        if (t1x < 0 || t1x >= res1 || t1y < 0 || t1y >= res1) continue;
+
+        const idx1 = t1y * res1 + t1x;
+        const idx2 = t2y * res2 + t2x;
+
+        const originalHeight = heights2[idx2];
+        heights2[idx2] = originalHeight * (1 - blend) + heights1[idx1] * blend;
+      }
+    }
+  }
+
+  /**
+   * Sync corner area for splatmap
+   */
+  private syncCornerAreaSplatmap(
+    splat1: Float32Array, res1: number,
+    splat2: Float32Array, res2: number,
+    dx: number, dy: number, blendWidth: number
+  ): void {
+    const corner1X = dx > 0 ? res1 - 1 : 0;
+    const corner1Y = dy > 0 ? res1 - 1 : 0;
+    const corner2X = dx > 0 ? 0 : res2 - 1;
+    const corner2Y = dy > 0 ? 0 : res2 - 1;
+
+    // Sync corner point
+    const corner1Idx = corner1Y * res1 + corner1X;
+    const corner2Idx = corner2Y * res2 + corner2X;
+    for (let c = 0; c < 4; c++) {
+      splat2[corner2Idx * 4 + c] = splat1[corner1Idx * 4 + c];
+    }
+
+    // Blend corner region
+    for (let oy = 0; oy < blendWidth && oy < res2; oy++) {
+      for (let ox = 0; ox < blendWidth && ox < res2; ox++) {
+        if (ox === 0 && oy === 0) continue;
+
+        const dist = Math.sqrt(ox * ox + oy * oy);
+        if (dist >= blendWidth) continue;
+
+        const blend = 1 - dist / blendWidth;
+
+        const t2x = corner2X + (dx > 0 ? ox : -ox);
+        const t2y = corner2Y + (dy > 0 ? oy : -oy);
+        if (t2x < 0 || t2x >= res2 || t2y < 0 || t2y >= res2) continue;
+
+        const t1x = corner1X + (dx > 0 ? -ox : ox);
+        const t1y = corner1Y + (dy > 0 ? -oy : oy);
+        if (t1x < 0 || t1x >= res1 || t1y < 0 || t1y >= res1) continue;
+
+        const idx1 = t1y * res1 + t1x;
+        const idx2 = t2y * res2 + t2x;
+
+        for (let c = 0; c < 4; c++) {
+          const originalVal = splat2[idx2 * 4 + c];
+          splat2[idx2 * 4 + c] = originalVal * (1 - blend) + splat1[idx1 * 4 + c] * blend;
+        }
+      }
+    }
+  }
+
+  /**
+   * Get splatmap index for edge position
+   */
+  private getSplatEdgeIndex(i: number, res: number, edge: "left" | "right" | "top" | "bottom"): number {
+    switch (edge) {
+      case "left": return i * res + 0;
+      case "right": return i * res + (res - 1);
+      case "top": return 0 * res + i;
+      case "bottom": return (res - 1) * res + i;
+    }
+  }
+
+  /**
+   * Get splatmap index for interior position
+   */
+  private getSplatInteriorIndex(i: number, d: number, res: number, edge: "left" | "right" | "top" | "bottom"): number {
+    switch (edge) {
+      case "left": return i * res + d;
+      case "right": return i * res + (res - 1 - d);
+      case "top": return d * res + i;
+      case "bottom": return (res - 1 - d) * res + i;
     }
   }
 
@@ -608,6 +853,7 @@ export class EditorEngine {
    * Sync two tile edges with symmetric blending
    * tile1 is the MODIFIED tile, tile2 is the adjacent tile being synced
    * Copies from modified tile to adjacent tile with symmetric slope mirroring
+   * Uses normalized positions (0~1) to handle different resolutions
    */
   private syncTwoEdgesSmooth(
     heights1: Float32Array, res1: number, edge1: "left" | "right" | "top" | "bottom",
@@ -616,30 +862,80 @@ export class EditorEngine {
     tile1IsCenter: boolean = false,
     tile2IsCenter: boolean = false
   ): void {
-    const len = Math.min(res1, res2);
+    // Iterate over tile2's vertices (the target tile being synced)
+    for (let i2 = 0; i2 < res2; i2++) {
+      // Normalized position along edge (0 to 1)
+      const t = i2 / (res2 - 1);
 
-    // tile1 is always the modified tile, so copy from tile1 to tile2
-    for (let i = 0; i < len; i++) {
-      const idx1 = this.getEdgeIndex(i, res1, edge1);
-      const idx2 = this.getEdgeIndex(i, res2, edge2);
+      // Map to tile1's index space (may be fractional)
+      const float_i1 = t * (res1 - 1);
 
-      // Copy modified tile's edge value to adjacent tile
-      heights2[idx2] = heights1[idx1];
+      // Get interpolated height from tile1 at this position
+      const height1 = this.getInterpolatedEdgeHeight(heights1, res1, edge1, float_i1);
 
-      // Mirror the slope from modified tile into adjacent tile (symmetric extension)
+      // Set tile2's edge vertex
+      const idx2 = this.getEdgeIndex(i2, res2, edge2);
+      heights2[idx2] = height1;
+
+      // Mirror the slope from modified tile into adjacent tile with gradual blending
+      // Near edge: mostly mirrored value, far from edge: mostly original value
       for (let d = 1; d < blendWidth; d++) {
-        const modifiedInteriorIdx = this.getInteriorIndex(i, d, res1, edge1);
-        const adjacentInteriorIdx = this.getInteriorIndex(i, d, res2, edge2);
+        const interiorHeight = this.getInterpolatedInteriorHeight(heights1, res1, edge1, float_i1, d);
+        const adjacentInteriorIdx = this.getInteriorIndex(i2, d, res2, edge2);
 
-        if (modifiedInteriorIdx >= 0 && modifiedInteriorIdx < heights1.length &&
-            adjacentInteriorIdx >= 0 && adjacentInteriorIdx < heights2.length) {
-          // Get modified tile's height at this distance from edge
-          const modifiedHeight = heights1[modifiedInteriorIdx];
-          // Mirror it to adjacent tile (creates symmetric slope)
-          heights2[adjacentInteriorIdx] = modifiedHeight;
+        if (adjacentInteriorIdx >= 0 && adjacentInteriorIdx < heights2.length) {
+          // Gradual blend: 1 at edge (d=1), 0 at blendWidth
+          const blend = 1 - d / blendWidth;
+          const originalHeight = heights2[adjacentInteriorIdx];
+          heights2[adjacentInteriorIdx] = originalHeight * (1 - blend) + interiorHeight * blend;
         }
       }
     }
+  }
+
+  /**
+   * Get interpolated height at a fractional edge position
+   */
+  private getInterpolatedEdgeHeight(
+    heights: Float32Array,
+    res: number,
+    edge: "left" | "right" | "top" | "bottom",
+    floatI: number
+  ): number {
+    const i0 = Math.floor(floatI);
+    const i1 = Math.min(i0 + 1, res - 1);
+    const frac = floatI - i0;
+
+    const idx0 = this.getEdgeIndex(i0, res, edge);
+    const idx1 = this.getEdgeIndex(i1, res, edge);
+
+    return heights[idx0] * (1 - frac) + heights[idx1] * frac;
+  }
+
+  /**
+   * Get interpolated height at a fractional interior position (d cells from edge)
+   */
+  private getInterpolatedInteriorHeight(
+    heights: Float32Array,
+    res: number,
+    edge: "left" | "right" | "top" | "bottom",
+    floatI: number,
+    d: number
+  ): number {
+    const i0 = Math.floor(floatI);
+    const i1 = Math.min(i0 + 1, res - 1);
+    const frac = floatI - i0;
+
+    const idx0 = this.getInteriorIndex(i0, d, res, edge);
+    const idx1 = this.getInteriorIndex(i1, d, res, edge);
+
+    // Check bounds
+    if (idx0 < 0 || idx0 >= heights.length || idx1 < 0 || idx1 >= heights.length) {
+      // Fallback to edge value
+      return this.getInterpolatedEdgeHeight(heights, res, edge, floatI);
+    }
+
+    return heights[idx0] * (1 - frac) + heights[idx1] * frac;
   }
 
   /**
@@ -2416,20 +2712,97 @@ export class EditorEngine {
     }
   }
 
+  // Camera animation state
+  private cameraAnimation: {
+    startPosition: Vector3;
+    endPosition: Vector3;
+    startTarget: Vector3;
+    endTarget: Vector3;
+    startTime: number;
+    duration: number;
+  } | null = null;
+  private cameraAnimationObserver: any = null;
+
   /**
    * Focus camera on a specific grid cell and show tile boundary highlight
+   * Smoothly transitions camera position while maintaining viewing direction
    */
   focusOnGridCell(gridX: number, gridY: number): void {
     const tileSize = 64;
     const centerX = gridX * tileSize + tileSize / 2;
     const centerZ = gridY * tileSize + tileSize / 2;
 
-    // Move camera target to tile center
-    this.camera.target = new Vector3(centerX, 0, centerZ);
-    this.camera.radius = tileSize * 1.5;
+    // Calculate the translation offset (how much to move)
+    const currentTarget = this.camera.target.clone();
+    const newTarget = new Vector3(centerX, 0, centerZ);
+    const offset = newTarget.subtract(currentTarget);
+
+    // Move both position and target by the same offset (maintains viewing direction)
+    const newPosition = this.camera.position.add(offset);
+
+    // Start smooth camera transition
+    this.startCameraTransition(newPosition, newTarget, 500); // 500ms duration
 
     // Update tile boundary highlight
     this.updateTileHighlight(gridX, gridY);
+  }
+
+  /**
+   * Start a smooth camera transition - moves both position and target
+   * to maintain viewing direction
+   */
+  private startCameraTransition(endPosition: Vector3, endTarget: Vector3, durationMs: number): void {
+    this.cameraAnimation = {
+      startPosition: this.camera.position.clone(),
+      endPosition: endPosition,
+      startTarget: this.camera.target.clone(),
+      endTarget: endTarget,
+      startTime: performance.now(),
+      duration: durationMs,
+    };
+
+    // Setup animation update if not already running
+    if (!this.cameraAnimationObserver) {
+      this.cameraAnimationObserver = this.scene.onBeforeRenderObservable.add(() => {
+        this.updateCameraTransition();
+      });
+    }
+  }
+
+  /**
+   * Update camera transition animation
+   */
+  private updateCameraTransition(): void {
+    if (!this.cameraAnimation) {
+      // Remove observer when no animation
+      if (this.cameraAnimationObserver) {
+        this.scene.onBeforeRenderObservable.remove(this.cameraAnimationObserver);
+        this.cameraAnimationObserver = null;
+      }
+      return;
+    }
+
+    const { startPosition, endPosition, startTarget, endTarget, startTime, duration } = this.cameraAnimation;
+    const elapsed = performance.now() - startTime;
+    const t = Math.min(elapsed / duration, 1);
+
+    // Ease-out cubic for smooth deceleration
+    const eased = 1 - Math.pow(1 - t, 3);
+
+    // Interpolate both position and target (parallel movement)
+    const newPosition = Vector3.Lerp(startPosition, endPosition, eased);
+    const newTarget = Vector3.Lerp(startTarget, endTarget, eased);
+
+    // Update camera using setPosition to properly update ArcRotateCamera internals
+    this.camera.setPosition(newPosition);
+    this.camera.setTarget(newTarget);
+
+    // Animation complete
+    if (t >= 1) {
+      this.camera.setPosition(endPosition);
+      this.camera.setTarget(endTarget);
+      this.cameraAnimation = null;
+    }
   }
 
   /**
@@ -2536,6 +2909,12 @@ export class EditorEngine {
   // Game Preview Mode
   enterGameMode(): void {
     if (this.isGameMode || !this.heightmap || !this.terrainMesh) return;
+
+    // Ensure neighbor tiles exist before entering game mode
+    // This creates the world grid based on World tab settings
+    if (this.neighborTileMeshes.size === 0) {
+      this.updateNeighborTilePreviews();
+    }
 
     // Disable terrain LOD FIRST so getMesh() returns the full resolution mesh
     this.terrainMesh.setLODEnabled(false);
@@ -3034,10 +3413,9 @@ export class EditorEngine {
 
       console.log(`[EditorEngine] Tile data: resolution=${tileData.resolution}, heightmapLength=${heightmapData.length}, tileSize=${tileSize}`);
 
-      // Use lower resolution for neighbor tiles (performance)
-      const targetResolution = Math.min(65, tileResolution);
-      const step = Math.max(1, Math.floor((tileResolution - 1) / (targetResolution - 1)));
-      const actualResolution = Math.floor((tileResolution - 1) / step) + 1;
+      // Use same resolution as center tile for seamless edges
+      // LOD should be handled separately via camera distance, not at mesh creation
+      const actualResolution = tileResolution;
       const cellSize = tileSize / (actualResolution - 1);
 
       const positions: number[] = [];
@@ -3053,9 +3431,7 @@ export class EditorEngine {
       // Apply world offset directly to vertex positions for correct shader worldPos calculation
       for (let z = 0; z < actualResolution; z++) {
         for (let x = 0; x < actualResolution; x++) {
-          const hx = Math.min(x * step, tileResolution - 1);
-          const hz = Math.min(z * step, tileResolution - 1);
-          const idx = hz * tileResolution + hx;
+          const idx = z * tileResolution + x;
           const height = (idx < heightmapData.length) ? heightmapData[idx] : 0;
 
           // Apply world offset directly to vertex positions
@@ -3264,7 +3640,7 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "right",
         (z) => this.heightmap!.getHeight(0, z),
         (z, c) => centerSplatData[(z * centerRes + 0) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
 
@@ -3273,7 +3649,7 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "left",
         (z) => this.heightmap!.getHeight(centerRes - 1, z),
         (z, c) => centerSplatData[(z * centerRes + (centerRes - 1)) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
 
@@ -3282,7 +3658,7 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "bottom",
         (x) => this.heightmap!.getHeight(x, 0),
         (x, c) => centerSplatData[(0 * centerRes + x) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
 
@@ -3291,7 +3667,7 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "top",
         (x) => this.heightmap!.getHeight(x, centerRes - 1),
         (x, c) => centerSplatData[((centerRes - 1) * centerRes + x) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
 
@@ -3301,12 +3677,12 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "right",
         (z) => this.heightmap!.getHeight(0, z),
         (z, c) => centerSplatData[(z * centerRes + 0) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
       this.blendEdge(heightmapData, splatmapData, resolution, "bottom",
         (x) => this.heightmap!.getHeight(x, 0),
         (x, c) => centerSplatData[(0 * centerRes + x) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
 
@@ -3315,12 +3691,12 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "left",
         (z) => this.heightmap!.getHeight(centerRes - 1, z),
         (z, c) => centerSplatData[(z * centerRes + (centerRes - 1)) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
       this.blendEdge(heightmapData, splatmapData, resolution, "bottom",
         (x) => this.heightmap!.getHeight(x, 0),
         (x, c) => centerSplatData[(0 * centerRes + x) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
 
@@ -3329,12 +3705,12 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "right",
         (z) => this.heightmap!.getHeight(0, z),
         (z, c) => centerSplatData[(z * centerRes + 0) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
       this.blendEdge(heightmapData, splatmapData, resolution, "top",
         (x) => this.heightmap!.getHeight(x, centerRes - 1),
         (x, c) => centerSplatData[((centerRes - 1) * centerRes + x) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
 
@@ -3343,43 +3719,53 @@ export class EditorEngine {
       this.blendEdge(heightmapData, splatmapData, resolution, "left",
         (z) => this.heightmap!.getHeight(centerRes - 1, z),
         (z, c) => centerSplatData[(z * centerRes + (centerRes - 1)) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
       this.blendEdge(heightmapData, splatmapData, resolution, "top",
         (x) => this.heightmap!.getHeight(x, centerRes - 1),
         (x, c) => centerSplatData[((centerRes - 1) * centerRes + x) * 4 + c],
-        blendDepth
+        blendDepth, centerRes
       );
     }
   }
 
   /**
    * Blend a single edge of neighbor tile with center tile data
+   * Handles resolution differences between neighbor and center tiles
    */
   private blendEdge(
     heightmapData: Float32Array,
     splatmapData: Float32Array,
-    resolution: number,
+    neighborRes: number,
     edge: "left" | "right" | "top" | "bottom",
     getCenterHeight: (i: number) => number,
     getCenterSplat: (i: number, channel: number) => number,
-    blendDepth: number
+    blendDepth: number,
+    centerRes: number
   ): void {
     const isVertical = edge === "left" || edge === "right";
-    const edgePos = edge === "right" || edge === "bottom" ? resolution - 1 : 0;
+    const edgePos = edge === "right" || edge === "bottom" ? neighborRes - 1 : 0;
     const blendDir = edge === "right" || edge === "bottom" ? -1 : 1;
 
-    for (let i = 0; i < resolution; i++) {
-      const centerHeight = getCenterHeight(i);
+    for (let i = 0; i < neighborRes; i++) {
+      // Map neighbor index to center index using normalized position (0~1)
+      const t = neighborRes > 1 ? i / (neighborRes - 1) : 0;
+      const floatCenterI = t * (centerRes - 1);
+
+      // Interpolate center height at this position
+      const ci0 = Math.floor(floatCenterI);
+      const ci1 = Math.min(ci0 + 1, centerRes - 1);
+      const frac = floatCenterI - ci0;
+      const centerHeight = getCenterHeight(ci0) * (1 - frac) + getCenterHeight(ci1) * frac;
 
       for (let d = 0; d < blendDepth; d++) {
         const pos = edgePos + d * blendDir;
-        if (pos < 0 || pos >= resolution) continue;
+        if (pos < 0 || pos >= neighborRes) continue;
 
         const blend = 1 - d / blendDepth; // 1 at edge, 0 at blend depth
 
         // Calculate heightmap index
-        const heightIdx = isVertical ? (i * resolution + pos) : (pos * resolution + i);
+        const heightIdx = isVertical ? (i * neighborRes + pos) : (pos * neighborRes + i);
         if (heightIdx >= 0 && heightIdx < heightmapData.length) {
           const currentHeight = heightmapData[heightIdx];
           const avgHeight = (centerHeight + currentHeight) / 2;
@@ -3387,10 +3773,14 @@ export class EditorEngine {
         }
 
         // Calculate splatmap index (4 channels per pixel)
-        const splatIdx = (isVertical ? (i * resolution + pos) : (pos * resolution + i)) * 4;
+        const splatIdx = (isVertical ? (i * neighborRes + pos) : (pos * neighborRes + i)) * 4;
         if (splatIdx >= 0 && splatIdx + 3 < splatmapData.length) {
           for (let c = 0; c < 4; c++) {
-            const centerSplat = getCenterSplat(i, c);
+            // Interpolate center splat at this position
+            const centerSplat0 = getCenterSplat(ci0, c);
+            const centerSplat1 = getCenterSplat(ci1, c);
+            const centerSplat = centerSplat0 * (1 - frac) + centerSplat1 * frac;
+
             const currentSplat = splatmapData[splatIdx + c];
             const avgSplat = (centerSplat + currentSplat) / 2;
             splatmapData[splatIdx + c] = currentSplat * (1 - blend) + avgSplat * blend;
@@ -3416,10 +3806,8 @@ export class EditorEngine {
     const template = this.defaultTileTemplate;
     const sourceRes = template.resolution;
 
-    // Use lower resolution for neighbor tiles (performance)
-    const targetRes = Math.min(65, sourceRes);
-    const step = Math.max(1, Math.floor((sourceRes - 1) / (targetRes - 1)));
-    const actualRes = Math.floor((sourceRes - 1) / step) + 1;
+    // Use same resolution as source for seamless edges
+    const actualRes = sourceRes;
     const cellSize = tileSize / (actualRes - 1);
 
     // Use checkerboard mirror pattern for seamless tiling (same for ALL tiles)
@@ -3439,14 +3827,11 @@ export class EditorEngine {
     // Apply world offset directly to vertex positions for correct shader worldPos calculation
     for (let z = 0; z < actualRes; z++) {
       for (let x = 0; x < actualRes; x++) {
-        let srcX = x * step;
-        let srcZ = z * step;
+        let srcX = x;
+        let srcZ = z;
 
         if (mirrorX) srcX = (sourceRes - 1) - srcX;
         if (mirrorZ) srcZ = (sourceRes - 1) - srcZ;
-
-        srcX = Math.min(srcX, sourceRes - 1);
-        srcZ = Math.min(srcZ, sourceRes - 1);
 
         const idx = srcZ * sourceRes + srcX;
         const height = template.heightmapData[idx] || 0;
