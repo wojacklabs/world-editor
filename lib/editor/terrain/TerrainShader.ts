@@ -83,7 +83,7 @@ void main() {
     gl_Position = worldViewProjection * vec4(displacedPosition, 1.0);
 
     vPosition = worldPosition.xyz;
-    vNormal = normalize(mat3(world) * normal);
+    vNormal = normalize(normal);
     vUV = uv;
     vHeight = displacedPosition.y;
 
@@ -96,8 +96,9 @@ void main() {
     
     // Build TBN matrix for tangent space calculations
     // For terrain on XZ plane: tangent = X, bitangent = Z, normal = Y
-    vec3 T = normalize(mat3(world) * vec3(1.0, 0.0, 0.0));
-    vec3 B = normalize(mat3(world) * vec3(0.0, 0.0, 1.0));
+    // Fixed TBN for consistent normal mapping across all tiles
+    vec3 T = vec3(1.0, 0.0, 0.0);
+    vec3 B = vec3(0.0, 0.0, 1.0);
     vec3 N = vNormal;
     vTBN = mat3(T, B, N);
 }
@@ -573,6 +574,19 @@ void main() {
         return;
     }
 
+    // Debug mode 19: WorldPos visualization - to check continuity across tiles
+    if (uDebugMode == 19) {
+        // Map worldPos to colors: x to red, z to green
+        // worldPos is vec2(vPosition.x, vPosition.z)
+        // Normalized by terrain size (64) for visibility
+        // fract will show repeating pattern every 64 units
+        float normalizedX = fract(worldPos.x / 64.0);
+        float normalizedZ = fract(worldPos.y / 64.0);  // .y of worldPos = vPosition.z
+        // Show as gradient: red=X, green=Z
+        gl_FragColor = vec4(normalizedX, normalizedZ, 0.5, 1.0);
+        return;
+    }
+
     // Debug mode: disable splatmap (show uniform gray)
     if (uUseSplatMap < 0.5) {
         // Show debug gray color with basic lighting
@@ -780,9 +794,7 @@ void main() {
     }
 
     // Final color composition
-    vec3 color = baseColor * (uAmbientIntensity + diffuse * uSunColor) * ao;
-    color += specular * uSunColor;
-    color += rim * uSunColor * 0.3;
+    vec3 color = baseColor * ao * (uAmbientIntensity + diffuse * uSunColor) + specular * uSunColor + rim;
 
     // ========== Improved Fog System ==========
     // 1. Calculate distance from fragment's world position to camera (per-pixel)

@@ -89,6 +89,7 @@ export class EditorEngine {
   private neighborFoliageMeshes: Map<string, Mesh[]> = new Map(); // gridKey -> foliage meshes
   private neighborWaterMeshes: Map<string, Mesh> = new Map(); // gridKey -> water mesh
   private showNeighborTiles = true;
+  private tileHighlightMesh: Mesh | null = null; // Selected tile boundary highlight
 
   // Editable tile data for each grid position (including neighbors)
   private editableTileData: Map<string, {
@@ -168,11 +169,21 @@ export class EditorEngine {
     // Start render loop
     const startTime = performance.now() / 1000;
     this.engine.runRenderLoop(() => {
+      const time = (performance.now() / 1000) - startTime;
+
       // Update terrain shader uniforms for water effects
       if (this.terrainMesh) {
         const material = this.terrainMesh.getMaterial() as ShaderMaterial | null;
         if (material && material.setFloat) {
-          const time = (performance.now() / 1000) - startTime;
+          material.setFloat("uWaterLevel", this.seaLevel);
+          material.setFloat("uTime", time);
+        }
+      }
+
+      // Sync uniforms to neighbor tile materials
+      for (const mesh of this.neighborTileMeshes.values()) {
+        const material = mesh.material as ShaderMaterial | null;
+        if (material && material.setFloat) {
           material.setFloat("uWaterLevel", this.seaLevel);
           material.setFloat("uTime", time);
         }
@@ -2406,6 +2417,64 @@ export class EditorEngine {
   }
 
   /**
+   * Focus camera on a specific grid cell and show tile boundary highlight
+   */
+  focusOnGridCell(gridX: number, gridY: number): void {
+    const tileSize = 64;
+    const centerX = gridX * tileSize + tileSize / 2;
+    const centerZ = gridY * tileSize + tileSize / 2;
+
+    // Move camera target to tile center
+    this.camera.target = new Vector3(centerX, 0, centerZ);
+    this.camera.radius = tileSize * 1.5;
+
+    // Update tile boundary highlight
+    this.updateTileHighlight(gridX, gridY);
+  }
+
+  /**
+   * Update tile boundary highlight mesh
+   */
+  private updateTileHighlight(gridX: number, gridY: number): void {
+    const tileSize = 64;
+    const x = gridX * tileSize;
+    const z = gridY * tileSize;
+
+    // Remove existing highlight
+    if (this.tileHighlightMesh) {
+      this.tileHighlightMesh.dispose();
+      this.tileHighlightMesh = null;
+    }
+
+    // Create rectangle boundary using lines
+    const points = [
+      new Vector3(x, 0.5, z),
+      new Vector3(x + tileSize, 0.5, z),
+      new Vector3(x + tileSize, 0.5, z + tileSize),
+      new Vector3(x, 0.5, z + tileSize),
+      new Vector3(x, 0.5, z) // Close the loop
+    ];
+
+    this.tileHighlightMesh = MeshBuilder.CreateLines(
+      "tileHighlight",
+      { points },
+      this.scene
+    );
+    this.tileHighlightMesh.color = new Color3(1, 0.8, 0); // Yellow/gold color
+    this.tileHighlightMesh.isPickable = false;
+  }
+
+  /**
+   * Clear tile boundary highlight
+   */
+  clearTileHighlight(): void {
+    if (this.tileHighlightMesh) {
+      this.tileHighlightMesh.dispose();
+      this.tileHighlightMesh = null;
+    }
+  }
+
+  /**
    * Move camera in WASD style (moves camera target)
    */
   moveCamera(direction: "forward" | "backward" | "left" | "right", speed: number = 2): void {
@@ -2976,7 +3045,12 @@ export class EditorEngine {
       const uvs: number[] = [];
       const indices: number[] = [];
 
+      // World offset for this tile
+      const worldOffsetX = gridX * tileSize;
+      const worldOffsetZ = gridY * tileSize;
+
       // Create vertices (same logic as TerrainMesh)
+      // Apply world offset directly to vertex positions for correct shader worldPos calculation
       for (let z = 0; z < actualResolution; z++) {
         for (let x = 0; x < actualResolution; x++) {
           const hx = Math.min(x * step, tileResolution - 1);
@@ -2984,7 +3058,8 @@ export class EditorEngine {
           const idx = hz * tileResolution + hx;
           const height = (idx < heightmapData.length) ? heightmapData[idx] : 0;
 
-          positions.push(x * cellSize, height, z * cellSize);
+          // Apply world offset directly to vertex positions
+          positions.push(x * cellSize + worldOffsetX, height, z * cellSize + worldOffsetZ);
           uvs.push(x / (actualResolution - 1), z / (actualResolution - 1));
           normals.push(0, 1, 0); // Will be recalculated
         }
@@ -3012,15 +3087,16 @@ export class EditorEngine {
       vertexData.indices = indices;
       vertexData.uvs = uvs;
 
-      // Compute normals
-      VertexData.ComputeNormals(positions, indices, normals);
+      // Use pre-set normals (0,1,0) for flat terrain
+      // Note: VertexData.ComputeNormals was producing incorrect results for neighbor tiles
+      // TODO: If proper normal computation is needed, investigate the issue
       vertexData.normals = normals;
 
       vertexData.applyToMesh(mesh, true);
 
-      // Position the mesh at grid location
-      mesh.position.x = gridX * tileSize;
-      mesh.position.z = gridY * tileSize;
+      // Mesh position is (0,0,0) since world offset is already baked into vertex positions
+      mesh.position.x = 0;
+      mesh.position.z = 0;
 
       // Create full terrain shader material for neighbor tile (splatmapData already decoded above)
       const splatResolution = Math.sqrt(splatmapData.length / 4);
@@ -3056,6 +3132,9 @@ export class EditorEngine {
       );
       waterMaskTexture.name = `neighbor_waterMask_${gridX}_${gridY}`;
       material.setTexture("uWaterMask", waterMaskTexture);
+
+      // Sync water level with center tile
+      material.setFloat("uWaterLevel", this.seaLevel);
 
       mesh.material = material;
 
@@ -3352,7 +3431,12 @@ export class EditorEngine {
     const uvs: number[] = [];
     const indices: number[] = [];
 
+    // World offset for this tile
+    const worldOffsetX = gridX * tileSize;
+    const worldOffsetZ = gridY * tileSize;
+
     // Create vertices from template heightmap with mirroring
+    // Apply world offset directly to vertex positions for correct shader worldPos calculation
     for (let z = 0; z < actualRes; z++) {
       for (let x = 0; x < actualRes; x++) {
         let srcX = x * step;
@@ -3367,7 +3451,8 @@ export class EditorEngine {
         const idx = srcZ * sourceRes + srcX;
         const height = template.heightmapData[idx] || 0;
 
-        positions.push(x * cellSize, height, z * cellSize);
+        // Apply world offset directly to vertex positions
+        positions.push(x * cellSize + worldOffsetX, height, z * cellSize + worldOffsetZ);
         uvs.push(x / (actualRes - 1), z / (actualRes - 1));
         normals.push(0, 1, 0);
       }
@@ -3386,9 +3471,11 @@ export class EditorEngine {
       }
     }
 
-    // Compute proper normals
-    const normalArray: number[] = new Array(positions.length).fill(0);
-    VertexData.ComputeNormals(positions, indices, normalArray);
+    // Use Y-up normals for flat terrain (ComputeNormals produces incorrect results)
+    const normalArray: number[] = [];
+    for (let i = 0; i < positions.length / 3; i++) {
+      normalArray.push(0, 1, 0);
+    }
 
     // Create mesh
     const mesh = new Mesh(`default_tile_${gridX}_${gridY}`, this.scene);
@@ -3399,9 +3486,10 @@ export class EditorEngine {
     vertexData.normals = normalArray;
     vertexData.applyToMesh(mesh, true);
 
-    // Position the mesh
-    mesh.position.x = gridX * tileSize;
-    mesh.position.z = gridY * tileSize;
+    // Mesh position is (0,0,0) since world offset is already baked into vertex positions
+    // This ensures shader worldPos (vPosition) is correct for grass patterns and macro variation
+    mesh.position.x = 0;
+    mesh.position.z = 0;
 
     // Create splatmap from template with mirroring
     const splatSourceRes = Math.round(Math.sqrt(template.splatmapData.length / 4));
@@ -3505,6 +3593,9 @@ export class EditorEngine {
     waterMaskTexture.update(waterMaskData);
     material.setTexture("uWaterMask", waterMaskTexture);
 
+    // Sync water level with center tile
+    material.setFloat("uWaterLevel", this.seaLevel);
+
     mesh.material = material;
     (mesh as any)._ownMaterial = true;
 
@@ -3567,13 +3658,18 @@ export class EditorEngine {
     const resolution = 33;
     const cellSize = tileSize / (resolution - 1);
 
+    // World offset for this tile
+    const worldOffsetX = gridX * tileSize;
+    const worldOffsetZ = gridY * tileSize;
+
     const positions: number[] = [];
     const uvs: number[] = [];
     const indices: number[] = [];
 
+    // Apply world offset directly to vertex positions for correct shader worldPos calculation
     for (let z = 0; z < resolution; z++) {
       for (let x = 0; x < resolution; x++) {
-        positions.push(x * cellSize, 0, z * cellSize);
+        positions.push(x * cellSize + worldOffsetX, 0, z * cellSize + worldOffsetZ);
         uvs.push(x / (resolution - 1), z / (resolution - 1));
       }
     }
@@ -3586,8 +3682,11 @@ export class EditorEngine {
       }
     }
 
+    // Use Y-up normals for flat terrain (ComputeNormals produces incorrect results)
     const normals: number[] = [];
-    VertexData.ComputeNormals(positions, indices, normals);
+    for (let i = 0; i < positions.length / 3; i++) {
+      normals.push(0, 1, 0);
+    }
 
     const mesh = new Mesh(`flat_grass_${gridX}_${gridY}`, this.scene);
     const vertexData = new VertexData();
@@ -3597,8 +3696,9 @@ export class EditorEngine {
     vertexData.normals = normals;
     vertexData.applyToMesh(mesh, true);
 
-    mesh.position.x = gridX * tileSize;
-    mesh.position.z = gridY * tileSize;
+    // Mesh position is (0,0,0) since world offset is already baked into vertex positions
+    mesh.position.x = 0;
+    mesh.position.z = 0;
 
     const splatRes = 64;
     const splatData = new Float32Array(splatRes * splatRes * 4);
@@ -3613,6 +3713,9 @@ export class EditorEngine {
     const waterMask = new Uint8Array(splatRes * splatRes * 4);
     const waterTex = new RawTexture(waterMask, splatRes, splatRes, Engine.TEXTUREFORMAT_RGBA, this.scene);
     material.setTexture("uWaterMask", waterTex);
+
+    // Sync water level with center tile
+    material.setFloat("uWaterLevel", this.seaLevel);
 
     mesh.material = material;
     (mesh as any)._ownMaterial = true;
@@ -4027,8 +4130,10 @@ export class EditorEngine {
       vertexData.positions = positions;
       vertexData.indices = indices;
 
-      // Compute normals for proper rendering
-      VertexData.ComputeNormals(positions, indices, normals);
+      // Use Y-up normals for flat terrain (ComputeNormals produces incorrect results)
+      for (let i = 0; i < positions.length / 3; i++) {
+        normals.push(0, 1, 0);
+      }
       vertexData.normals = normals;
 
       vertexData.applyToMesh(mesh);
