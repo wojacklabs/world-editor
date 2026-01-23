@@ -137,6 +137,9 @@ uniform float uNormalStrength;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uFogStart;
+uniform float uFogHeightFalloff;   // Height fog base altitude
+uniform float uFogHeightDensity;   // Height fog density
+uniform vec3 cameraPosition;       // Camera position for per-pixel fog calculation
 
 // Water/Underwater
 uniform float uWaterLevel;
@@ -648,9 +651,8 @@ void main() {
                      rockColor * normalizedSplat.b +
                      sandColor * normalizedSplat.a;
 
-    // Auto-blend rock on steep slopes
-    float slopeBlend = smoothstep(0.4, 0.7, vSlope);
-    baseColor = mix(baseColor, rockColor * 0.85, slopeBlend * 0.5);
+    // Auto-blend rock on steep slopes - DISABLED (rock only from splatmap painting)
+    float slopeBlend = 0.0;
     
     // Add height-based color variation
     float heightBlend = smoothstep(-2.0, 15.0, vHeight);
@@ -693,8 +695,8 @@ void main() {
     // Blend planar/triplanar rock normal based on slope
     vec3 rockPerturbedNormal = mix(rockPerturbedPlanar, rockNormalTriplanar, triplanarBlend);
     
-    // Blend normals based on material weights
-    float rockWeight = normalizedSplat.b + slopeBlend * 0.5;
+    // Blend normals based on material weights (no auto-slope rock)
+    float rockWeight = normalizedSplat.b;
     rockWeight = clamp(rockWeight, 0.0, 1.0);
     float dirtWeight = normalizedSplat.g;
     
@@ -782,9 +784,21 @@ void main() {
     color += specular * uSunColor;
     color += rim * uSunColor * 0.3;
 
-    // Fog
-    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * vCameraDistance * vCameraDistance);
-    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    // ========== Improved Fog System ==========
+    // 1. Calculate distance from fragment's world position to camera (per-pixel)
+    float distanceToCamera = length(vPosition - cameraPosition);
+
+    // 2. Distance fog (exponential squared)
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+
+    // 3. Height fog (concentrate fog at lower altitudes)
+    float heightFactor = exp(-max(0.0, vPosition.y - uFogHeightFalloff) * uFogHeightDensity);
+    float heightFog = heightFactor * 0.3;  // Max 30% additional fog from height
+
+    // 4. Final fog factor
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+
+    // 5. Apply fog
     color = mix(color, uFogColor, fogFactor);
 
     // Tone mapping and gamma
@@ -847,11 +861,16 @@ void main() {
 }
 `;
 
+// Counter for unique material IDs
+let terrainMaterialCounter = 0;
+
 export function createTerrainMaterial(scene: Scene, splatData: Float32Array, resolution: number): ShaderMaterial {
   console.log("[TerrainShader] Creating terrain shader material...");
-  
+
+  // Use unique name to prevent any caching issues
+  const uniqueName = `terrainShader_${++terrainMaterialCounter}_${Date.now()}`;
   const material = new ShaderMaterial(
-    "terrainShader",
+    uniqueName,
     scene,
     {
       vertex: "terrain",
@@ -877,6 +896,8 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
         "uFogColor",
         "uFogDensity",
         "uFogStart",
+        "uFogHeightFalloff",
+        "uFogHeightDensity",
         "uWaterLevel",
         "uTime",
         "uUseSplatMap",
@@ -932,6 +953,8 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
   material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
   material.setFloat("uFogDensity", 0.008);
   material.setFloat("uFogStart", 50);
+  material.setFloat("uFogHeightFalloff", 5.0);    // Height fog starts below this altitude
+  material.setFloat("uFogHeightDensity", 0.1);    // Height fog decay rate
 
   // Water/underwater settings
   material.setFloat("uWaterLevel", -100);  // Default below terrain, updated by EditorEngine when water is active
@@ -960,6 +983,9 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
   return material;
 }
 
+// Counter for unique texture IDs
+let splatTextureCounter = 0;
+
 export function createSplatTexture(scene: Scene, splatData: Float32Array, resolution: number): RawTexture {
   // Convert Float32 RGBA to Uint8 RGBA
   const uint8Data = new Uint8Array(resolution * resolution * 4);
@@ -978,8 +1004,13 @@ export function createSplatTexture(scene: Scene, splatData: Float32Array, resolu
     Texture.BILINEAR_SAMPLINGMODE
   );
 
+  // Give unique name to prevent any caching issues
+  texture.name = `splatTexture_${++splatTextureCounter}_${Date.now()}`;
   texture.wrapU = Texture.CLAMP_ADDRESSMODE;
   texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+
+  // Force immediate GPU upload
+  texture.update(uint8Data);
 
   return texture;
 }

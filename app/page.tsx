@@ -5,7 +5,6 @@ import dynamic from "next/dynamic";
 import { EditorEngine } from "@/lib/editor/core/EditorEngine";
 import EditorToolbar from "@/components/editor/EditorToolbar";
 import EditorSidebar from "@/components/editor/EditorSidebar";
-import PropertiesPanel from "@/components/editor/PropertiesPanel";
 import TilePanel from "@/components/editor/TilePanel";
 import AssetChatPanel from "@/components/editor/AssetChatPanel";
 import AssetLibraryPanel from "@/components/editor/AssetLibraryPanel";
@@ -184,6 +183,38 @@ export default function EditorPage() {
     a.click();
   }, [engine]);
 
+  const handleExportWorldProject = useCallback(() => {
+    if (!engine) return;
+
+    const tileData = engine.getCurrentTileData();
+    if (!tileData) return;
+
+    const tileManager = getManualTileManager();
+
+    // Export full world with all tiles and World Grid config
+    const json = tileManager.exportFullWorld("world_project", {
+      heightmapData: tileData.heightmapData,
+      splatmapData: tileData.splatmapData,
+      waterMaskData: tileData.waterMaskData,
+      resolution: tileData.resolution,
+      size: tileData.size,
+      seaLevel: tileData.seaLevel,
+      waterDepth: tileData.waterDepth,
+      foliageData: tileData.foliageData,
+    });
+
+    // Download as JSON file
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "world_project.json";
+    a.click();
+    URL.revokeObjectURL(url);
+
+    console.log("[Page] World project exported");
+  }, [engine]);
+
   const handleMakeSeamless = useCallback(() => {
     if (!engine) return;
 
@@ -258,12 +289,13 @@ export default function EditorPage() {
       tileData.size,
       tileData.seaLevel,
       tileData.waterDepth,
-      existingId
+      existingId,
+      tileData.foliageData
     );
 
     setActiveTileId(newId);
     setTileDirty(false);
-    console.log(`[Page] Tile saved: ${name} (${newId})`);
+    console.log(`[Page] Tile saved: ${name} (${newId}), foliage types: ${Object.keys(tileData.foliageData || {}).length}`);
   }, [engine]);
 
   const handleLoadTile = useCallback((tileId: string) => {
@@ -280,12 +312,13 @@ export default function EditorPage() {
       tile.resolution,
       tile.size,
       tile.seaLevel,
-      tile.waterDepth
+      tile.waterDepth,
+      tile.foliageData
     );
 
     setActiveTileId(tileId);
     setTileDirty(false);
-    console.log(`[Page] Tile loaded: ${tile.name} (${tileId})`);
+    console.log(`[Page] Tile loaded: ${tile.name} (${tileId}), foliage: ${tile.foliageData ? 'yes' : 'no'}`);
   }, [engine]);
 
   const handleCreateNewTile = useCallback((name: string) => {
@@ -294,7 +327,7 @@ export default function EditorPage() {
     const tileManager = getManualTileManager();
     const newId = tileManager.createTile(name, terrainResolution, 64);
 
-    // Load the newly created tile
+    // Load the newly created tile (no foliage data for new tiles - will generate)
     const tile = tileManager.loadTile(newId);
     if (tile) {
       engine.loadTileData(
@@ -304,7 +337,8 @@ export default function EditorPage() {
         tile.resolution,
         tile.size,
         tile.seaLevel,
-        tile.waterDepth
+        tile.waterDepth,
+        tile.foliageData
       );
     }
 
@@ -313,33 +347,11 @@ export default function EditorPage() {
     console.log(`[Page] New tile created: ${name} (${newId})`);
   }, [engine, terrainResolution]);
 
-  const handleConnectSeamless = useCallback((direction: SeamlessDirection, targetTileId: string) => {
-    if (!engine || !activeTileId) return;
-
-    const tileManager = getManualTileManager();
-
-    // Get edge data from target tile
-    const oppositeDir: Record<SeamlessDirection, SeamlessDirection> = {
-      left: "right",
-      right: "left",
-      top: "bottom",
-      bottom: "top",
-    };
-    const edgeData = tileManager.getEdgeData(targetTileId, oppositeDir[direction]);
-    if (!edgeData) {
-      console.warn("Failed to get edge data from target tile");
-      return;
-    }
-
-    // Apply to current tile
-    engine.applyConnectedEdgeData(direction, edgeData.heights, edgeData.splats, edgeData.water);
-
-    // Connect tiles in manager
-    tileManager.connectTiles(activeTileId, targetTileId, direction);
-
-    setTileDirty(true);
-    console.log(`[Page] Tiles connected: ${activeTileId} -> ${targetTileId} (${direction})`);
-  }, [engine, activeTileId]);
+  const handleWorldGridChange = useCallback(() => {
+    if (!engine) return;
+    // Trigger engine to update world grid rendering
+    engine.updateWorldGrid();
+  }, [engine]);
 
   // Mark tile dirty when modified
   useEffect(() => {
@@ -641,6 +653,7 @@ export default function EditorPage() {
         onSave={handleSave}
         onExportGLB={handleExportGLB}
         onExportHeightmap={handleExportHeightmap}
+        onExportWorldProject={handleExportWorldProject}
         onToggleGameMode={handleToggleGameMode}
         onOpenAIChat={() => setIsChatOpen(true)}
         onOpenLibrary={() => setIsLibraryOpen(true)}
@@ -658,7 +671,13 @@ export default function EditorPage() {
 
         {!isGameMode && (
           <div className="flex flex-col bg-zinc-950 overflow-y-auto">
-            <PropertiesPanel
+            {/* Unified Tile Panel with Tile/World tabs */}
+            <TilePanel
+              onSaveTile={handleSaveTile}
+              onLoadTile={handleLoadTile}
+              onCreateNewTile={handleCreateNewTile}
+              activeTileId={activeTileId}
+              isDirty={tileDirty}
               onMakeSeamless={handleMakeSeamless}
               onMakeSeamlessDirection={handleMakeSeamlessDirection}
               dispStrength={dispStrength}
@@ -667,18 +686,8 @@ export default function EditorPage() {
               onTerrainResolutionChange={handleTerrainResolutionChange}
               tileMode={tileMode}
               onTileModeChange={handleTileModeChange}
+              onWorldGridChange={handleWorldGridChange}
             />
-            <div className="mx-4 h-px bg-zinc-800/50" />
-            {/* Tile Management Panel */}
-            <TilePanel
-              onSaveTile={handleSaveTile}
-              onLoadTile={handleLoadTile}
-              onCreateNewTile={handleCreateNewTile}
-              onConnectSeamless={handleConnectSeamless}
-              activeTileId={activeTileId}
-              isDirty={tileDirty}
-            />
-            <div className="mx-4 h-px bg-zinc-800/50" />
             {/* Placed Asset Panel */}
             <PlacedAssetPanel
               assets={placedAssets}

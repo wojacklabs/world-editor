@@ -7,7 +7,6 @@ import {
   Color3,
   Color4,
   VertexData,
-  StandardMaterial,
   ShaderMaterial,
   Effect,
   VertexBuffer,
@@ -111,7 +110,7 @@ interface FoliageChunk {
   visible: boolean;
 }
 
-// Register grass blade shader with fog and LOD fade support
+// Register grass blade shader with fog and distance-based LOD
 Effect.ShadersStore["grassVertexShader"] = `
 precision highp float;
 
@@ -119,37 +118,147 @@ attribute vec3 position;
 attribute vec3 normal;
 attribute vec4 color;
 
+attribute vec4 world0;
+attribute vec4 world1;
+attribute vec4 world2;
+attribute vec4 world3;
+
 uniform mat4 viewProjection;
 uniform float uTime;
 uniform float uWindStrength;
 uniform vec3 uCameraPosition;
+uniform float uLodFar;
 
 varying vec3 vNormal;
 varying vec4 vColor;
 varying float vHeight;
-varying float vCameraDistance;
+varying vec3 vWorldPosition;
 
 void main() {
-    // Get instance matrix
-    mat4 worldMatrix = world;
-
+    mat4 worldMatrix = mat4(world0, world1, world2, world3);
     vec4 worldPos = worldMatrix * vec4(position, 1.0);
-    vHeight = position.y;
 
-    // Calculate camera distance for fog and LOD fade
-    vCameraDistance = length(worldPos.xyz - uCameraPosition);
+    // Camera height extends LOD distance (higher view = see further)
+    float cameraHeight = max(0.0, uCameraPosition.y - 10.0);
+    float heightBonus = cameraHeight * 1.5;
+    float effectiveLodFar = uLodFar + heightBonus;
 
-    // Wind animation - affects top of grass more
-    float windFactor = position.y * uWindStrength;
+    // Distance-based LOD scale (shrinks grass at distance)
+    float distanceToCamera = length(worldPos.xz - uCameraPosition.xz);
+    float distanceRatio = distanceToCamera / effectiveLodFar;
+    float lodScale = 1.0 - smoothstep(0.7, 1.0, distanceRatio);
+
+    // Grass base position (y=0 point)
+    vec3 grassBase = vec3(worldPos.x, worldPos.y - position.y, worldPos.z);
+
+    // Wind attenuation: separate from lodScale, starts much earlier
+    // Wind 100%: 0~20% of effectiveLodFar, fade: 20%~50%, 0%: beyond 50%
+    float windScale = 1.0 - smoothstep(0.2, 0.5, distanceRatio);
+    float heightWindAtten = 1.0 / (1.0 + cameraHeight * 0.03);
+    float windFactor = position.y * uWindStrength * windScale * heightWindAtten;
     float windX = sin(uTime * 2.0 + worldPos.x * 0.5 + worldPos.z * 0.3) * windFactor;
     float windZ = cos(uTime * 1.5 + worldPos.x * 0.3 + worldPos.z * 0.5) * windFactor * 0.5;
 
-    worldPos.x += windX;
-    worldPos.z += windZ;
+    // Apply scale: shrink toward base
+    vec3 finalPos = mix(grassBase, worldPos.xyz, lodScale);
+    finalPos.x += windX;
+    finalPos.z += windZ;
 
-    gl_Position = viewProjection * worldPos;
+    vWorldPosition = finalPos;
+    vHeight = position.y * lodScale;
+
+    gl_Position = viewProjection * vec4(finalPos, 1.0);
     vNormal = normalize(mat3(worldMatrix) * normal);
     vColor = color;
+}
+`;
+
+// Register rock shader with fog matching terrain/grass
+Effect.ShadersStore["rockVertexShader"] = `
+precision highp float;
+
+attribute vec3 position;
+attribute vec3 normal;
+
+// Thin instance world matrix (4 columns as vec4 attributes)
+attribute vec4 world0;
+attribute vec4 world1;
+attribute vec4 world2;
+attribute vec4 world3;
+
+uniform mat4 viewProjection;
+uniform vec3 uCameraPosition;
+
+varying vec3 vNormal;
+varying vec3 vWorldPosition;
+
+void main() {
+    // Reconstruct world matrix from thin instance attributes
+    mat4 worldMatrix = mat4(world0, world1, world2, world3);
+    vec4 worldPos = worldMatrix * vec4(position, 1.0);
+
+    vWorldPosition = worldPos.xyz;
+    vNormal = normalize(mat3(worldMatrix) * normal);
+
+    gl_Position = viewProjection * worldPos;
+}
+`;
+
+Effect.ShadersStore["rockFragmentShader"] = `
+precision highp float;
+
+varying vec3 vNormal;
+varying vec3 vWorldPosition;
+
+uniform vec3 uCameraPosition;
+uniform vec3 uSunDirection;
+uniform vec3 uSunColor;
+uniform float uAmbient;
+uniform vec3 uDiffuseColor;
+uniform vec3 uSpecularColor;
+
+// Fog uniforms (matching terrain/grass)
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform float uFogHeightFalloff;
+uniform float uFogHeightDensity;
+
+void main() {
+    vec3 normal = normalize(vNormal);
+
+    // Diffuse lighting
+    float NdotL = max(dot(normal, uSunDirection), 0.0);
+    float diffuse = NdotL * 0.6 + 0.4;
+
+    // Specular (subtle)
+    vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
+    vec3 halfVec = normalize(uSunDirection + viewDir);
+    float specular = pow(max(dot(normal, halfVec), 0.0), 32.0) * 0.15;
+
+    vec3 color = uDiffuseColor * (uAmbient + diffuse * uSunColor);
+    color += uSpecularColor * specular * uSunColor;
+
+    // ========== Fog System (matching terrain/grass) ==========
+    float distanceToCamera = length(vWorldPosition - uCameraPosition);
+
+    // Distance fog (exponential squared)
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+
+    // Height fog (concentrate fog at lower altitudes)
+    float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
+    float heightFog = heightFactor * 0.3;
+
+    // Final fog factor
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+
+    // Apply fog
+    color = mix(color, uFogColor, fogFactor);
+
+    // Tone mapping and gamma (matching terrain shader)
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
+
+    gl_FragColor = vec4(color, 1.0);
 }
 `;
 
@@ -159,18 +268,18 @@ precision highp float;
 varying vec3 vNormal;
 varying vec4 vColor;
 varying float vHeight;
-varying float vCameraDistance;
+varying vec3 vWorldPosition;
 
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform float uAmbient;
+uniform vec3 uCameraPosition;
 
 // Fog uniforms
 uniform vec3 uFogColor;
 uniform float uFogDensity;
-
-// LOD fade uniforms
-uniform float uLodFar;
+uniform float uFogHeightFalloff;
+uniform float uFogHeightDensity;
 
 void main() {
     vec3 normal = normalize(vNormal);
@@ -182,23 +291,30 @@ void main() {
 
     vec3 color = vColor.rgb * heightGradient * (uAmbient + diffuse * uSunColor);
 
-    // Apply exponential squared fog (same as scene fog)
-    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * vCameraDistance * vCameraDistance);
-    fogFactor = clamp(fogFactor, 0.0, 1.0);
+    // ========== Fog System (matching TerrainShader) ==========
+    float distanceToCamera = length(vWorldPosition - uCameraPosition);
+
+    // Distance fog (exponential squared)
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+
+    // Height fog (concentrate fog at lower altitudes)
+    float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
+    float heightFog = heightFactor * 0.3;
+
+    // Final fog factor
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+
+    // Apply fog
     color = mix(color, uFogColor, fogFactor);
 
-    // Distance-based alpha fade for smooth LOD transition
-    // Fade starts at 70% of far distance, fully faded at far
-    float fadeStart = uLodFar * 0.7;
-    float alpha = 1.0 - smoothstep(fadeStart, uLodFar, vCameraDistance);
+    // Tone mapping and gamma (terrain과 동일)
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
 
     // Simple alpha test for grass edges
     if (vColor.a < 0.1) discard;
 
-    // Discard fully faded fragments
-    if (alpha < 0.01) discard;
-
-    gl_FragColor = vec4(color, alpha);
+    gl_FragColor = vec4(color, 1.0);
 }
 `;
 
@@ -228,16 +344,19 @@ export class FoliageSystem {
   
   // Materials
   private grassMaterial: ShaderMaterial | null = null;
-  private rockMaterial: StandardMaterial | null = null;
+  private rockMaterial: ShaderMaterial | null = null;
   
   // Performance settings
   private maxInstancesPerChunk = 5000;
   private lodDistances = {
-    near: 30,    // full density
-    mid: 60,     // 50% density
-    far: 100,    // 25% density
+    near: 100,   // full density
+    mid: 200,    // 50% density
+    far: 450,    // fade out distance
   };
-  
+
+  // Wrapping mode for infinite terrain support (disable in game mode)
+  private useWrapping = true;
+
   // Random seed for consistent generation
   private seed: number;
 
@@ -693,10 +812,46 @@ export class FoliageSystem {
    * Create materials for foliage
    */
   private createMaterials(): void {
-    // Standard material for rocks (uses scene fog automatically)
-    this.rockMaterial = new StandardMaterial("foliage_rock_mat", this.scene);
-    this.rockMaterial.diffuseColor = new Color3(0.5, 0.48, 0.45);
-    this.rockMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
+    // Shader material for rocks with fog matching terrain/grass
+    this.rockMaterial = new ShaderMaterial(
+      "foliage_rock_mat",
+      this.scene,
+      {
+        vertex: "rock",
+        fragment: "rock",
+      },
+      {
+        attributes: ["position", "normal"],
+        uniforms: [
+          "viewProjection",
+          "uCameraPosition",
+          "uSunDirection",
+          "uSunColor",
+          "uAmbient",
+          "uDiffuseColor",
+          "uSpecularColor",
+          "uFogColor",
+          "uFogDensity",
+          "uFogHeightFalloff",
+          "uFogHeightDensity",
+        ],
+      }
+    );
+
+    // Set rock material uniforms
+    this.rockMaterial.setVector3("uCameraPosition", new Vector3(0, 0, 0));
+    this.rockMaterial.setVector3("uSunDirection", new Vector3(0.5, 1, 0.5).normalize());
+    this.rockMaterial.setColor3("uSunColor", new Color3(1, 0.95, 0.8));
+    this.rockMaterial.setFloat("uAmbient", 0.4);
+    this.rockMaterial.setColor3("uDiffuseColor", new Color3(0.5, 0.48, 0.45));
+    this.rockMaterial.setColor3("uSpecularColor", new Color3(0.1, 0.1, 0.1));
+
+    // Fog uniforms (matching terrain/grass defaults)
+    this.rockMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+    this.rockMaterial.setFloat("uFogDensity", 0.008);
+    this.rockMaterial.setFloat("uFogHeightFalloff", 5.0);
+    this.rockMaterial.setFloat("uFogHeightDensity", 0.1);
+
     this.rockMaterial.backFaceCulling = false;
 
     // Apply to rock meshes
@@ -706,7 +861,7 @@ export class FoliageSystem {
     const pebbleBase = this.baseMeshes.get("pebble");
     if (pebbleBase) pebbleBase.material = this.rockMaterial;
 
-    // Shader material for grass with fog and LOD fade support
+    // Shader material for grass with fog (opaque rendering for performance)
     this.grassMaterial = new ShaderMaterial(
       "foliage_grass_mat",
       this.scene,
@@ -717,19 +872,20 @@ export class FoliageSystem {
       {
         attributes: ["position", "normal", "color"],
         uniforms: [
-          "world",
           "viewProjection",
           "uTime",
           "uWindStrength",
           "uCameraPosition",
+          "uLodFar",
           "uSunDirection",
           "uSunColor",
           "uAmbient",
           "uFogColor",
           "uFogDensity",
-          "uLodFar",
+          "uFogHeightFalloff",
+          "uFogHeightDensity",
         ],
-        needAlphaBlending: true,
+        needAlphaBlending: false,
       }
     );
 
@@ -742,15 +898,16 @@ export class FoliageSystem {
     this.grassMaterial.setFloat("uAmbient", 0.4);
 
     // Default fog values (will be synced with scene fog when game mode is enabled)
-    this.grassMaterial.setColor3("uFogColor", new Color3(0.55, 0.7, 0.9));
-    this.grassMaterial.setFloat("uFogDensity", 0.015);
+    this.grassMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+    this.grassMaterial.setFloat("uFogDensity", 0.008);
+    this.grassMaterial.setFloat("uFogHeightFalloff", 5.0);
+    this.grassMaterial.setFloat("uFogHeightDensity", 0.1);
 
     // LOD far distance
     this.grassMaterial.setFloat("uLodFar", this.lodDistances.far);
 
-    // Enable transparency for alpha fade
+    // Grass needs both sides rendered (thin blades)
     this.grassMaterial.backFaceCulling = false;
-    this.grassMaterial.alphaMode = 2; // ALPHA_COMBINE
 
     const grassBase = this.baseMeshes.get("grass");
     if (grassBase) grassBase.material = this.grassMaterial;
@@ -765,13 +922,26 @@ export class FoliageSystem {
    * Sync fog settings with scene fog for consistent appearance
    * Call this when entering game mode or when scene fog changes
    */
-  syncFogSettings(fogColor: Color3, fogDensity: number): void {
+  syncFogSettings(
+    fogColor: Color3,
+    fogDensity: number,
+    fogHeightFalloff: number = 5.0,
+    fogHeightDensity: number = 0.1
+  ): void {
     if (this.grassMaterial) {
       this.grassMaterial.setColor3("uFogColor", fogColor);
       this.grassMaterial.setFloat("uFogDensity", fogDensity);
+      this.grassMaterial.setFloat("uFogHeightFalloff", fogHeightFalloff);
+      this.grassMaterial.setFloat("uFogHeightDensity", fogHeightDensity);
     }
 
-    // StandardMaterial uses scene fog automatically, no need to set manually
+    // Rock material also uses custom shader now
+    if (this.rockMaterial) {
+      this.rockMaterial.setColor3("uFogColor", fogColor);
+      this.rockMaterial.setFloat("uFogDensity", fogDensity);
+      this.rockMaterial.setFloat("uFogHeightFalloff", fogHeightFalloff);
+      this.rockMaterial.setFloat("uFogHeightDensity", fogHeightDensity);
+    }
   }
 
   /**
@@ -781,6 +951,9 @@ export class FoliageSystem {
   updateCameraPosition(cameraPosition: Vector3): void {
     if (this.grassMaterial) {
       this.grassMaterial.setVector3("uCameraPosition", cameraPosition);
+    }
+    if (this.rockMaterial) {
+      this.rockMaterial.setVector3("uCameraPosition", cameraPosition);
     }
   }
 
@@ -1301,14 +1474,29 @@ export class FoliageSystem {
 
   /**
    * Update foliage visibility based on camera position
-   * Supports infinite terrain by wrapping camera position to terrain bounds
+   * Supports infinite terrain by wrapping camera position to terrain bounds (when useWrapping is true)
    */
   updateVisibility(cameraPosition: Vector3): void {
-    // Wrap camera position to terrain bounds for infinite terrain support
-    let camX = cameraPosition.x % this.terrainScale;
-    let camZ = cameraPosition.z % this.terrainScale;
-    if (camX < 0) camX += this.terrainScale;
-    if (camZ < 0) camZ += this.terrainScale;
+    // Camera position for distance calculation
+    let camX: number;
+    let camZ: number;
+
+    if (this.useWrapping) {
+      // Wrap camera position to terrain bounds for infinite terrain support
+      camX = cameraPosition.x % this.terrainScale;
+      camZ = cameraPosition.z % this.terrainScale;
+      if (camX < 0) camX += this.terrainScale;
+      if (camZ < 0) camZ += this.terrainScale;
+    } else {
+      // Use actual camera position (game mode with fixed boundaries)
+      camX = cameraPosition.x;
+      camZ = cameraPosition.z;
+    }
+
+    // Calculate effective LOD distance (match GPU shader logic)
+    const cameraHeight = Math.max(0, cameraPosition.y - 10);
+    const heightBonus = cameraHeight * 1.5;
+    const effectiveLodFar = this.lodDistances.far + heightBonus;
 
     for (const [key, chunk] of this.chunks) {
       const chunkCenterX = (chunk.x + 0.5) * this.chunkSize;
@@ -1319,8 +1507,8 @@ export class FoliageSystem {
         Math.pow(camZ - chunkCenterZ, 2)
       );
 
-      // Simple distance-based visibility
-      const visible = distance < this.lodDistances.far;
+      // Distance-based visibility with height-adjusted LOD distance
+      const visible = distance < effectiveLodFar;
 
       if (chunk.visible !== visible) {
         chunk.visible = visible;
@@ -1329,6 +1517,14 @@ export class FoliageSystem {
         }
       }
     }
+  }
+
+  /**
+   * Set wrapping mode for camera position in updateVisibility
+   * @param useWrapping true for infinite terrain (editor mode), false for fixed boundaries (game mode)
+   */
+  setUseWrapping(useWrapping: boolean): void {
+    this.useWrapping = useWrapping;
   }
 
   /**
@@ -1413,6 +1609,24 @@ export class FoliageSystem {
   }
 
   /**
+   * Get base mesh for a foliage type (for external rendering)
+   * @param typeName - e.g., "grass_v0", "rock_v1", "sandRock_v0"
+   */
+  getBaseMesh(typeName: string): Mesh | undefined {
+    const varMatch = typeName.match(/_v(\d+)$/);
+    const varIdx = varMatch ? parseInt(varMatch[1]) : 0;
+    const baseTypeName = typeName.replace(/_v\d+$/, "");
+
+    if (baseTypeName === "grass" && this.grassVariations.length > 0) {
+      return this.grassVariations[varIdx] || this.grassVariations[0];
+    } else if ((baseTypeName === "rock" || baseTypeName === "sandRock") && this.rockVariations.length > 0) {
+      return this.rockVariations[varIdx] || this.rockVariations[0];
+    } else {
+      return this.baseMeshes.get(baseTypeName);
+    }
+  }
+
+  /**
    * Dispose all foliage
    */
   disposeAll(): void {
@@ -1422,6 +1636,246 @@ export class FoliageSystem {
       }
     }
     this.chunks.clear();
+  }
+
+  // ============================================
+  // Tile Data Export/Import
+  // ============================================
+
+  /**
+   * Export all foliage instance data for saving with tile
+   * Returns type -> Base64 encoded Float32Array of matrices
+   */
+  exportTileData(): Record<string, string> {
+    const result: Record<string, string> = {};
+
+    // Collect all matrices by type across all chunks
+    const typeMatrices: Map<string, number[]> = new Map();
+
+    for (const chunk of this.chunks.values()) {
+      for (const [typeName, matrices] of chunk.instances) {
+        if (!typeMatrices.has(typeName)) {
+          typeMatrices.set(typeName, []);
+        }
+        // Add all matrix values to the type's array
+        const arr = typeMatrices.get(typeName)!;
+        for (let i = 0; i < matrices.length; i++) {
+          arr.push(matrices[i]);
+        }
+      }
+    }
+
+    // Encode each type's matrices to Base64
+    for (const [typeName, values] of typeMatrices) {
+      if (values.length > 0) {
+        const float32 = new Float32Array(values);
+        result[typeName] = this.encodeFloat32Array(float32);
+      }
+    }
+
+    console.log(`[FoliageSystem] Exported ${Object.keys(result).length} foliage types`);
+    return result;
+  }
+
+  /**
+   * Import foliage instance data from saved tile
+   * @param data - type -> Base64 encoded matrices
+   * @param offsetX - X offset for positioning (tile grid position * tile size)
+   * @param offsetZ - Z offset for positioning
+   * @param clearExisting - Whether to clear existing foliage first
+   */
+  importTileData(
+    data: Record<string, string>,
+    offsetX: number = 0,
+    offsetZ: number = 0,
+    clearExisting: boolean = false
+  ): void {
+    if (clearExisting) {
+      this.disposeAll();
+    }
+
+    let totalImported = 0;
+
+    for (const [typeName, base64] of Object.entries(data)) {
+      const matrices = this.decodeFloat32Array(base64);
+      if (matrices.length === 0) continue;
+
+      const instanceCount = matrices.length / 16;
+
+      // Apply offset to each matrix if needed
+      if (offsetX !== 0 || offsetZ !== 0) {
+        for (let i = 0; i < instanceCount; i++) {
+          const baseIdx = i * 16;
+          // Matrix column 3 contains translation (indices 12, 13, 14 for x, y, z)
+          matrices[baseIdx + 12] += offsetX;
+          matrices[baseIdx + 14] += offsetZ;
+        }
+      }
+
+      // Find which chunks these instances belong to and add them
+      this.addImportedInstances(typeName, matrices);
+      totalImported += instanceCount;
+    }
+
+    console.log(`[FoliageSystem] Imported ${totalImported} foliage instances`);
+  }
+
+  /**
+   * Add imported instances to appropriate chunks
+   */
+  private addImportedInstances(typeName: string, matrices: Float32Array): void {
+    // Group instances by chunk
+    const chunkInstances: Map<string, number[]> = new Map();
+    const instanceCount = matrices.length / 16;
+
+    for (let i = 0; i < instanceCount; i++) {
+      const baseIdx = i * 16;
+      // Get world position from matrix translation (column 3)
+      const worldX = matrices[baseIdx + 12];
+      const worldZ = matrices[baseIdx + 14];
+
+      // Calculate chunk coordinates
+      const chunkX = Math.floor(worldX / this.chunkSize);
+      const chunkZ = Math.floor(worldZ / this.chunkSize);
+      const chunkKey = `${chunkX},${chunkZ}`;
+
+      if (!chunkInstances.has(chunkKey)) {
+        chunkInstances.set(chunkKey, []);
+      }
+
+      // Add all 16 matrix values for this instance
+      const arr = chunkInstances.get(chunkKey)!;
+      for (let j = 0; j < 16; j++) {
+        arr.push(matrices[baseIdx + j]);
+      }
+    }
+
+    // Add to chunks
+    for (const [chunkKey, values] of chunkInstances) {
+      const [cx, cz] = chunkKey.split(",").map(Number);
+      let chunk = this.chunks.get(chunkKey);
+
+      if (!chunk) {
+        chunk = {
+          x: cx,
+          z: cz,
+          instances: new Map(),
+          mesh: new Map(),
+          visible: true,
+        };
+        this.chunks.set(chunkKey, chunk);
+      }
+
+      // Merge with existing instances for this type
+      const existingMatrices = chunk.instances.get(typeName);
+      const newMatrices = new Float32Array(values);
+
+      if (existingMatrices) {
+        const merged = new Float32Array(existingMatrices.length + newMatrices.length);
+        merged.set(existingMatrices);
+        merged.set(newMatrices, existingMatrices.length);
+        chunk.instances.set(typeName, merged);
+      } else {
+        chunk.instances.set(typeName, newMatrices);
+      }
+
+      // Update mesh thin instances
+      this.updateChunkMesh(chunk, typeName);
+    }
+  }
+
+  /**
+   * Update mesh thin instances for a specific type in a chunk
+   */
+  private updateChunkMesh(chunk: FoliageChunk, typeName: string): void {
+    const matrices = chunk.instances.get(typeName);
+    if (!matrices || matrices.length === 0) return;
+
+    // Get or create mesh for this type
+    let mesh = chunk.mesh.get(typeName);
+
+    // Determine which base mesh to use
+    // Format: "grass_v0", "rock_v1", "sandRock_v0", "pebble_v0" etc.
+    let baseMesh: Mesh | undefined;
+
+    // Parse variation index from format "type_vN"
+    const varMatch = typeName.match(/_v(\d+)$/);
+    const varIdx = varMatch ? parseInt(varMatch[1]) : 0;
+    const baseTypeName = typeName.replace(/_v\d+$/, "");
+
+    if (baseTypeName === "grass" && this.grassVariations.length > 0) {
+      baseMesh = this.grassVariations[varIdx] || this.grassVariations[0];
+    } else if ((baseTypeName === "rock" || baseTypeName === "sandRock") && this.rockVariations.length > 0) {
+      baseMesh = this.rockVariations[varIdx] || this.rockVariations[0];
+    } else {
+      // Fallback: try baseMeshes (pebble, etc.)
+      baseMesh = this.baseMeshes.get(baseTypeName);
+    }
+
+    if (!baseMesh) {
+      console.warn(`[FoliageSystem] No base mesh for type: ${typeName} (base: ${baseTypeName})`);
+      return;
+    }
+
+    if (!mesh) {
+      // Create new mesh with independent geometry (avoid WebGPU buffer sharing issues)
+      mesh = new Mesh(`foliage_${chunk.x}_${chunk.z}_${typeName}`, this.scene);
+
+      const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
+      const normals = baseMesh.getVerticesData(VertexBuffer.NormalKind);
+      const colors = baseMesh.getVerticesData(VertexBuffer.ColorKind);
+      const uvs = baseMesh.getVerticesData(VertexBuffer.UVKind);
+      const indices = baseMesh.getIndices();
+
+      if (positions && indices) {
+        const vertexData = new VertexData();
+        vertexData.positions = new Float32Array(positions);
+        if (normals) vertexData.normals = new Float32Array(normals);
+        if (colors) vertexData.colors = new Float32Array(colors);
+        if (uvs) vertexData.uvs = new Float32Array(uvs);
+        vertexData.indices = new Uint32Array(indices);
+        vertexData.applyToMesh(mesh);
+      }
+
+      mesh.material = baseMesh.material;
+      mesh.isVisible = true;
+      chunk.mesh.set(typeName, mesh);
+    }
+
+    // Set thin instances
+    const instanceCount = matrices.length / 16;
+    mesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
+    mesh.thinInstanceCount = instanceCount;
+    mesh.thinInstanceRefreshBoundingInfo();
+  }
+
+  /**
+   * Encode Float32Array to Base64
+   */
+  private encodeFloat32Array(arr: Float32Array): string {
+    const uint8 = new Uint8Array(arr.buffer);
+    let binary = "";
+    for (let i = 0; i < uint8.length; i++) {
+      binary += String.fromCharCode(uint8[i]);
+    }
+    return btoa(binary);
+  }
+
+  /**
+   * Decode Base64 to Float32Array
+   */
+  private decodeFloat32Array(base64: string): Float32Array {
+    try {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new Float32Array(bytes.buffer);
+    } catch {
+      console.error("[FoliageSystem] Failed to decode base64");
+      return new Float32Array(0);
+    }
   }
 
   /**

@@ -356,8 +356,13 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
 
   // Keyboard shortcuts
   useEffect(() => {
+    const keysPressed = new Set<string>();
+
     const handleKeyDown = (e: KeyboardEvent) => {
       const store = useEditorStore.getState();
+      const key = e.key.toLowerCase();
+
+      keysPressed.add(key);
 
       // ESC to cancel pending asset
       if (e.key === "Escape") {
@@ -380,31 +385,54 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       if (e.key === "3") store.setActiveTool("biome");
       if (e.key === "4") store.setActiveTool("props");
 
-      // Heightmap tool shortcuts (when heightmap tool is active)
+      // Heightmap tool shortcuts (Q, E, R, T - W is for camera)
       if (store.activeTool === "heightmap") {
-        if (e.key === "q") store.setActiveHeightmapTool("raise");
-        if (e.key === "w") store.setActiveHeightmapTool("lower");
-        if (e.key === "e") store.setActiveHeightmapTool("flatten");
-        if (e.key === "r") store.setActiveHeightmapTool("smooth");
+        if (key === "q") store.setActiveHeightmapTool("raise");
+        if (key === "e") store.setActiveHeightmapTool("flatten");
+        if (key === "r") store.setActiveHeightmapTool("smooth");
+        if (key === "t") store.setActiveHeightmapTool("lower");
       }
 
-      // Randomize asset seed when in props mode
-      if (store.activeTool === "props" && e.key === "r") {
+      // Randomize asset seed when in props mode (Shift+R to avoid conflict)
+      if (store.activeTool === "props" && key === "r" && e.shiftKey) {
         store.randomizeAssetSeed();
       }
 
       // View toggles
-      if (e.key === "g") store.toggleGrid();
-      if (e.key === "f") store.toggleWireframe();
+      if (key === "g") store.toggleGrid();
+      if (key === "f") store.toggleWireframe();
 
       // Focus on terrain
-      if (e.key === "h" && engineRef.current) {
+      if (key === "h" && engineRef.current) {
         engineRef.current.focusOnTerrain();
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      keysPressed.delete(e.key.toLowerCase());
+    };
+
+    // Camera movement loop
+    let animationId: number;
+    const updateCameraMovement = () => {
+      if (engineRef.current) {
+        const speed = 1.5;
+        if (keysPressed.has("w")) engineRef.current.moveCamera("forward", speed);
+        if (keysPressed.has("s")) engineRef.current.moveCamera("backward", speed);
+        if (keysPressed.has("a")) engineRef.current.moveCamera("left", speed);
+        if (keysPressed.has("d")) engineRef.current.moveCamera("right", speed);
+      }
+      animationId = requestAnimationFrame(updateCameraMovement);
+    };
+    animationId = requestAnimationFrame(updateCameraMovement);
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      cancelAnimationFrame(animationId);
+    };
   }, []);
 
   return (

@@ -18,11 +18,18 @@ import {
   ShaderMaterial,
   PickingInfo,
   IKeyboardEvent,
+  VertexData,
+  VertexBuffer,
+  RawTexture,
+  Texture,
+  Matrix,
+  Quaternion,
 } from "@babylonjs/core";
 import { GridMaterial } from "@babylonjs/materials";
 import type { BrushSettings, ToolType, HeightmapTool, MaterialType } from "../types/EditorTypes";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
+import { createTerrainMaterial, createSplatTexture } from "../terrain/TerrainShader";
 import { SplatMap } from "../terrain/SplatMap";
 import { BiomeDecorator } from "../terrain/BiomeDecorator";
 import { GamePreview, TileMode } from "./GamePreview";
@@ -32,6 +39,7 @@ import { ImpostorSystem } from "../foliage/ImpostorSystem";
 import { initializeKTX2Support } from "./KTX2Setup";
 import { StreamingManager, StreamingLOD } from "../streaming/StreamingManager";
 import { AssetContainerPool } from "../streaming/AssetContainerPool";
+import { getManualTileManager, type TilePlacement, type PoolTileEntry } from "../tiles/ManualTileManager";
 
 export class EditorEngine {
   private canvas: HTMLCanvasElement;
@@ -75,6 +83,36 @@ export class EditorEngine {
   private isGameMode = false;
   private savedClearColor: Color4 | null = null;
   private tileMode: TileMode = "mirror"; // Default to mirror mode
+
+  // World Grid - editable tiles
+  private neighborTileMeshes: Map<string, Mesh> = new Map();
+  private neighborFoliageMeshes: Map<string, Mesh[]> = new Map(); // gridKey -> foliage meshes
+  private neighborWaterMeshes: Map<string, Mesh> = new Map(); // gridKey -> water mesh
+  private showNeighborTiles = true;
+
+  // Editable tile data for each grid position (including neighbors)
+  private editableTileData: Map<string, {
+    heightmapData: Float32Array;
+    splatmapData: Float32Array;
+    waterMaskData: Float32Array;
+    resolution: number;
+    splatResolution: number;
+  }> = new Map();
+
+  // Currently active tile being edited (grid position)
+  private activeTileGrid: { x: number; y: number } = { x: 0, y: 0 };
+
+  // Tiles that were modified in the current stroke (for edge syncing)
+  private modifiedTiles: Set<string> = new Set();
+
+  // Default tile template for infinite expansion (saved from initial terrain)
+  private defaultTileTemplate: {
+    heightmapData: Float32Array;
+    splatmapData: Float32Array;
+    waterMaskData: Float32Array;
+    resolution: number;
+    size: number;
+  } | null = null;
 
   // Callbacks
   private onModified: (() => void) | null = null;
@@ -139,6 +177,16 @@ export class EditorEngine {
           material.setFloat("uTime", time);
         }
       }
+
+      // Update foliage shader uniforms in editor mode
+      // Note: updateVisibility is NOT called in editor mode - all chunks stay visible
+      // Visibility/LOD culling is only applied in game mode (GamePreview.ts)
+      if (this.foliageSystem && !this.isGameMode) {
+        const cameraPos = this.camera.position;
+        this.foliageSystem.updateCameraPosition(cameraPos);
+        this.foliageSystem.updateTime(performance.now() / 1000);
+      }
+
       this.scene.render();
     });
     console.log("[EditorEngine] Render loop started");
@@ -242,6 +290,8 @@ export class EditorEngine {
               this.foliageSystem.generateAll();
               this.foliageDirty = false;
             }
+            // Sync tile edges for seamless connections
+            this.syncTileEdges();
           }
           break;
         case PointerEventTypes.POINTERMOVE:
@@ -278,11 +328,15 @@ export class EditorEngine {
     this.lastPointerX = currentX;
     this.lastPointerY = currentY;
 
-    // Raycast to terrain
+    // Raycast to terrain (including neighbor tiles)
     const pickResult = this.scene.pick(
       currentX,
       currentY,
-      (mesh) => mesh.name.startsWith("terrain")
+      (mesh) => mesh.name.startsWith("terrain") ||
+                mesh.name.startsWith("neighbor_") ||
+                mesh.name.startsWith("default_tile_") ||
+                mesh.name.startsWith("mirrored_") ||
+                mesh.name.startsWith("flat_grass_")
     );
 
     this.currentPickInfo = pickResult;
@@ -389,6 +443,216 @@ export class EditorEngine {
       this.propManager.dispose();
     }
     this.propManager = new PropManager(this.scene, this.heightmap);
+
+    // Save initial tile as default template for infinite expansion
+    this.saveDefaultTileTemplate();
+    console.log("[EditorEngine] Default tile template saved for infinite expansion");
+  }
+
+  /**
+   * Save current terrain state as default tile template for infinite expansion
+   */
+  private saveDefaultTileTemplate(): void {
+    if (!this.heightmap || !this.terrainMesh) return;
+
+    const splatMap = this.terrainMesh.getSplatMap();
+    const splatData = splatMap.getData();
+    const resolution = this.heightmap.getResolution();
+
+    // Validate splatmap data - ensure at least first pixel is valid grass
+    const firstPixelGrass = splatData[0];
+    const firstPixelSum = splatData[0] + splatData[1] + splatData[2] + splatData[3];
+
+    // If splatmap looks invalid (all zeros or NaN), force grass initialization
+    if (!Number.isFinite(firstPixelSum) || firstPixelSum === 0 || firstPixelGrass < 0.9) {
+      console.warn("[EditorEngine] Splatmap not properly initialized, forcing grass fill");
+      splatMap.fillWithMaterial("grass");
+    }
+
+    this.defaultTileTemplate = {
+      heightmapData: new Float32Array(this.heightmap.getData()),
+      splatmapData: new Float32Array(splatMap.getData()),
+      waterMaskData: new Float32Array(splatMap.getWaterMask()),
+      resolution: resolution,
+      size: this.heightmap.getScale(),
+    };
+
+    // Verify template data
+    console.log(`[EditorEngine] Template saved: res=${resolution}, splatGrass[0]=${this.defaultTileTemplate.splatmapData[0].toFixed(3)}`);
+  }
+
+  /**
+   * Sync tile edges for seamless connections between adjacent tiles
+   * Makes edge heights exactly match and blends smoothly into interior
+   */
+  private syncTileEdges(): void {
+    if (!this.heightmap) return;
+    if (this.modifiedTiles.size === 0) return;
+
+    // Very wide blend for extremely gradual transition
+    // Center tile has higher mesh resolution, so needs more blend width to avoid steep slopes
+    const blendWidth = 30;
+    const processedPairs = new Set<string>();
+    const tilesToUpdate = new Set<string>();
+
+    // Process each modified tile
+    for (const tileKey of this.modifiedTiles) {
+      const [gx, gy] = tileKey.split(",").map(Number);
+
+      // Adjacent tiles
+      const neighbors = [
+        { dx: -1, dy: 0 }, // Left
+        { dx: 1, dy: 0 },  // Right
+        { dx: 0, dy: -1 }, // Top
+        { dx: 0, dy: 1 },  // Bottom
+      ];
+
+      for (const n of neighbors) {
+        const nx = gx + n.dx;
+        const ny = gy + n.dy;
+
+        // Create unique pair key to avoid processing same edge twice
+        const pairKey = [
+          `${Math.min(gx, nx)},${Math.min(gy, ny)}`,
+          `${Math.max(gx, nx)},${Math.max(gy, ny)}`,
+          n.dx !== 0 ? "h" : "v"
+        ].join("|");
+
+        if (processedPairs.has(pairKey)) continue;
+        processedPairs.add(pairKey);
+
+        const tile1Data = this.getTileHeightData(gx, gy);
+        const tile2Data = this.getTileHeightData(nx, ny);
+
+        if (!tile1Data || !tile2Data) continue;
+
+        // Determine which edges to sync
+        let tile1Edge: "left" | "right" | "top" | "bottom";
+        let tile2Edge: "left" | "right" | "top" | "bottom";
+
+        if (n.dx === -1) { tile1Edge = "left"; tile2Edge = "right"; }
+        else if (n.dx === 1) { tile1Edge = "right"; tile2Edge = "left"; }
+        else if (n.dy === -1) { tile1Edge = "top"; tile2Edge = "bottom"; }
+        else { tile1Edge = "bottom"; tile2Edge = "top"; }
+
+        // Sync both tiles' edges
+        // Pass info about which tile is center for proper symmetry handling
+        const tile1IsCenter = (gx === 0 && gy === 0);
+        const tile2IsCenter = (nx === 0 && ny === 0);
+
+        this.syncTwoEdgesSmooth(
+          tile1Data.heightmapData, tile1Data.resolution, tile1Edge,
+          tile2Data.heightmapData, tile2Data.resolution, tile2Edge,
+          blendWidth,
+          tile1IsCenter,
+          tile2IsCenter
+        );
+
+        tilesToUpdate.add(tileKey);
+        tilesToUpdate.add(`${nx},${ny}`);
+      }
+    }
+
+    // Update all affected tile meshes
+    for (const key of tilesToUpdate) {
+      const [gx, gy] = key.split(",").map(Number);
+      if (gx === 0 && gy === 0) {
+        this.terrainMesh?.updateFromHeightmap();
+      } else {
+        this.updateNeighborTileMesh(gx, gy);
+        // Update foliage for neighbor tiles
+        this.updateNeighborTileFoliage(gx, gy);
+      }
+    }
+
+    this.modifiedTiles.clear();
+
+    if (tilesToUpdate.size > 0) {
+      console.log(`[EditorEngine] Synced edges for ${tilesToUpdate.size} tiles`);
+    }
+  }
+
+  /**
+   * Get heightmap data for any tile (center or neighbor)
+   */
+  private getTileHeightData(gridX: number, gridY: number): { heightmapData: Float32Array; resolution: number } | null {
+    if (gridX === 0 && gridY === 0) {
+      if (!this.heightmap) return null;
+      return {
+        heightmapData: this.heightmap.getData(),
+        resolution: this.heightmap.getResolution(),
+      };
+    } else {
+      const key = `${gridX},${gridY}`;
+      const tileData = this.editableTileData.get(key);
+      if (!tileData) return null;
+      return {
+        heightmapData: tileData.heightmapData,
+        resolution: tileData.resolution,
+      };
+    }
+  }
+
+  /**
+   * Sync two tile edges with symmetric blending
+   * tile1 is the MODIFIED tile, tile2 is the adjacent tile being synced
+   * Copies from modified tile to adjacent tile with symmetric slope mirroring
+   */
+  private syncTwoEdgesSmooth(
+    heights1: Float32Array, res1: number, edge1: "left" | "right" | "top" | "bottom",
+    heights2: Float32Array, res2: number, edge2: "left" | "right" | "top" | "bottom",
+    blendWidth: number,
+    tile1IsCenter: boolean = false,
+    tile2IsCenter: boolean = false
+  ): void {
+    const len = Math.min(res1, res2);
+
+    // tile1 is always the modified tile, so copy from tile1 to tile2
+    for (let i = 0; i < len; i++) {
+      const idx1 = this.getEdgeIndex(i, res1, edge1);
+      const idx2 = this.getEdgeIndex(i, res2, edge2);
+
+      // Copy modified tile's edge value to adjacent tile
+      heights2[idx2] = heights1[idx1];
+
+      // Mirror the slope from modified tile into adjacent tile (symmetric extension)
+      for (let d = 1; d < blendWidth; d++) {
+        const modifiedInteriorIdx = this.getInteriorIndex(i, d, res1, edge1);
+        const adjacentInteriorIdx = this.getInteriorIndex(i, d, res2, edge2);
+
+        if (modifiedInteriorIdx >= 0 && modifiedInteriorIdx < heights1.length &&
+            adjacentInteriorIdx >= 0 && adjacentInteriorIdx < heights2.length) {
+          // Get modified tile's height at this distance from edge
+          const modifiedHeight = heights1[modifiedInteriorIdx];
+          // Mirror it to adjacent tile (creates symmetric slope)
+          heights2[adjacentInteriorIdx] = modifiedHeight;
+        }
+      }
+    }
+  }
+
+  /**
+   * Get heightmap index for edge position
+   */
+  private getEdgeIndex(i: number, res: number, edge: "left" | "right" | "top" | "bottom"): number {
+    switch (edge) {
+      case "left": return i * res + 0;
+      case "right": return i * res + (res - 1);
+      case "top": return 0 * res + i;
+      case "bottom": return (res - 1) * res + i;
+    }
+  }
+
+  /**
+   * Get heightmap index for interior position (d cells from edge)
+   */
+  private getInteriorIndex(i: number, d: number, res: number, edge: "left" | "right" | "top" | "bottom"): number {
+    switch (edge) {
+      case "left": return i * res + d;
+      case "right": return i * res + (res - 1 - d);
+      case "top": return d * res + i;
+      case "bottom": return (res - 1 - d) * res + i;
+    }
   }
 
   // Prop placement and preview
@@ -442,6 +706,40 @@ export class EditorEngine {
     return this.propManager;
   }
 
+  /**
+   * Get which tile grid position a world point is on
+   */
+  private getGridPositionFromWorld(worldX: number, worldZ: number): { gridX: number; gridY: number; localX: number; localZ: number } {
+    const tileSize = this.heightmap?.getScale() || 64;
+    const gridX = Math.floor(worldX / tileSize);
+    const gridY = Math.floor(worldZ / tileSize);
+    const localX = worldX - gridX * tileSize;
+    const localZ = worldZ - gridY * tileSize;
+    return { gridX, gridY, localX, localZ };
+  }
+
+  /**
+   * Ensure editable data exists for a tile position
+   */
+  private ensureEditableTileData(gridX: number, gridY: number): void {
+    const key = `${gridX},${gridY}`;
+    if (this.editableTileData.has(key)) return;
+
+    if (!this.defaultTileTemplate) return;
+
+    // Create a copy of the default template for this tile
+    const template = this.defaultTileTemplate;
+    this.editableTileData.set(key, {
+      heightmapData: new Float32Array(template.heightmapData),
+      splatmapData: new Float32Array(template.splatmapData),
+      waterMaskData: new Float32Array(template.splatmapData.length / 4), // Same resolution as splat
+      resolution: template.resolution,
+      splatResolution: Math.sqrt(template.splatmapData.length / 4),
+    });
+
+    console.log(`[EditorEngine] Created editable data for tile (${gridX},${gridY})`);
+  }
+
   applyBrush(
     tool: HeightmapTool,
     settings: BrushSettings,
@@ -451,20 +749,418 @@ export class EditorEngine {
     if (!this.currentPickInfo.pickedPoint || !this.heightmap || !this.terrainMesh) return;
 
     const point = this.currentPickInfo.pickedPoint;
-    const modified = this.heightmap.applyBrush(
-      point.x,
-      point.z,
-      tool,
-      settings,
-      deltaTime
-    );
+    const { gridX, gridY, localX, localZ } = this.getGridPositionFromWorld(point.x, point.z);
 
-    if (modified) {
-      this.terrainMesh.updateFromHeightmap();
-      // Terrain height change affects foliage placement
-      this.foliageDirty = true;
-      this.biomeDirty = true;
-      this.onModified?.();
+    // Center tile (0,0) - use main heightmap
+    if (gridX === 0 && gridY === 0) {
+      const modified = this.heightmap.applyBrush(
+        point.x,
+        point.z,
+        tool,
+        settings,
+        deltaTime
+      );
+
+      if (modified) {
+        this.terrainMesh.updateFromHeightmap();
+        this.foliageDirty = true;
+        this.biomeDirty = true;
+        this.modifiedTiles.add("0,0");
+        this.onModified?.();
+      }
+    } else {
+      // Neighbor tile - use editable tile data
+      this.ensureEditableTileData(gridX, gridY);
+      const modified = this.applyBrushToNeighborTile(gridX, gridY, localX, localZ, tool, settings, deltaTime);
+      if (modified) {
+        this.updateNeighborTileMesh(gridX, gridY);
+        this.modifiedTiles.add(`${gridX},${gridY}`);
+        this.onModified?.();
+      }
+    }
+  }
+
+  /**
+   * Apply brush to a neighbor tile's heightmap data
+   */
+  private applyBrushToNeighborTile(
+    gridX: number,
+    gridY: number,
+    localX: number,
+    localZ: number,
+    tool: HeightmapTool,
+    settings: BrushSettings,
+    deltaTime: number
+  ): boolean {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    if (!tileData) return false;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const resolution = tileData.resolution;
+    const cellSize = tileSize / (resolution - 1);
+
+    // Convert local coords to heightmap indices
+    const centerX = localX / cellSize;
+    const centerZ = localZ / cellSize;
+    const radius = settings.size / cellSize;
+
+    let modified = false;
+
+    const minX = Math.max(0, Math.floor(centerX - radius));
+    const maxX = Math.min(resolution - 1, Math.ceil(centerX + radius));
+    const minZ = Math.max(0, Math.floor(centerZ - radius));
+    const maxZ = Math.min(resolution - 1, Math.ceil(centerZ + radius));
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - centerX;
+        const dz = z - centerZ;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+
+        if (distance <= radius) {
+          // Use same falloff calculation as Heightmap.applyBrush
+          const normalizedDist = distance / radius;
+          const t = Math.pow(1 - normalizedDist, 2 - settings.falloff * 2);
+          const falloff = Math.max(0, Math.min(1, t));
+
+          const idx = z * resolution + x;
+          const currentHeight = tileData.heightmapData[idx];
+          let newHeight = currentHeight;
+
+          const amount = settings.strength * falloff * deltaTime * 10;
+
+          switch (tool) {
+            case "raise":
+              newHeight = currentHeight + amount;
+              break;
+            case "lower":
+              newHeight = currentHeight - amount;
+              break;
+            case "flatten":
+              // Get target height from brush center
+              const targetIdx = Math.floor(centerZ) * resolution + Math.floor(centerX);
+              const targetHeight = tileData.heightmapData[targetIdx] ?? currentHeight;
+              newHeight = currentHeight + (targetHeight - currentHeight) * falloff * 0.1;
+              break;
+            case "smooth":
+              let sum = 0;
+              let count = 0;
+              for (let sz = -1; sz <= 1; sz++) {
+                for (let sx = -1; sx <= 1; sx++) {
+                  const nx = x + sx;
+                  const nz = z + sz;
+                  if (nx >= 0 && nx < resolution && nz >= 0 && nz < resolution) {
+                    sum += tileData.heightmapData[nz * resolution + nx];
+                    count++;
+                  }
+                }
+              }
+              const avgHeight = sum / count;
+              newHeight = currentHeight + (avgHeight - currentHeight) * falloff * 0.5;
+              break;
+          }
+
+          tileData.heightmapData[idx] = newHeight;
+          modified = true;
+        }
+      }
+    }
+
+    return modified;
+  }
+
+  /**
+   * Update a neighbor tile's mesh after editing
+   */
+  private updateNeighborTileMesh(gridX: number, gridY: number): void {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    const mesh = this.neighborTileMeshes.get(key);
+
+    if (!tileData || !mesh) return;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const resolution = tileData.resolution;
+
+    // Get current vertex positions
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+    if (!positions) return;
+
+    // Update heights from editable data
+    // Note: mesh resolution might be lower than data resolution
+    const meshRes = Math.sqrt(positions.length / 3);
+    const step = (resolution - 1) / (meshRes - 1);
+
+    for (let z = 0; z < meshRes; z++) {
+      for (let x = 0; x < meshRes; x++) {
+        const dataX = Math.min(Math.floor(x * step), resolution - 1);
+        const dataZ = Math.min(Math.floor(z * step), resolution - 1);
+        const dataIdx = dataZ * resolution + dataX;
+        const meshIdx = (z * meshRes + x) * 3;
+
+        positions[meshIdx + 1] = tileData.heightmapData[dataIdx];
+      }
+    }
+
+    mesh.updateVerticesData(VertexBuffer.PositionKind, positions);
+
+    // Recompute normals using gradient method (same as center tile for consistency)
+    const cellSize = tileSize / (meshRes - 1);
+    this.calculateGradientNormals(mesh, meshRes, cellSize, Array.from(positions));
+
+    mesh.refreshBoundingInfo();
+  }
+
+  /**
+   * Apply biome brush to a neighbor tile's splatmap data
+   */
+  private applyBiomeBrushToNeighborTile(
+    gridX: number,
+    gridY: number,
+    localX: number,
+    localZ: number,
+    material: MaterialType,
+    settings: BrushSettings
+  ): boolean {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    if (!tileData) return false;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const resolution = tileData.splatResolution;
+    const cellSize = tileSize / (resolution - 1);
+
+    // Convert local coords to splatmap indices
+    const centerX = localX / cellSize;
+    const centerZ = localZ / cellSize;
+    const radius = settings.size / cellSize;
+
+    let modified = false;
+
+    const minX = Math.max(0, Math.floor(centerX - radius));
+    const maxX = Math.min(resolution - 1, Math.ceil(centerX + radius));
+    const minZ = Math.max(0, Math.floor(centerZ - radius));
+    const maxZ = Math.min(resolution - 1, Math.ceil(centerZ + radius));
+
+    // Material channel mapping
+    const materialChannels: Record<MaterialType, number> = {
+      grass: 0,
+      dirt: 1,
+      rock: 2,
+      sand: 3,
+      water: -1, // Water uses separate mask
+    };
+
+    const channel = materialChannels[material];
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - centerX;
+        const dz = z - centerZ;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+
+        if (distance <= radius) {
+          const normalizedDist = distance / radius;
+          const t = Math.pow(1 - normalizedDist, 2 - settings.falloff * 2);
+          const falloff = Math.max(0, Math.min(1, t));
+          const paintStrength = settings.strength * falloff * 0.1;
+
+          const idx = z * resolution + x;
+
+          if (material === "water") {
+            // Paint to water mask
+            tileData.waterMaskData[idx] = Math.min(1, tileData.waterMaskData[idx] + paintStrength);
+          } else {
+            // Paint to splatmap channel
+            const splatIdx = idx * 4;
+
+            // Reduce other channels
+            for (let c = 0; c < 4; c++) {
+              if (c !== channel) {
+                tileData.splatmapData[splatIdx + c] *= (1 - paintStrength);
+              }
+            }
+
+            // Increase target channel
+            tileData.splatmapData[splatIdx + channel] = Math.min(1,
+              tileData.splatmapData[splatIdx + channel] + paintStrength
+            );
+
+            // Normalize
+            let total = 0;
+            for (let c = 0; c < 4; c++) {
+              total += tileData.splatmapData[splatIdx + c];
+            }
+            if (total > 0) {
+              for (let c = 0; c < 4; c++) {
+                tileData.splatmapData[splatIdx + c] /= total;
+              }
+            }
+          }
+
+          modified = true;
+        }
+      }
+    }
+
+    return modified;
+  }
+
+  /**
+   * Update neighbor tile's splatmap texture after editing
+   */
+  private updateNeighborTileSplatmap(gridX: number, gridY: number): void {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    const mesh = this.neighborTileMeshes.get(key);
+
+    if (!tileData || !mesh || !mesh.material) return;
+
+    const material = mesh.material as ShaderMaterial;
+    const resolution = tileData.splatResolution;
+
+    // Update splatmap texture
+    const splatData = new Uint8Array(resolution * resolution * 4);
+    for (let i = 0; i < resolution * resolution; i++) {
+      splatData[i * 4 + 0] = Math.floor(tileData.splatmapData[i * 4 + 0] * 255);
+      splatData[i * 4 + 1] = Math.floor(tileData.splatmapData[i * 4 + 1] * 255);
+      splatData[i * 4 + 2] = Math.floor(tileData.splatmapData[i * 4 + 2] * 255);
+      splatData[i * 4 + 3] = Math.floor(tileData.splatmapData[i * 4 + 3] * 255);
+    }
+
+    const splatTexture = new RawTexture(
+      splatData,
+      resolution,
+      resolution,
+      Engine.TEXTUREFORMAT_RGBA,
+      this.scene,
+      false,
+      false,
+      Texture.BILINEAR_SAMPLINGMODE
+    );
+    material.setTexture("uSplatMap", splatTexture);
+
+    // Update water mask texture
+    const waterData = new Uint8Array(resolution * resolution * 4);
+    for (let i = 0; i < resolution * resolution; i++) {
+      const value = Math.floor(tileData.waterMaskData[i] * 255);
+      waterData[i * 4 + 0] = value;
+      waterData[i * 4 + 1] = value;
+      waterData[i * 4 + 2] = value;
+      waterData[i * 4 + 3] = 255;
+    }
+
+    const waterTexture = new RawTexture(
+      waterData,
+      resolution,
+      resolution,
+      Engine.TEXTUREFORMAT_RGBA,
+      this.scene,
+      false,
+      false,
+      Texture.BILINEAR_SAMPLINGMODE
+    );
+    material.setTexture("uWaterMask", waterTexture);
+
+    // Update water mesh for this tile
+    const tileSize = this.heightmap?.getScale() || 64;
+    this.createNeighborWaterMesh(gridX, gridY, tileSize, tileData.waterMaskData, resolution);
+  }
+
+  /**
+   * Calculate normals using gradient method (consistent with TerrainMesh)
+   */
+  private calculateGradientNormals(mesh: Mesh, resolution: number, cellSize: number, positions: number[]): void {
+    const normals: number[] = [];
+
+    for (let z = 0; z < resolution; z++) {
+      for (let x = 0; x < resolution; x++) {
+        const idx = (z * resolution + x) * 3;
+        const idxL = (z * resolution + Math.max(0, x - 1)) * 3;
+        const idxR = (z * resolution + Math.min(resolution - 1, x + 1)) * 3;
+        const idxD = (Math.max(0, z - 1) * resolution + x) * 3;
+        const idxU = (Math.min(resolution - 1, z + 1) * resolution + x) * 3;
+
+        const hL = positions[idxL + 1];
+        const hR = positions[idxR + 1];
+        const hD = positions[idxD + 1];
+        const hU = positions[idxU + 1];
+
+        const nx = (hL - hR) / (2 * cellSize);
+        const nz = (hD - hU) / (2 * cellSize);
+
+        const len = Math.sqrt(nx * nx + 1 + nz * nz);
+        normals.push(nx / len, 1 / len, nz / len);
+      }
+    }
+
+    mesh.updateVerticesData(VertexBuffer.NormalKind, normals);
+  }
+
+  /**
+   * Update foliage Y positions for a neighbor tile after height changes
+   */
+  private updateNeighborTileFoliage(gridX: number, gridY: number): void {
+    const key = `${gridX},${gridY}`;
+    const foliageMeshes = this.neighborFoliageMeshes.get(key);
+    const tileData = this.editableTileData.get(key);
+
+    if (!foliageMeshes || foliageMeshes.length === 0 || !tileData) return;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const resolution = tileData.resolution;
+    const offsetX = gridX * tileSize;
+    const offsetZ = gridY * tileSize;
+
+    for (const foliageMesh of foliageMeshes) {
+      const matrices = foliageMesh.thinInstanceGetWorldMatrices();
+      if (!matrices || matrices.length === 0) continue;
+
+      const instanceCount = matrices.length;
+      const updatedMatrices = new Float32Array(instanceCount * 16);
+
+      for (let i = 0; i < instanceCount; i++) {
+        const matrix = matrices[i];
+
+        // Copy all 16 elements
+        for (let j = 0; j < 16; j++) {
+          updatedMatrices[i * 16 + j] = matrix.m[j];
+        }
+
+        // Get world position
+        const worldX = matrix.m[12];
+        const worldZ = matrix.m[14];
+
+        // Convert to local tile coords
+        const localX = worldX - offsetX;
+        const localZ = worldZ - offsetZ;
+
+        // Sample height from tile heightmap
+        const cellSize = tileSize / (resolution - 1);
+        const hx = Math.min(Math.floor(localX / cellSize), resolution - 2);
+        const hz = Math.min(Math.floor(localZ / cellSize), resolution - 2);
+
+        // Bilinear interpolation
+        const fx = (localX / cellSize) - hx;
+        const fz = (localZ / cellSize) - hz;
+
+        const h00 = tileData.heightmapData[hz * resolution + hx];
+        const h10 = tileData.heightmapData[hz * resolution + hx + 1];
+        const h01 = tileData.heightmapData[(hz + 1) * resolution + hx];
+        const h11 = tileData.heightmapData[(hz + 1) * resolution + hx + 1];
+
+        const height = h00 * (1 - fx) * (1 - fz) +
+                      h10 * fx * (1 - fz) +
+                      h01 * (1 - fx) * fz +
+                      h11 * fx * fz;
+
+        // Update Y position
+        updatedMatrices[i * 16 + 13] = height;
+      }
+
+      foliageMesh.thinInstanceSetBuffer("matrix", updatedMatrices, 16, false);
+      foliageMesh.thinInstanceRefreshBoundingInfo();
     }
   }
 
@@ -511,45 +1207,75 @@ export class EditorEngine {
     if (!this.currentPickInfo.pickedPoint || !this.heightmap || !this.terrainMesh) return;
 
     const point = this.currentPickInfo.pickedPoint;
-    const splatMap = this.terrainMesh.getSplatMap();
+    const { gridX, gridY, localX, localZ } = this.getGridPositionFromWorld(point.x, point.z);
 
-    // Convert world coordinates to splat map coordinates
-    const scale = this.heightmap.getScale();
-    const resolution = splatMap.getResolution();
-    const splatX = (point.x / scale) * (resolution - 1);
-    const splatZ = (point.z / scale) * (resolution - 1);
-    const splatRadius = (settings.size / scale) * (resolution - 1);
+    // Center tile (0,0) - use main splatmap
+    if (gridX === 0 && gridY === 0) {
+      const splatMap = this.terrainMesh.getSplatMap();
+      const scale = this.heightmap.getScale();
+      const resolution = splatMap.getResolution();
+      const splatX = (point.x / scale) * (resolution - 1);
+      const splatZ = (point.z / scale) * (resolution - 1);
+      const splatRadius = (settings.size / scale) * (resolution - 1);
 
-    const modified = splatMap.paint(
-      splatX,
-      splatZ,
-      splatRadius,
-      material,
-      settings.strength,
-      settings.falloff
-    );
+      const modified = splatMap.paint(
+        splatX,
+        splatZ,
+        splatRadius,
+        material,
+        settings.strength,
+        settings.falloff
+      );
 
-    // For water, auto-set seaLevel if not already set, then carve basin and paint shore
-    if (material === "water" && modified) {
-      // Auto-set seaLevel to slightly below terrain height so water pools in carved area
-      if (this.seaLevel < -50) {
-        const terrainHeight = point.y;
-        // Set water level below surface so it sits in the carved basin
-        const waterSurfaceOffset = this.waterDepth * 0.8; // Water level well below surface
-        this.setSeaLevel(terrainHeight - waterSurfaceOffset);
-        console.log(`[EditorEngine] Auto-set seaLevel to ${terrainHeight - waterSurfaceOffset} (terrain: ${terrainHeight})`);
+      // For water, auto-set seaLevel if not already set, then carve basin and paint shore
+      if (material === "water" && modified) {
+        if (this.seaLevel < -50) {
+          const terrainHeight = point.y;
+          const waterSurfaceOffset = this.waterDepth * 0.8;
+          this.setSeaLevel(terrainHeight - waterSurfaceOffset);
+        }
+        this.carveWaterBasin(point.x, point.z, settings);
+        this.paintShoreTexture(point.x, point.z, settings.size);
+        this.terrainMesh.updateWaterMaskTexture();
       }
-      this.carveWaterBasin(point.x, point.z, settings);
-      this.paintShoreTexture(point.x, point.z, settings.size);
-      // Update water mask texture for shader
-      this.terrainMesh.updateWaterMaskTexture();
-    }
 
-    if (modified) {
-      this.terrainMesh.updateSplatTexture();
-      this.biomeDirty = true; // Mark for decoration rebuild on pointer up
-      this.foliageDirty = true; // Mark foliage for rebuild on pointer up
-      this.onModified?.();
+      if (modified) {
+        this.terrainMesh.updateSplatTexture();
+        this.biomeDirty = true;
+        this.foliageDirty = true;
+        this.modifiedTiles.add("0,0");
+        this.onModified?.();
+      }
+    } else {
+      // Neighbor tile - use editable tile data
+      this.ensureEditableTileData(gridX, gridY);
+      const modified = this.applyBiomeBrushToNeighborTile(gridX, gridY, localX, localZ, material, settings);
+
+      // For water, carve basin in neighbor tile
+      if (material === "water" && modified) {
+        if (this.seaLevel < -50) {
+          const terrainHeight = point.y;
+          const waterSurfaceOffset = this.waterDepth * 0.8;
+          this.setSeaLevel(terrainHeight - waterSurfaceOffset);
+        }
+        this.carveWaterBasinToNeighborTile(gridX, gridY, localX, localZ, settings);
+        // Ensure WaterSystem exists for shader material
+        this.ensureWaterSystem();
+        // Remove foliage in water area
+        this.removeNeighborFoliageInWaterArea(gridX, gridY, localX, localZ, settings.size);
+      }
+
+      if (modified) {
+        this.updateNeighborTileSplatmap(gridX, gridY);
+        this.updateNeighborTileMesh(gridX, gridY);
+        // Rebuild foliage for biome props (grass, rock, pebble, sandRock)
+        // For water, only remove foliage in water areas (already done above)
+        if (material !== "water") {
+          this.rebuildNeighborTileFoliage(gridX, gridY);
+        }
+        this.modifiedTiles.add(`${gridX},${gridY}`);
+        this.onModified?.();
+      }
     }
   }
 
@@ -650,6 +1376,400 @@ export class EditorEngine {
       const waterSystem = this.biomeDecorator?.getWaterSystem();
       if (waterSystem) {
         waterSystem.updateHeightmapTexture();
+      }
+    }
+  }
+
+  /**
+   * Carve water basin in neighbor tile
+   */
+  private carveWaterBasinToNeighborTile(
+    gridX: number,
+    gridY: number,
+    localX: number,
+    localZ: number,
+    settings: BrushSettings
+  ): void {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    if (!tileData) return;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const resolution = tileData.resolution;
+    const cellSize = tileSize / (resolution - 1);
+
+    const centerX = localX / cellSize;
+    const centerZ = localZ / cellSize;
+    const radius = settings.size / cellSize;
+    const outerRadius = radius * 1.4;
+
+    const minX = Math.max(0, Math.floor(centerX - outerRadius));
+    const maxX = Math.min(resolution - 1, Math.ceil(centerX + outerRadius));
+    const minZ = Math.max(0, Math.floor(centerZ - outerRadius));
+    const maxZ = Math.min(resolution - 1, Math.ceil(centerZ + outerRadius));
+
+    const shoreHeight = 0.5;
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - centerX;
+        const dz = z - centerZ;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+        const normalizedDist = distance / radius;
+
+        if (distance > outerRadius) continue;
+
+        const idx = z * resolution + x;
+        const currentHeight = tileData.heightmapData[idx];
+        let targetHeight: number;
+        let blendStrength: number;
+
+        if (normalizedDist < 0.6) {
+          targetHeight = this.seaLevel - this.waterDepth;
+          blendStrength = 1.0;
+        } else if (normalizedDist < 1.0) {
+          const progress = (normalizedDist - 0.6) / 0.4;
+          const smoothProgress = this.smoothstep(0, 1, progress);
+          targetHeight = this.seaLevel - this.waterDepth * (1 - smoothProgress);
+          blendStrength = 1.0 - progress * 0.3;
+        } else if (normalizedDist < 1.4) {
+          const shoreProgress = (normalizedDist - 1.0) / 0.4;
+          const smoothShoreProgress = this.smoothstep(0, 1, shoreProgress);
+          targetHeight = this.seaLevel + smoothShoreProgress * shoreHeight;
+          blendStrength = 1.0 - shoreProgress;
+        } else {
+          continue;
+        }
+
+        const effectiveStrength = settings.strength * blendStrength * 0.03;
+
+        if (currentHeight > targetHeight) {
+          const lowerAmount = (currentHeight - targetHeight) * effectiveStrength;
+          tileData.heightmapData[idx] = Math.max(targetHeight, currentHeight - lowerAmount);
+        } else if (normalizedDist >= 1.0 && currentHeight < targetHeight) {
+          const raiseAmount = (targetHeight - currentHeight) * effectiveStrength * 0.5;
+          tileData.heightmapData[idx] = Math.min(targetHeight, currentHeight + raiseAmount);
+        }
+      }
+    }
+
+    // Also paint sand texture around water in neighbor tile
+    this.paintShoreTextureToNeighborTile(gridX, gridY, localX, localZ, settings.size);
+  }
+
+  /**
+   * Paint sand texture around water in neighbor tile
+   */
+  private paintShoreTextureToNeighborTile(
+    gridX: number,
+    gridY: number,
+    localX: number,
+    localZ: number,
+    waterRadius: number
+  ): void {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    if (!tileData) return;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const resolution = tileData.splatResolution;
+    const cellSize = tileSize / (resolution - 1);
+
+    const shoreWidth = waterRadius * 0.3;
+    const innerRadius = waterRadius;
+    const outerRadius = waterRadius + shoreWidth;
+
+    const centerX = localX / cellSize;
+    const centerZ = localZ / cellSize;
+    const innerRadiusCells = innerRadius / cellSize;
+    const outerRadiusCells = outerRadius / cellSize;
+
+    const minX = Math.max(0, Math.floor(centerX - outerRadiusCells));
+    const maxX = Math.min(resolution - 1, Math.ceil(centerX + outerRadiusCells));
+    const minZ = Math.max(0, Math.floor(centerZ - outerRadiusCells));
+    const maxZ = Math.min(resolution - 1, Math.ceil(centerZ + outerRadiusCells));
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
+        const dx = x - centerX;
+        const dz = z - centerZ;
+        const distance = Math.sqrt(dx * dx + dz * dz);
+
+        if (distance < innerRadiusCells || distance > outerRadiusCells) continue;
+
+        const shoreProgress = (distance - innerRadiusCells) / (outerRadiusCells - innerRadiusCells);
+        const sandStrength = (1 - shoreProgress) * 0.8;
+
+        const idx = z * resolution + x;
+        const splatIdx = idx * 4;
+
+        // Reduce other channels, increase sand (channel 3)
+        for (let c = 0; c < 4; c++) {
+          if (c !== 3) {
+            tileData.splatmapData[splatIdx + c] *= (1 - sandStrength * 0.1);
+          }
+        }
+        tileData.splatmapData[splatIdx + 3] = Math.min(1, tileData.splatmapData[splatIdx + 3] + sandStrength * 0.1);
+
+        // Normalize
+        let total = 0;
+        for (let c = 0; c < 4; c++) total += tileData.splatmapData[splatIdx + c];
+        if (total > 0) {
+          for (let c = 0; c < 4; c++) tileData.splatmapData[splatIdx + c] /= total;
+        }
+      }
+    }
+  }
+
+  /**
+   * Rebuild foliage for neighbor tile based on splatmap
+   * Handles all biome types: grass, pebble (dirt), rock, sandRock (sand)
+   */
+  private rebuildNeighborTileFoliage(gridX: number, gridY: number): void {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    if (!tileData || !this.foliageSystem) return;
+
+    // Dispose existing foliage
+    const existingFoliage = this.neighborFoliageMeshes.get(key);
+    if (existingFoliage) {
+      for (const mesh of existingFoliage) {
+        mesh.dispose();
+      }
+      this.neighborFoliageMeshes.delete(key);
+    }
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const offsetX = gridX * tileSize;
+    const offsetZ = gridY * tileSize;
+    const resolution = tileData.splatResolution;
+    const cellSize = tileSize / (resolution - 1);
+
+    // Instance arrays for each biome type
+    type FoliageInstance = { x: number; y: number; z: number; scale: number; rotation: number };
+    const grassInstances: FoliageInstance[] = [];
+    const pebbleInstances: FoliageInstance[] = [];  // Dirt biome
+    const rockInstances: FoliageInstance[] = [];    // Rock biome
+    const sandRockInstances: FoliageInstance[] = []; // Sand biome
+
+    // Biome config thresholds (matching FoliageSystem)
+    const biomeConfig = {
+      grass: { channel: 0, threshold: 0.3, minScale: 0.4, maxScale: 0.8, yOffset: 0 },
+      pebble: { channel: 1, threshold: 0.4, minScale: 0.1, maxScale: 0.25, yOffset: -0.02 },
+      rock: { channel: 2, threshold: 0.3, minScale: 0.2, maxScale: 0.6, yOffset: -0.05 },
+      sandRock: { channel: 3, threshold: 0.5, minScale: 0.15, maxScale: 0.4, yOffset: -0.03 },
+    };
+
+    // Seed random for deterministic placement
+    let seed = gridX * 1000 + gridY;
+    const seededRandom = () => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280;
+    };
+
+    for (let z = 0; z < resolution; z += 4) {
+      for (let x = 0; x < resolution; x += 4) {
+        const idx = z * resolution + x;
+        const splatIdx = idx * 4;
+
+        const grass = tileData.splatmapData[splatIdx + 0];
+        const dirt = tileData.splatmapData[splatIdx + 1];
+        const rock = tileData.splatmapData[splatIdx + 2];
+        const sand = tileData.splatmapData[splatIdx + 3];
+        const water = tileData.waterMaskData[idx];
+
+        // Skip water areas
+        if (water > 0.3) continue;
+
+        // Get height at this position
+        const hRes = tileData.resolution;
+        const hx = Math.floor((x / (resolution - 1)) * (hRes - 1));
+        const hz = Math.floor((z / (resolution - 1)) * (hRes - 1));
+        const height = tileData.heightmapData[hz * hRes + hx] || 0;
+
+        const localX = x * cellSize;
+        const localZ = z * cellSize;
+
+        // Random jitter
+        const jitterX = (seededRandom() - 0.5) * cellSize * 2;
+        const jitterZ = (seededRandom() - 0.5) * cellSize * 2;
+
+        // Place grass foliage
+        if (grass >= biomeConfig.grass.threshold && seededRandom() < grass) {
+          const scale = biomeConfig.grass.minScale + seededRandom() * (biomeConfig.grass.maxScale - biomeConfig.grass.minScale);
+          grassInstances.push({
+            x: localX + jitterX + offsetX,
+            y: height + biomeConfig.grass.yOffset,
+            z: localZ + jitterZ + offsetZ,
+            scale,
+            rotation: seededRandom() * Math.PI * 2,
+          });
+        }
+
+        // Place pebble foliage (dirt biome)
+        if (dirt >= biomeConfig.pebble.threshold && seededRandom() < dirt * 0.5) {
+          const scale = biomeConfig.pebble.minScale + seededRandom() * (biomeConfig.pebble.maxScale - biomeConfig.pebble.minScale);
+          pebbleInstances.push({
+            x: localX + jitterX + offsetX,
+            y: height + biomeConfig.pebble.yOffset,
+            z: localZ + jitterZ + offsetZ,
+            scale,
+            rotation: seededRandom() * Math.PI * 2,
+          });
+        }
+
+        // Place rock foliage (rock biome)
+        if (rock >= biomeConfig.rock.threshold && seededRandom() < rock * 0.3) {
+          const scale = biomeConfig.rock.minScale + seededRandom() * (biomeConfig.rock.maxScale - biomeConfig.rock.minScale);
+          rockInstances.push({
+            x: localX + jitterX + offsetX,
+            y: height + biomeConfig.rock.yOffset,
+            z: localZ + jitterZ + offsetZ,
+            scale,
+            rotation: seededRandom() * Math.PI * 2,
+          });
+        }
+
+        // Place sandRock foliage (sand biome)
+        if (sand >= biomeConfig.sandRock.threshold && seededRandom() < sand * 0.3) {
+          const scale = biomeConfig.sandRock.minScale + seededRandom() * (biomeConfig.sandRock.maxScale - biomeConfig.sandRock.minScale);
+          sandRockInstances.push({
+            x: localX + jitterX + offsetX,
+            y: height + biomeConfig.sandRock.yOffset,
+            z: localZ + jitterZ + offsetZ,
+            scale,
+            rotation: seededRandom() * Math.PI * 2,
+          });
+        }
+      }
+    }
+
+    const foliageMeshes: Mesh[] = [];
+
+    // Helper function to create foliage mesh from instances
+    const createFoliageMesh = (
+      instances: FoliageInstance[],
+      baseMeshType: string,
+      suffix: string
+    ): void => {
+      if (instances.length === 0) return;
+
+      const baseMesh = this.foliageSystem!.getBaseMesh(baseMeshType);
+      if (!baseMesh) return;
+
+      const foliageMesh = new Mesh(`neighbor_foliage_${gridX}_${gridY}_${suffix}`, this.scene);
+
+      const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
+      const normals = baseMesh.getVerticesData(VertexBuffer.NormalKind);
+      const colors = baseMesh.getVerticesData(VertexBuffer.ColorKind);
+      const indices = baseMesh.getIndices();
+
+      if (positions && indices) {
+        const vertexData = new VertexData();
+        vertexData.positions = new Float32Array(positions);
+        if (normals) vertexData.normals = new Float32Array(normals);
+        if (colors) vertexData.colors = new Float32Array(colors);
+        vertexData.indices = new Uint32Array(indices);
+        vertexData.applyToMesh(foliageMesh);
+      }
+
+      foliageMesh.material = baseMesh.material;
+
+      // Create instance matrices
+      const matrices = new Float32Array(instances.length * 16);
+      for (let i = 0; i < instances.length; i++) {
+        const inst = instances[i];
+        const m = Matrix.Compose(
+          new Vector3(inst.scale, inst.scale, inst.scale),
+          Quaternion.RotationAxis(Vector3.Up(), inst.rotation),
+          new Vector3(inst.x, inst.y, inst.z)
+        );
+        m.copyToArray(matrices, i * 16);
+      }
+
+      foliageMesh.thinInstanceSetBuffer("matrix", matrices, 16);
+      foliageMesh.isPickable = false;
+      foliageMeshes.push(foliageMesh);
+    };
+
+    // Create meshes for each biome type
+    createFoliageMesh(grassInstances, "grass", "grass");
+    createFoliageMesh(pebbleInstances, "rock", "pebble");  // Pebbles use rock mesh
+    createFoliageMesh(rockInstances, "rock", "rock");
+    createFoliageMesh(sandRockInstances, "sandRock", "sandRock");
+
+    if (foliageMeshes.length > 0) {
+      this.neighborFoliageMeshes.set(key, foliageMeshes);
+    }
+  }
+
+  /**
+   * Ensure WaterSystem exists for shader material sharing
+   */
+  private ensureWaterSystem(): void {
+    if (!this.biomeDecorator) return;
+
+    const waterSystem = this.biomeDecorator.getWaterSystem();
+    if (!waterSystem) {
+      // Force biome decorator to build water (creates WaterSystem)
+      this.biomeDecorator.rebuildAll();
+    }
+  }
+
+  /**
+   * Remove foliage instances in water area from neighbor tile
+   */
+  private removeNeighborFoliageInWaterArea(
+    gridX: number,
+    gridY: number,
+    localX: number,
+    localZ: number,
+    radius: number
+  ): void {
+    const key = `${gridX},${gridY}`;
+    const foliageMeshes = this.neighborFoliageMeshes.get(key);
+    if (!foliageMeshes || foliageMeshes.length === 0) return;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    const offsetX = gridX * tileSize;
+    const offsetZ = gridY * tileSize;
+    const worldCenterX = localX + offsetX;
+    const worldCenterZ = localZ + offsetZ;
+    const radiusSq = radius * radius;
+
+    for (const foliageMesh of foliageMeshes) {
+      const matrices = foliageMesh.thinInstanceGetWorldMatrices();
+      if (!matrices || matrices.length === 0) continue;
+
+      // Filter out instances inside water area
+      const filteredMatrices: Float32Array[] = [];
+      for (let i = 0; i < matrices.length; i++) {
+        const m = matrices[i];
+        const x = m.m[12];
+        const z = m.m[14];
+
+        const dx = x - worldCenterX;
+        const dz = z - worldCenterZ;
+        const distSq = dx * dx + dz * dz;
+
+        // Keep instances outside water area
+        if (distSq > radiusSq) {
+          const matrixData = new Float32Array(16);
+          m.copyToArray(matrixData);
+          filteredMatrices.push(matrixData);
+        }
+      }
+
+      // Update mesh with filtered instances
+      if (filteredMatrices.length > 0) {
+        const newMatrices = new Float32Array(filteredMatrices.length * 16);
+        for (let i = 0; i < filteredMatrices.length; i++) {
+          newMatrices.set(filteredMatrices[i], i * 16);
+        }
+        foliageMesh.thinInstanceSetBuffer("matrix", newMatrices, 16);
+      } else {
+        // No instances left, hide mesh
+        foliageMesh.thinInstanceSetBuffer("matrix", new Float32Array(0), 16);
       }
     }
   }
@@ -1285,6 +2405,35 @@ export class EditorEngine {
     }
   }
 
+  /**
+   * Move camera in WASD style (moves camera target)
+   */
+  moveCamera(direction: "forward" | "backward" | "left" | "right", speed: number = 2): void {
+    // Get camera forward direction (projected onto XZ plane)
+    const forward = this.camera.getForwardRay().direction;
+    const forwardXZ = new Vector3(forward.x, 0, forward.z).normalize();
+    const rightXZ = Vector3.Cross(Vector3.Up(), forwardXZ).normalize();
+
+    let movement = Vector3.Zero();
+
+    switch (direction) {
+      case "forward":
+        movement = forwardXZ.scale(speed);
+        break;
+      case "backward":
+        movement = forwardXZ.scale(-speed);
+        break;
+      case "left":
+        movement = rightXZ.scale(-speed);
+        break;
+      case "right":
+        movement = rightXZ.scale(speed);
+        break;
+    }
+
+    this.camera.target.addInPlace(movement);
+  }
+
   // Control camera wheel zoom
   setCameraWheelEnabled(enabled: boolean): void {
     // Use wheelDeltaPercentage instead of wheelPrecision for more reliable control
@@ -1433,10 +2582,14 @@ export class EditorEngine {
     size: number;
     seaLevel: number;
     waterDepth: number;
+    foliageData?: Record<string, string>;
   } | null {
     if (!this.heightmap || !this.terrainMesh) return null;
 
     const splatMap = this.terrainMesh.getSplatMap();
+
+    // Export foliage instance data
+    const foliageData = this.foliageSystem?.exportTileData();
 
     return {
       heightmapData: new Float32Array(this.heightmap.getData()),
@@ -1446,6 +2599,7 @@ export class EditorEngine {
       size: this.heightmap.getScale(),
       seaLevel: this.seaLevel,
       waterDepth: this.waterDepth,
+      foliageData,
     };
   }
 
@@ -1459,7 +2613,8 @@ export class EditorEngine {
     resolution: number,
     size: number,
     seaLevel: number,
-    waterDepth: number
+    waterDepth: number,
+    foliageData?: Record<string, string>
   ): void {
     // Dispose existing terrain
     if (this.terrainMesh) {
@@ -1513,7 +2668,15 @@ export class EditorEngine {
       splatMap,
       size
     );
-    this.foliageSystem.generateAll();
+
+    // Load saved foliage data or generate new
+    if (foliageData && Object.keys(foliageData).length > 0) {
+      console.log("[EditorEngine] Importing saved foliage data");
+      this.foliageSystem.importTileData(foliageData, 0, 0, true);
+    } else {
+      console.log("[EditorEngine] Generating new foliage");
+      this.foliageSystem.generateAll();
+    }
 
     // Initialize impostor system
     this.impostorSystem = new ImpostorSystem(this.scene);
@@ -1630,10 +2793,1311 @@ export class EditorEngine {
     console.log(`[EditorEngine] Applied connected edge data for direction: ${direction}`);
   }
 
+  // ============================================
+  // World Grid Multi-Tile Rendering
+  // ============================================
+
+  /**
+   * Update the world grid rendering based on ManualTileManager configuration.
+   * In edit mode: shows ghost/preview tiles around the center
+   * In game mode: triggers GamePreview to reload with new configuration
+   */
+  updateWorldGrid(): void {
+    const tileManager = getManualTileManager();
+    const worldConfig = tileManager.getWorldConfig();
+    console.log("=== [EditorEngine] updateWorldGrid ===");
+    console.log("  isGameMode:", this.isGameMode);
+    console.log("  gridSize:", worldConfig.gridSize);
+    console.log("  manualPlacements:", worldConfig.manualPlacements.length);
+
+    if (this.isGameMode) {
+      // In game mode, exit and re-enter to apply new configuration
+      console.log("  → exitGameMode + enterGameMode");
+      this.exitGameMode();
+      this.enterGameMode();
+      return;
+    }
+
+    // In edit mode, update neighboring tile previews
+    console.log("  → updateNeighborTilePreviews (edit mode)");
+    this.updateNeighborTilePreviews();
+  }
+
+  /**
+   * Toggle visibility of neighboring tile previews in edit mode
+   */
+  setShowNeighborTiles(show: boolean): void {
+    this.showNeighborTiles = show;
+    for (const mesh of this.neighborTileMeshes.values()) {
+      mesh.isVisible = show;
+    }
+  }
+
+  /**
+   * Update neighboring tile previews based on World Grid configuration
+   */
+  private updateNeighborTilePreviews(): void {
+    console.log("[EditorEngine] updateNeighborTilePreviews called");
+    if (!this.terrainMesh || !this.heightmap) {
+      console.log("[EditorEngine] No terrainMesh or heightmap, skipping");
+      return;
+    }
+
+    // Update default tile template with current terrain state (including water)
+    this.saveDefaultTileTemplate();
+
+    const tileManager = getManualTileManager();
+    const worldConfig = tileManager.getWorldConfig();
+    const size = this.heightmap.getScale();
+
+    const gridSize = worldConfig.gridSize || 3;
+    const halfGrid = Math.floor(gridSize / 2);
+
+    console.log("[EditorEngine] World config:", {
+      placements: worldConfig.manualPlacements.length,
+      pool: worldConfig.infinitePool.length,
+      size,
+      gridSize,
+      halfGrid
+    });
+
+    // Clear existing neighbor meshes
+    this.clearNeighborTilePreviews();
+
+    // Create previews for NxN grid around center (excluding center which is the active tile)
+    // Build positions dynamically based on gridSize
+    const positions: Array<{x: number, y: number}> = [];
+    for (let x = -halfGrid; x <= halfGrid; x++) {
+      for (let y = -halfGrid; y <= halfGrid; y++) {
+        if (x === 0 && y === 0) continue; // Skip center (active tile)
+        positions.push({ x, y });
+      }
+    }
+    console.log(`[EditorEngine] Creating ${positions.length} neighbor tiles for ${gridSize}x${gridSize} grid`);
+
+    for (const pos of positions) {
+      // Check for manually placed tile first
+      const placement = worldConfig.manualPlacements.find(p => p.gridX === pos.x && p.gridY === pos.y);
+
+      if (placement) {
+        // Manual placement - use the specified tile
+        const tileData = tileManager.getTile(placement.tileId);
+        console.log(`[EditorEngine] Position (${pos.x},${pos.y}): manual placement tileId=${placement.tileId}, hasData=${!!tileData}`);
+        if (tileData) {
+          this.createNeighborTilePreview(pos.x, pos.y, placement.tileId, size);
+        } else {
+          // Tile data missing - use default grass tile
+          console.log(`[EditorEngine] Position (${pos.x},${pos.y}): tile data missing, using default grass`);
+          this.createDefaultGrassTilePreview(pos.x, pos.y, size);
+        }
+      } else {
+        // No manual placement - use default flat grass tile for infinite expansion
+        console.log(`[EditorEngine] Position (${pos.x},${pos.y}): no placement, using default grass tile`);
+        this.createDefaultGrassTilePreview(pos.x, pos.y, size);
+      }
+    }
+
+    console.log("[EditorEngine] Created", this.neighborTileMeshes.size, "neighbor tile meshes");
+  }
+
+  /**
+   * Get tile ID for a given grid position from placements or pool
+   */
+  private getTileForPosition(
+    x: number,
+    y: number,
+    placements: TilePlacement[],
+    pool: PoolTileEntry[]
+  ): string | null {
+    // Check manual placement first
+    const placement = placements.find(p => p.gridX === x && p.gridY === y);
+    if (placement) {
+      return placement.tileId;
+    }
+
+    // If no manual placement, pick from enabled pool tiles
+    const enabledPool = pool.filter(e => e.enabled);
+    if (enabledPool.length === 0) {
+      return null;
+    }
+
+    // Deterministic random selection based on position (for consistent preview)
+    const seed = (x + 100) * 1000 + (y + 100);
+    const totalWeight = enabledPool.reduce((sum, e) => sum + e.weight, 0);
+    let random = ((seed * 9301 + 49297) % 233280) / 233280 * totalWeight;
+
+    for (const entry of enabledPool) {
+      random -= entry.weight;
+      if (random <= 0) {
+        return entry.tileId;
+      }
+    }
+
+    return enabledPool[0]?.tileId || null;
+  }
+
+  /**
+   * Create a terrain mesh for a neighboring tile (same rendering as main terrain)
+   */
+  private createNeighborTilePreview(gridX: number, gridY: number, tileId: string, tileSize: number): void {
+    console.log(`[EditorEngine] createNeighborTilePreview START: (${gridX},${gridY}), tileId=${tileId}`);
+
+    const tileManager = getManualTileManager();
+    const tileData = tileManager.getTile(tileId);
+
+    if (!tileData) {
+      console.log(`[EditorEngine] createNeighborTilePreview: no tileData for (${gridX},${gridY})`);
+      return;
+    }
+    if (!this.terrainMesh) {
+      console.log(`[EditorEngine] createNeighborTilePreview: no terrainMesh for (${gridX},${gridY})`);
+      return;
+    }
+
+    try {
+      // Decode heightmap and splatmap from stored tile
+      const heightmapData = this.decodeFloat32Array(tileData.heightmap);
+      const splatmapData = this.decodeFloat32Array(tileData.splatmap);
+      const tileResolution = tileData.resolution + 1; // +1 for vertex count
+
+      // Apply seamless blending with center tile edges
+      this.blendNeighborEdges(gridX, gridY, heightmapData, splatmapData, tileResolution);
+
+      console.log(`[EditorEngine] Tile data: resolution=${tileData.resolution}, heightmapLength=${heightmapData.length}, tileSize=${tileSize}`);
+
+      // Use lower resolution for neighbor tiles (performance)
+      const targetResolution = Math.min(65, tileResolution);
+      const step = Math.max(1, Math.floor((tileResolution - 1) / (targetResolution - 1)));
+      const actualResolution = Math.floor((tileResolution - 1) / step) + 1;
+      const cellSize = tileSize / (actualResolution - 1);
+
+      const positions: number[] = [];
+      const normals: number[] = [];
+      const uvs: number[] = [];
+      const indices: number[] = [];
+
+      // Create vertices (same logic as TerrainMesh)
+      for (let z = 0; z < actualResolution; z++) {
+        for (let x = 0; x < actualResolution; x++) {
+          const hx = Math.min(x * step, tileResolution - 1);
+          const hz = Math.min(z * step, tileResolution - 1);
+          const idx = hz * tileResolution + hx;
+          const height = (idx < heightmapData.length) ? heightmapData[idx] : 0;
+
+          positions.push(x * cellSize, height, z * cellSize);
+          uvs.push(x / (actualResolution - 1), z / (actualResolution - 1));
+          normals.push(0, 1, 0); // Will be recalculated
+        }
+      }
+
+      // Create indices
+      for (let z = 0; z < actualResolution - 1; z++) {
+        for (let x = 0; x < actualResolution - 1; x++) {
+          const topLeft = z * actualResolution + x;
+          const topRight = topLeft + 1;
+          const bottomLeft = (z + 1) * actualResolution + x;
+          const bottomRight = bottomLeft + 1;
+
+          indices.push(topLeft, bottomLeft, topRight);
+          indices.push(topRight, bottomLeft, bottomRight);
+        }
+      }
+
+      console.log(`[EditorEngine] Mesh data: vertices=${positions.length / 3}, indices=${indices.length}`);
+
+      // Create mesh
+      const mesh = new Mesh(`neighbor_${gridX}_${gridY}`, this.scene);
+      const vertexData = new VertexData();
+      vertexData.positions = positions;
+      vertexData.indices = indices;
+      vertexData.uvs = uvs;
+
+      // Compute normals
+      VertexData.ComputeNormals(positions, indices, normals);
+      vertexData.normals = normals;
+
+      vertexData.applyToMesh(mesh, true);
+
+      // Position the mesh at grid location
+      mesh.position.x = gridX * tileSize;
+      mesh.position.z = gridY * tileSize;
+
+      // Create full terrain shader material for neighbor tile (splatmapData already decoded above)
+      const splatResolution = Math.sqrt(splatmapData.length / 4);
+
+      // Create terrain material with the tile's splatmap data
+      const material = createTerrainMaterial(this.scene, splatmapData, splatResolution);
+      material.name = `neighbor_terrain_${gridX}_${gridY}`;
+      material.backFaceCulling = false;
+
+      // Set terrain size uniform to match the tile size
+      material.setFloat("uTerrainSize", tileSize);
+
+      // Create water mask texture for neighbor tile
+      const waterMaskData = this.decodeFloat32Array(tileData.waterMask);
+      const waterMaskResolution = Math.sqrt(waterMaskData.length);
+      const waterMaskUint8 = new Uint8Array(waterMaskResolution * waterMaskResolution * 4);
+      for (let i = 0; i < waterMaskResolution * waterMaskResolution; i++) {
+        const value = Math.floor(waterMaskData[i] * 255);
+        waterMaskUint8[i * 4] = value;      // R
+        waterMaskUint8[i * 4 + 1] = value;  // G
+        waterMaskUint8[i * 4 + 2] = value;  // B
+        waterMaskUint8[i * 4 + 3] = 255;    // A
+      }
+      const waterMaskTexture = new RawTexture(
+        waterMaskUint8,
+        waterMaskResolution,
+        waterMaskResolution,
+        Engine.TEXTUREFORMAT_RGBA,
+        this.scene,
+        false,
+        false,
+        Texture.BILINEAR_SAMPLINGMODE
+      );
+      waterMaskTexture.name = `neighbor_waterMask_${gridX}_${gridY}`;
+      material.setTexture("uWaterMask", waterMaskTexture);
+
+      mesh.material = material;
+
+      console.log(`[EditorEngine] Applied full terrain shader to neighbor mesh (${gridX},${gridY}), splatRes=${splatResolution}`);
+
+      // Store the material for cleanup (not shared, can be disposed)
+      (mesh as any)._ownMaterial = true;
+
+      mesh.isPickable = true; // Enable picking for editing
+      mesh.receiveShadows = true;
+
+      console.log(`[EditorEngine] SUCCESS: Created neighbor terrain at (${gridX},${gridY}), position=(${mesh.position.x}, ${mesh.position.z}), isVisible=${mesh.isVisible}`);
+
+      this.neighborTileMeshes.set(`${gridX},${gridY}`, mesh);
+
+      // Render foliage for neighbor tile if available
+      this.createNeighborFoliage(gridX, gridY, tileData.foliageData, tileSize);
+    } catch (error) {
+      console.error(`[EditorEngine] ERROR creating neighbor tile (${gridX},${gridY}):`, error);
+    }
+  }
+
+  /**
+   * Create foliage meshes for a neighbor tile
+   */
+  private createNeighborFoliage(
+    gridX: number,
+    gridY: number,
+    foliageData: Record<string, string> | undefined,
+    tileSize: number
+  ): void {
+    if (!foliageData || Object.keys(foliageData).length === 0) {
+      console.log(`[EditorEngine] No foliage data for neighbor (${gridX},${gridY})`);
+      return;
+    }
+
+    if (!this.foliageSystem) {
+      console.log(`[EditorEngine] No foliageSystem available for neighbor foliage`);
+      return;
+    }
+
+    const gridKey = `${gridX},${gridY}`;
+    const foliageMeshes: Mesh[] = [];
+    const offsetX = gridX * tileSize;
+    const offsetZ = gridY * tileSize;
+
+    let totalInstances = 0;
+
+    for (const [typeName, base64] of Object.entries(foliageData)) {
+      // Get base mesh from foliage system
+      const baseMesh = this.foliageSystem.getBaseMesh(typeName);
+      if (!baseMesh) {
+        console.warn(`[EditorEngine] No base mesh for foliage type: ${typeName}`);
+        continue;
+      }
+
+      // Decode matrices
+      const matrices = this.decodeFloat32Array(base64);
+      if (matrices.length === 0) continue;
+
+      const instanceCount = matrices.length / 16;
+
+      // Apply position offset to matrices
+      for (let i = 0; i < instanceCount; i++) {
+        const baseIdx = i * 16;
+        matrices[baseIdx + 12] += offsetX;
+        matrices[baseIdx + 14] += offsetZ;
+      }
+
+      // Create mesh with independent geometry (avoid WebGPU buffer sharing)
+      const neighborMesh = new Mesh(`neighbor_foliage_${gridX}_${gridY}_${typeName}`, this.scene);
+
+      const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
+      const normals = baseMesh.getVerticesData(VertexBuffer.NormalKind);
+      const colors = baseMesh.getVerticesData(VertexBuffer.ColorKind);
+      const uvs = baseMesh.getVerticesData(VertexBuffer.UVKind);
+      const indices = baseMesh.getIndices();
+
+      if (positions && indices) {
+        const vertexData = new VertexData();
+        vertexData.positions = new Float32Array(positions);
+        if (normals) vertexData.normals = new Float32Array(normals);
+        if (colors) vertexData.colors = new Float32Array(colors);
+        if (uvs) vertexData.uvs = new Float32Array(uvs);
+        vertexData.indices = new Uint32Array(indices);
+        vertexData.applyToMesh(neighborMesh);
+      }
+
+      neighborMesh.material = baseMesh.material;
+      neighborMesh.isVisible = true;
+      neighborMesh.isPickable = false;
+
+      // Set thin instances
+      neighborMesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
+      neighborMesh.thinInstanceCount = instanceCount;
+      neighborMesh.thinInstanceRefreshBoundingInfo();
+
+      foliageMeshes.push(neighborMesh);
+      totalInstances += instanceCount;
+    }
+
+    if (foliageMeshes.length > 0) {
+      this.neighborFoliageMeshes.set(gridKey, foliageMeshes);
+      console.log(`[EditorEngine] Created ${foliageMeshes.length} foliage meshes for neighbor (${gridX},${gridY}), total instances: ${totalInstances}`);
+    }
+  }
+
+  /**
+   * Blend neighbor tile edges with center tile for seamless transitions
+   */
+  private blendNeighborEdges(
+    gridX: number,
+    gridY: number,
+    heightmapData: Float32Array,
+    splatmapData: Float32Array,
+    resolution: number
+  ): void {
+    if (!this.heightmap || !this.terrainMesh) return;
+
+    const centerRes = this.heightmap.getResolution();
+    const centerSplatMap = this.terrainMesh.getSplatMap();
+    const centerSplatData = centerSplatMap.getData();
+    const blendDepth = Math.min(10, Math.floor(resolution / 10)); // Adaptive blend depth
+
+    // Blend RIGHT edge of neighbor with LEFT edge of center (neighbor is to the left)
+    if (gridX === -1 && gridY === 0) {
+      this.blendEdge(heightmapData, splatmapData, resolution, "right",
+        (z) => this.heightmap!.getHeight(0, z),
+        (z, c) => centerSplatData[(z * centerRes + 0) * 4 + c],
+        blendDepth
+      );
+    }
+
+    // Blend LEFT edge of neighbor with RIGHT edge of center (neighbor is to the right)
+    if (gridX === 1 && gridY === 0) {
+      this.blendEdge(heightmapData, splatmapData, resolution, "left",
+        (z) => this.heightmap!.getHeight(centerRes - 1, z),
+        (z, c) => centerSplatData[(z * centerRes + (centerRes - 1)) * 4 + c],
+        blendDepth
+      );
+    }
+
+    // Blend BOTTOM edge of neighbor with TOP edge of center (neighbor is above/behind)
+    if (gridX === 0 && gridY === -1) {
+      this.blendEdge(heightmapData, splatmapData, resolution, "bottom",
+        (x) => this.heightmap!.getHeight(x, 0),
+        (x, c) => centerSplatData[(0 * centerRes + x) * 4 + c],
+        blendDepth
+      );
+    }
+
+    // Blend TOP edge of neighbor with BOTTOM edge of center (neighbor is below/front)
+    if (gridX === 0 && gridY === 1) {
+      this.blendEdge(heightmapData, splatmapData, resolution, "top",
+        (x) => this.heightmap!.getHeight(x, centerRes - 1),
+        (x, c) => centerSplatData[((centerRes - 1) * centerRes + x) * 4 + c],
+        blendDepth
+      );
+    }
+
+    // Corner tiles: blend both edges
+    if (gridX === -1 && gridY === -1) {
+      // Top-left corner: blend right and bottom edges
+      this.blendEdge(heightmapData, splatmapData, resolution, "right",
+        (z) => this.heightmap!.getHeight(0, z),
+        (z, c) => centerSplatData[(z * centerRes + 0) * 4 + c],
+        blendDepth
+      );
+      this.blendEdge(heightmapData, splatmapData, resolution, "bottom",
+        (x) => this.heightmap!.getHeight(x, 0),
+        (x, c) => centerSplatData[(0 * centerRes + x) * 4 + c],
+        blendDepth
+      );
+    }
+
+    if (gridX === 1 && gridY === -1) {
+      // Top-right corner: blend left and bottom edges
+      this.blendEdge(heightmapData, splatmapData, resolution, "left",
+        (z) => this.heightmap!.getHeight(centerRes - 1, z),
+        (z, c) => centerSplatData[(z * centerRes + (centerRes - 1)) * 4 + c],
+        blendDepth
+      );
+      this.blendEdge(heightmapData, splatmapData, resolution, "bottom",
+        (x) => this.heightmap!.getHeight(x, 0),
+        (x, c) => centerSplatData[(0 * centerRes + x) * 4 + c],
+        blendDepth
+      );
+    }
+
+    if (gridX === -1 && gridY === 1) {
+      // Bottom-left corner: blend right and top edges
+      this.blendEdge(heightmapData, splatmapData, resolution, "right",
+        (z) => this.heightmap!.getHeight(0, z),
+        (z, c) => centerSplatData[(z * centerRes + 0) * 4 + c],
+        blendDepth
+      );
+      this.blendEdge(heightmapData, splatmapData, resolution, "top",
+        (x) => this.heightmap!.getHeight(x, centerRes - 1),
+        (x, c) => centerSplatData[((centerRes - 1) * centerRes + x) * 4 + c],
+        blendDepth
+      );
+    }
+
+    if (gridX === 1 && gridY === 1) {
+      // Bottom-right corner: blend left and top edges
+      this.blendEdge(heightmapData, splatmapData, resolution, "left",
+        (z) => this.heightmap!.getHeight(centerRes - 1, z),
+        (z, c) => centerSplatData[(z * centerRes + (centerRes - 1)) * 4 + c],
+        blendDepth
+      );
+      this.blendEdge(heightmapData, splatmapData, resolution, "top",
+        (x) => this.heightmap!.getHeight(x, centerRes - 1),
+        (x, c) => centerSplatData[((centerRes - 1) * centerRes + x) * 4 + c],
+        blendDepth
+      );
+    }
+  }
+
+  /**
+   * Blend a single edge of neighbor tile with center tile data
+   */
+  private blendEdge(
+    heightmapData: Float32Array,
+    splatmapData: Float32Array,
+    resolution: number,
+    edge: "left" | "right" | "top" | "bottom",
+    getCenterHeight: (i: number) => number,
+    getCenterSplat: (i: number, channel: number) => number,
+    blendDepth: number
+  ): void {
+    const isVertical = edge === "left" || edge === "right";
+    const edgePos = edge === "right" || edge === "bottom" ? resolution - 1 : 0;
+    const blendDir = edge === "right" || edge === "bottom" ? -1 : 1;
+
+    for (let i = 0; i < resolution; i++) {
+      const centerHeight = getCenterHeight(i);
+
+      for (let d = 0; d < blendDepth; d++) {
+        const pos = edgePos + d * blendDir;
+        if (pos < 0 || pos >= resolution) continue;
+
+        const blend = 1 - d / blendDepth; // 1 at edge, 0 at blend depth
+
+        // Calculate heightmap index
+        const heightIdx = isVertical ? (i * resolution + pos) : (pos * resolution + i);
+        if (heightIdx >= 0 && heightIdx < heightmapData.length) {
+          const currentHeight = heightmapData[heightIdx];
+          const avgHeight = (centerHeight + currentHeight) / 2;
+          heightmapData[heightIdx] = currentHeight * (1 - blend) + avgHeight * blend;
+        }
+
+        // Calculate splatmap index (4 channels per pixel)
+        const splatIdx = (isVertical ? (i * resolution + pos) : (pos * resolution + i)) * 4;
+        if (splatIdx >= 0 && splatIdx + 3 < splatmapData.length) {
+          for (let c = 0; c < 4; c++) {
+            const centerSplat = getCenterSplat(i, c);
+            const currentSplat = splatmapData[splatIdx + c];
+            const avgSplat = (centerSplat + currentSplat) / 2;
+            splatmapData[splatIdx + c] = currentSplat * (1 - blend) + avgSplat * blend;
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Create a default tile for infinite expansion using saved template
+   * Uses mirror tiling for seamless connections (same as neighbor-to-neighbor)
+   */
+  private createDefaultGrassTilePreview(gridX: number, gridY: number, tileSize: number): void {
+    console.log(`[EditorEngine] createDefaultGrassTilePreview START: (${gridX},${gridY}), tileSize=${tileSize}`);
+
+    if (!this.defaultTileTemplate) {
+      console.log(`[EditorEngine] No default tile template, creating flat tile`);
+      this.createFlatGrassTile(gridX, gridY, tileSize);
+      return;
+    }
+
+    const template = this.defaultTileTemplate;
+    const sourceRes = template.resolution;
+
+    // Use lower resolution for neighbor tiles (performance)
+    const targetRes = Math.min(65, sourceRes);
+    const step = Math.max(1, Math.floor((sourceRes - 1) / (targetRes - 1)));
+    const actualRes = Math.floor((sourceRes - 1) / step) + 1;
+    const cellSize = tileSize / (actualRes - 1);
+
+    // Use checkerboard mirror pattern for seamless tiling (same for ALL tiles)
+    const mirrorX = gridX % 2 !== 0;
+    const mirrorZ = gridY % 2 !== 0;
+
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+
+    // Create vertices from template heightmap with mirroring
+    for (let z = 0; z < actualRes; z++) {
+      for (let x = 0; x < actualRes; x++) {
+        let srcX = x * step;
+        let srcZ = z * step;
+
+        if (mirrorX) srcX = (sourceRes - 1) - srcX;
+        if (mirrorZ) srcZ = (sourceRes - 1) - srcZ;
+
+        srcX = Math.min(srcX, sourceRes - 1);
+        srcZ = Math.min(srcZ, sourceRes - 1);
+
+        const idx = srcZ * sourceRes + srcX;
+        const height = template.heightmapData[idx] || 0;
+
+        positions.push(x * cellSize, height, z * cellSize);
+        uvs.push(x / (actualRes - 1), z / (actualRes - 1));
+        normals.push(0, 1, 0);
+      }
+    }
+
+    // Create indices
+    for (let z = 0; z < actualRes - 1; z++) {
+      for (let x = 0; x < actualRes - 1; x++) {
+        const topLeft = z * actualRes + x;
+        const topRight = topLeft + 1;
+        const bottomLeft = (z + 1) * actualRes + x;
+        const bottomRight = bottomLeft + 1;
+
+        indices.push(topLeft, bottomLeft, topRight);
+        indices.push(topRight, bottomLeft, bottomRight);
+      }
+    }
+
+    // Compute proper normals
+    const normalArray: number[] = new Array(positions.length).fill(0);
+    VertexData.ComputeNormals(positions, indices, normalArray);
+
+    // Create mesh
+    const mesh = new Mesh(`default_tile_${gridX}_${gridY}`, this.scene);
+    const vertexData = new VertexData();
+    vertexData.positions = positions;
+    vertexData.indices = indices;
+    vertexData.uvs = uvs;
+    vertexData.normals = normalArray;
+    vertexData.applyToMesh(mesh, true);
+
+    // Position the mesh
+    mesh.position.x = gridX * tileSize;
+    mesh.position.z = gridY * tileSize;
+
+    // Create splatmap from template with mirroring
+    const splatSourceRes = Math.round(Math.sqrt(template.splatmapData.length / 4));
+    const splatTargetRes = 64;
+    const splatmapData = new Float32Array(splatTargetRes * splatTargetRes * 4);
+
+    // Initialize all to 100% grass first
+    for (let i = 0; i < splatTargetRes * splatTargetRes; i++) {
+      splatmapData[i * 4 + 0] = 1.0; // grass
+      splatmapData[i * 4 + 1] = 0.0; // dirt
+      splatmapData[i * 4 + 2] = 0.0; // rock
+      splatmapData[i * 4 + 3] = 0.0; // sand
+    }
+
+    // Copy from template with mirroring (only if template has valid data)
+    if (splatSourceRes > 0 && template.splatmapData.length >= splatSourceRes * splatSourceRes * 4) {
+      for (let sz = 0; sz < splatTargetRes; sz++) {
+        for (let sx = 0; sx < splatTargetRes; sx++) {
+          let srcSX = Math.floor((sx / (splatTargetRes - 1)) * (splatSourceRes - 1));
+          let srcSZ = Math.floor((sz / (splatTargetRes - 1)) * (splatSourceRes - 1));
+
+          if (mirrorX) srcSX = (splatSourceRes - 1) - srcSX;
+          if (mirrorZ) srcSZ = (splatSourceRes - 1) - srcSZ;
+
+          // Clamp to valid range
+          srcSX = Math.max(0, Math.min(splatSourceRes - 1, srcSX));
+          srcSZ = Math.max(0, Math.min(splatSourceRes - 1, srcSZ));
+
+          const srcIdx = (srcSZ * splatSourceRes + srcSX) * 4;
+          const dstIdx = (sz * splatTargetRes + sx) * 4;
+
+          // Copy values (check bounds to avoid undefined)
+          if (srcIdx + 3 < template.splatmapData.length) {
+            const g = template.splatmapData[srcIdx + 0];
+            const d = template.splatmapData[srcIdx + 1];
+            const r = template.splatmapData[srcIdx + 2];
+            const s = template.splatmapData[srcIdx + 3];
+
+            // Validate values - use default grass if NaN or invalid
+            if (Number.isFinite(g) && Number.isFinite(d) && Number.isFinite(r) && Number.isFinite(s)) {
+              splatmapData[dstIdx + 0] = g;
+              splatmapData[dstIdx + 1] = d;
+              splatmapData[dstIdx + 2] = r;
+              splatmapData[dstIdx + 3] = s;
+            }
+            // else: keep pre-initialized 100% grass
+          }
+        }
+      }
+    }
+
+    // Verify splatmap data integrity - check a few pixels
+    let validPixelCount = 0;
+    let invalidPixelCount = 0;
+    for (let i = 0; i < splatTargetRes * splatTargetRes; i++) {
+      const idx = i * 4;
+      const sum = splatmapData[idx] + splatmapData[idx + 1] + splatmapData[idx + 2] + splatmapData[idx + 3];
+      if (Number.isFinite(sum) && sum > 0.99 && sum < 1.01) {
+        validPixelCount++;
+      } else {
+        invalidPixelCount++;
+        // Fix invalid pixel with 100% grass
+        splatmapData[idx + 0] = 1.0;
+        splatmapData[idx + 1] = 0.0;
+        splatmapData[idx + 2] = 0.0;
+        splatmapData[idx + 3] = 0.0;
+      }
+    }
+    if (invalidPixelCount > 0) {
+      console.warn(`[EditorEngine] Fixed ${invalidPixelCount}/${splatTargetRes * splatTargetRes} invalid splatmap pixels for tile (${gridX},${gridY})`);
+    }
+
+    // Create terrain material
+    const material = createTerrainMaterial(this.scene, splatmapData, splatTargetRes);
+    material.name = `default_tile_mat_${gridX}_${gridY}`;
+    material.backFaceCulling = false;
+    material.setFloat("uTerrainSize", tileSize);
+
+    // Create splatmap texture separately and explicitly set it (like TerrainMesh does)
+    // This ensures the texture is properly bound to the shader
+    const splatTexture = createSplatTexture(this.scene, splatmapData, splatTargetRes);
+    splatTexture.name = `default_tile_splat_${gridX}_${gridY}`;
+    material.setTexture("uSplatMap", splatTexture);
+
+    // Create empty water mask
+    const waterMaskData = new Uint8Array(splatTargetRes * splatTargetRes * 4);
+    const waterMaskTexture = new RawTexture(
+      waterMaskData,
+      splatTargetRes,
+      splatTargetRes,
+      Engine.TEXTUREFORMAT_RGBA,
+      this.scene,
+      false,
+      false,
+      Texture.BILINEAR_SAMPLINGMODE
+    );
+    waterMaskTexture.name = `default_tile_water_${gridX}_${gridY}`;
+    waterMaskTexture.wrapU = Texture.CLAMP_ADDRESSMODE;
+    waterMaskTexture.wrapV = Texture.CLAMP_ADDRESSMODE;
+    // Force immediate GPU upload
+    waterMaskTexture.update(waterMaskData);
+    material.setTexture("uWaterMask", waterMaskTexture);
+
+    mesh.material = material;
+    (mesh as any)._ownMaterial = true;
+
+    mesh.isPickable = true; // Enable picking for editing
+    mesh.receiveShadows = true;
+    mesh.isVisible = true;
+    mesh.refreshBoundingInfo();
+
+    console.log(`[EditorEngine] SUCCESS: Created default tile at (${gridX},${gridY}), mirror=(${mirrorX},${mirrorZ})`);
+
+    this.neighborTileMeshes.set(`${gridX},${gridY}`, mesh);
+
+    // Store editable data for this tile
+    const key = `${gridX},${gridY}`;
+    // Reconstruct heightmap data at full resolution for editing (with mirroring)
+    const fullHeightmapData = new Float32Array(template.resolution * template.resolution);
+    for (let z = 0; z < template.resolution; z++) {
+      for (let x = 0; x < template.resolution; x++) {
+        let srcX = x;
+        let srcZ = z;
+        if (mirrorX) srcX = (template.resolution - 1) - srcX;
+        if (mirrorZ) srcZ = (template.resolution - 1) - srcZ;
+        fullHeightmapData[z * template.resolution + x] = template.heightmapData[srcZ * template.resolution + srcX];
+      }
+    }
+
+    // Create water mask data with mirroring
+    const waterSourceRes = Math.sqrt(template.waterMaskData.length);
+    const tileWaterMaskData = new Float32Array(splatTargetRes * splatTargetRes);
+    for (let z = 0; z < splatTargetRes; z++) {
+      for (let x = 0; x < splatTargetRes; x++) {
+        let srcX = Math.floor((x / (splatTargetRes - 1)) * (waterSourceRes - 1));
+        let srcZ = Math.floor((z / (splatTargetRes - 1)) * (waterSourceRes - 1));
+        if (mirrorX) srcX = (waterSourceRes - 1) - srcX;
+        if (mirrorZ) srcZ = (waterSourceRes - 1) - srcZ;
+        const srcIdx = srcZ * waterSourceRes + srcX;
+        tileWaterMaskData[z * splatTargetRes + x] = template.waterMaskData[srcIdx] || 0;
+      }
+    }
+
+    this.editableTileData.set(key, {
+      heightmapData: fullHeightmapData,
+      splatmapData: new Float32Array(splatmapData),
+      waterMaskData: tileWaterMaskData,
+      resolution: template.resolution,
+      splatResolution: splatTargetRes,
+    });
+
+    // Create foliage from template
+    this.createDefaultTileFoliage(gridX, gridY, tileSize, mirrorX, mirrorZ);
+
+    // Create water mesh if there's water in this tile
+    this.createNeighborWaterMesh(gridX, gridY, tileSize, tileWaterMaskData, splatTargetRes);
+  }
+
+  /**
+   * Fallback: Create a simple flat grass tile
+   */
+  private createFlatGrassTile(gridX: number, gridY: number, tileSize: number): void {
+    const resolution = 33;
+    const cellSize = tileSize / (resolution - 1);
+
+    const positions: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+
+    for (let z = 0; z < resolution; z++) {
+      for (let x = 0; x < resolution; x++) {
+        positions.push(x * cellSize, 0, z * cellSize);
+        uvs.push(x / (resolution - 1), z / (resolution - 1));
+      }
+    }
+
+    for (let z = 0; z < resolution - 1; z++) {
+      for (let x = 0; x < resolution - 1; x++) {
+        const topLeft = z * resolution + x;
+        indices.push(topLeft, (z + 1) * resolution + x, topLeft + 1);
+        indices.push(topLeft + 1, (z + 1) * resolution + x, (z + 1) * resolution + x + 1);
+      }
+    }
+
+    const normals: number[] = [];
+    VertexData.ComputeNormals(positions, indices, normals);
+
+    const mesh = new Mesh(`flat_grass_${gridX}_${gridY}`, this.scene);
+    const vertexData = new VertexData();
+    vertexData.positions = positions;
+    vertexData.indices = indices;
+    vertexData.uvs = uvs;
+    vertexData.normals = normals;
+    vertexData.applyToMesh(mesh, true);
+
+    mesh.position.x = gridX * tileSize;
+    mesh.position.z = gridY * tileSize;
+
+    const splatRes = 64;
+    const splatData = new Float32Array(splatRes * splatRes * 4);
+    for (let i = 0; i < splatRes * splatRes; i++) {
+      splatData[i * 4] = 1.0; // grass only
+    }
+
+    const material = createTerrainMaterial(this.scene, splatData, splatRes);
+    material.backFaceCulling = false;
+    material.setFloat("uTerrainSize", tileSize);
+
+    const waterMask = new Uint8Array(splatRes * splatRes * 4);
+    const waterTex = new RawTexture(waterMask, splatRes, splatRes, Engine.TEXTUREFORMAT_RGBA, this.scene);
+    material.setTexture("uWaterMask", waterTex);
+
+    mesh.material = material;
+    (mesh as any)._ownMaterial = true;
+    mesh.isPickable = true; // Enable picking for editing
+    mesh.receiveShadows = true;
+
+    this.neighborTileMeshes.set(`${gridX},${gridY}`, mesh);
+    this.createDefaultGrassFoliage(gridX, gridY, tileSize);
+  }
+
+  /**
+   * Create water mesh for neighbor tile if there's water in the water mask
+   */
+  private createNeighborWaterMesh(
+    gridX: number,
+    gridY: number,
+    tileSize: number,
+    waterMaskData: Float32Array,
+    resolution: number
+  ): void {
+    const key = `${gridX},${gridY}`;
+
+    // Dispose existing water mesh
+    const existingWater = this.neighborWaterMeshes.get(key);
+    if (existingWater) {
+      existingWater.dispose();
+      this.neighborWaterMeshes.delete(key);
+    }
+
+    // Check if there's any water in this tile
+    let hasWater = false;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    const cellSize = tileSize / (resolution - 1);
+
+    for (let z = 0; z < resolution; z++) {
+      for (let x = 0; x < resolution; x++) {
+        const waterValue = waterMaskData[z * resolution + x];
+        if (waterValue > 0.3) {
+          hasWater = true;
+          const worldX = x * cellSize;
+          const worldZ = z * cellSize;
+          minX = Math.min(minX, worldX);
+          maxX = Math.max(maxX, worldX);
+          minZ = Math.min(minZ, worldZ);
+          maxZ = Math.max(maxZ, worldZ);
+        }
+      }
+    }
+
+    if (!hasWater) {
+      return;
+    }
+
+    // Calculate water region with padding
+    const padding = 3.0;
+    const waterWidth = Math.max(maxX - minX + padding * 2, 4);
+    const waterDepth = Math.max(maxZ - minZ + padding * 2, 4);
+    const centerX = (minX + maxX) / 2 + gridX * tileSize;
+    const centerZ = (minZ + maxZ) / 2 + gridY * tileSize;
+
+    // Get water level from biome decorator or use default
+    let waterLevel = -100;
+    if (this.biomeDecorator) {
+      waterLevel = this.biomeDecorator.getWaterLevel();
+    }
+    if (waterLevel < -50) {
+      waterLevel = this.seaLevel > -50 ? this.seaLevel : 0;
+    }
+
+    // Create water plane with same subdivisions as center tile
+    const waterMesh = MeshBuilder.CreateGround(
+      `neighbor_water_${gridX}_${gridY}`,
+      {
+        width: waterWidth,
+        height: waterDepth,
+        subdivisions: 64, // Same as WaterShader for wave deformation
+        updatable: false,
+      },
+      this.scene
+    );
+
+    waterMesh.position.set(centerX, waterLevel, centerZ);
+
+    // Try to use WaterShader material from center tile's BiomeDecorator
+    const waterSystem = this.biomeDecorator?.getWaterSystem();
+    const shaderMaterial = waterSystem?.getMaterial();
+
+    if (shaderMaterial) {
+      // Share the same shader material (waves, colors, effects all match)
+      waterMesh.material = shaderMaterial;
+    } else {
+      // Fallback to simple water material if no WaterSystem exists yet
+      const waterMaterial = new StandardMaterial(`neighbor_water_mat_${gridX}_${gridY}`, this.scene);
+      waterMaterial.diffuseColor = new Color3(0.1, 0.3, 0.5);
+      waterMaterial.specularColor = new Color3(0.3, 0.3, 0.3);
+      waterMaterial.alpha = 0.7;
+      waterMaterial.backFaceCulling = false;
+      waterMesh.material = waterMaterial;
+    }
+
+    waterMesh.isPickable = false;
+
+    this.neighborWaterMeshes.set(key, waterMesh);
+    console.log(`[EditorEngine] Created water mesh for neighbor tile (${gridX},${gridY}) at level ${waterLevel}, useShader=${!!shaderMaterial}`);
+  }
+
+  /**
+   * Update neighbor tile water mesh after editing
+   */
+  private updateNeighborWaterMesh(gridX: number, gridY: number): void {
+    const key = `${gridX},${gridY}`;
+    const tileData = this.editableTileData.get(key);
+    if (!tileData) return;
+
+    const tileSize = this.heightmap?.getScale() || 64;
+    this.createNeighborWaterMesh(gridX, gridY, tileSize, tileData.waterMaskData, tileData.splatResolution);
+  }
+
+  /**
+   * Create foliage for default tile by copying and mirroring center tile's foliage
+   */
+  private createDefaultTileFoliage(
+    gridX: number,
+    gridY: number,
+    tileSize: number,
+    mirrorX: boolean,
+    mirrorZ: boolean
+  ): void {
+    if (!this.foliageSystem) {
+      console.log(`[EditorEngine] No foliageSystem for default foliage`);
+      return;
+    }
+
+    const gridKey = `${gridX},${gridY}`;
+    const foliageMeshes: Mesh[] = [];
+    const offsetX = gridX * tileSize;
+    const offsetZ = gridY * tileSize;
+
+    // Get foliage data from center tile
+    const centerFoliageData = this.foliageSystem.exportTileData();
+    if (!centerFoliageData || Object.keys(centerFoliageData).length === 0) {
+      console.log(`[EditorEngine] No center foliage data, creating random foliage`);
+      this.createDefaultGrassFoliage(gridX, gridY, tileSize);
+      return;
+    }
+
+    let totalInstances = 0;
+
+    for (const [typeName, base64] of Object.entries(centerFoliageData)) {
+      const baseMesh = this.foliageSystem.getBaseMesh(typeName);
+      if (!baseMesh) continue;
+
+      // Decode matrices from center tile
+      const sourceMatrices = this.decodeFloat32Array(base64);
+      if (sourceMatrices.length === 0) continue;
+
+      const instanceCount = sourceMatrices.length / 16;
+      const matrices = new Float32Array(sourceMatrices.length);
+
+      // Copy and transform matrices with mirroring
+      for (let i = 0; i < instanceCount; i++) {
+        const srcIdx = i * 16;
+
+        // Copy matrix
+        for (let j = 0; j < 16; j++) {
+          matrices[srcIdx + j] = sourceMatrices[srcIdx + j];
+        }
+
+        // Get position from matrix
+        let x = sourceMatrices[srcIdx + 12];
+        let z = sourceMatrices[srcIdx + 14];
+
+        // Apply mirroring
+        if (mirrorX) x = tileSize - x;
+        if (mirrorZ) z = tileSize - z;
+
+        // Apply offset
+        matrices[srcIdx + 12] = x + offsetX;
+        matrices[srcIdx + 14] = z + offsetZ;
+      }
+
+      // Create mesh
+      const neighborMesh = new Mesh(`default_foliage_${gridX}_${gridY}_${typeName}`, this.scene);
+
+      const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
+      const normals = baseMesh.getVerticesData(VertexBuffer.NormalKind);
+      const colors = baseMesh.getVerticesData(VertexBuffer.ColorKind);
+      const uvs = baseMesh.getVerticesData(VertexBuffer.UVKind);
+      const indices = baseMesh.getIndices();
+
+      if (positions && indices) {
+        const vertexData = new VertexData();
+        vertexData.positions = new Float32Array(positions);
+        if (normals) vertexData.normals = new Float32Array(normals);
+        if (colors) vertexData.colors = new Float32Array(colors);
+        if (uvs) vertexData.uvs = new Float32Array(uvs);
+        vertexData.indices = new Uint32Array(indices);
+        vertexData.applyToMesh(neighborMesh);
+      }
+
+      neighborMesh.material = baseMesh.material;
+      neighborMesh.isVisible = true;
+      neighborMesh.isPickable = false;
+
+      neighborMesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
+      neighborMesh.thinInstanceCount = instanceCount;
+      neighborMesh.thinInstanceRefreshBoundingInfo();
+
+      foliageMeshes.push(neighborMesh);
+      totalInstances += instanceCount;
+    }
+
+    if (foliageMeshes.length > 0) {
+      this.neighborFoliageMeshes.set(gridKey, foliageMeshes);
+      console.log(`[EditorEngine] Created mirrored foliage for (${gridX},${gridY}): ${totalInstances} instances`);
+    }
+  }
+
+  /**
+   * Create simple random grass foliage (fallback)
+   */
+  private createDefaultGrassFoliage(gridX: number, gridY: number, tileSize: number): void {
+    if (!this.foliageSystem) return;
+
+    const gridKey = `${gridX},${gridY}`;
+    const foliageMeshes: Mesh[] = [];
+    const offsetX = gridX * tileSize;
+    const offsetZ = gridY * tileSize;
+
+    const baseMesh = this.foliageSystem.getBaseMesh("grass");
+    if (!baseMesh) return;
+
+    const instanceCount = 800;
+    const matrices = new Float32Array(instanceCount * 16);
+
+    for (let i = 0; i < instanceCount; i++) {
+      const x = Math.random() * tileSize + offsetX;
+      const z = Math.random() * tileSize + offsetZ;
+      const scale = 0.8 + Math.random() * 0.4;
+      const rotation = Math.random() * Math.PI * 2;
+      const cos = Math.cos(rotation);
+      const sin = Math.sin(rotation);
+      const idx = i * 16;
+
+      matrices[idx + 0] = cos * scale;
+      matrices[idx + 1] = 0;
+      matrices[idx + 2] = sin * scale;
+      matrices[idx + 3] = 0;
+      matrices[idx + 4] = 0;
+      matrices[idx + 5] = scale;
+      matrices[idx + 6] = 0;
+      matrices[idx + 7] = 0;
+      matrices[idx + 8] = -sin * scale;
+      matrices[idx + 9] = 0;
+      matrices[idx + 10] = cos * scale;
+      matrices[idx + 11] = 0;
+      matrices[idx + 12] = x;
+      matrices[idx + 13] = 0;
+      matrices[idx + 14] = z;
+      matrices[idx + 15] = 1;
+    }
+
+    const neighborMesh = new Mesh(`default_foliage_${gridX}_${gridY}_grass`, this.scene);
+    const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
+    const normals = baseMesh.getVerticesData(VertexBuffer.NormalKind);
+    const colors = baseMesh.getVerticesData(VertexBuffer.ColorKind);
+    const uvs = baseMesh.getVerticesData(VertexBuffer.UVKind);
+    const indices = baseMesh.getIndices();
+
+    if (positions && indices) {
+      const vertexData = new VertexData();
+      vertexData.positions = new Float32Array(positions);
+      if (normals) vertexData.normals = new Float32Array(normals);
+      if (colors) vertexData.colors = new Float32Array(colors);
+      if (uvs) vertexData.uvs = new Float32Array(uvs);
+      vertexData.indices = new Uint32Array(indices);
+      vertexData.applyToMesh(neighborMesh);
+    }
+
+    neighborMesh.material = baseMesh.material;
+    neighborMesh.isVisible = true;
+    neighborMesh.isPickable = false;
+    neighborMesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
+    neighborMesh.thinInstanceCount = instanceCount;
+    neighborMesh.thinInstanceRefreshBoundingInfo();
+
+    foliageMeshes.push(neighborMesh);
+    this.neighborFoliageMeshes.set(gridKey, foliageMeshes);
+  }
+
+  /**
+   * Create a mirrored copy of the current terrain for empty grid positions
+   * @deprecated Use createDefaultGrassTilePreview instead
+   */
+  private createMirroredCurrentTilePreview(gridX: number, gridY: number, tileSize: number): void {
+    console.log(`[EditorEngine] createMirroredCurrentTilePreview START: (${gridX},${gridY}), tileSize=${tileSize}`);
+
+    if (!this.terrainMesh) {
+      console.log(`[EditorEngine] createMirroredCurrentTilePreview: no terrainMesh`);
+      return;
+    }
+
+    const sourceMesh = this.terrainMesh.getMesh();
+    if (!sourceMesh) {
+      console.log(`[EditorEngine] createMirroredCurrentTilePreview: no sourceMesh from terrainMesh.getMesh()`);
+      return;
+    }
+
+    console.log(`[EditorEngine] Source mesh: name=${sourceMesh.name}, isVisible=${sourceMesh.isVisible}`);
+
+    // Clone the current terrain mesh
+    const clone = sourceMesh.clone(`mirrored_${gridX}_${gridY}`);
+    if (!clone) {
+      console.log(`[EditorEngine] createMirroredCurrentTilePreview: clone failed`);
+      return;
+    }
+
+    // Mirror on odd coordinates for seamless tiling
+    const mirrorX = gridX % 2 !== 0;
+    const mirrorZ = gridY % 2 !== 0;
+    const scaleX = mirrorX ? -1 : 1;
+    const scaleZ = mirrorZ ? -1 : 1;
+    clone.scaling = new Vector3(scaleX, 1, scaleZ);
+
+    // Position calculation (same as GamePreview)
+    const posX = mirrorX ? (gridX + 1) * tileSize : gridX * tileSize;
+    const posZ = mirrorZ ? (gridY + 1) * tileSize : gridY * tileSize;
+    clone.position = new Vector3(posX, 0, posZ);
+
+    // Share material with original (same textures)
+    clone.material = sourceMesh.material;
+
+    // Ensure backface culling is off for mirrored tiles
+    if (clone.material && "backFaceCulling" in clone.material) {
+      (clone.material as StandardMaterial).backFaceCulling = false;
+    }
+
+    clone.isPickable = false;
+    clone.receiveShadows = true;
+    clone.isVisible = true; // Explicitly set visible
+    clone.refreshBoundingInfo();
+
+    console.log(`[EditorEngine] SUCCESS: Created mirrored tile at (${gridX},${gridY}), pos=(${posX},${posZ}), mirror=(${mirrorX},${mirrorZ}), isVisible=${clone.isVisible}`);
+
+    this.neighborTileMeshes.set(`${gridX},${gridY}`, clone);
+  }
+
+  /**
+   * Create a preview mesh from heightmap data
+   */
+  private createPreviewMeshFromHeightmap(
+    name: string,
+    heightmapData: Float32Array,
+    sourceRes: number,
+    targetRes: number,
+    size: number
+  ): Mesh | null {
+    console.log(`[EditorEngine] createPreviewMeshFromHeightmap: name=${name}, sourceRes=${sourceRes}, targetRes=${targetRes}, size=${size}, heightmapLength=${heightmapData.length}`);
+
+    if (!heightmapData || heightmapData.length === 0) {
+      console.error(`[EditorEngine] Invalid heightmap data for ${name}`);
+      return null;
+    }
+
+    const sourceResPlus1 = sourceRes + 1;
+    const targetResPlus1 = targetRes + 1;
+
+    // Sample heightmap at lower resolution
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const normals: number[] = [];
+    const step = size / targetRes;
+    const sampleStep = sourceRes / targetRes;
+
+    let minHeight = Infinity, maxHeight = -Infinity;
+
+    for (let z = 0; z <= targetRes; z++) {
+      for (let x = 0; x <= targetRes; x++) {
+        // Sample from original heightmap
+        const srcX = Math.min(Math.floor(x * sampleStep), sourceRes);
+        const srcZ = Math.min(Math.floor(z * sampleStep), sourceRes);
+        const idx = srcZ * sourceResPlus1 + srcX;
+        const height = (idx < heightmapData.length) ? (heightmapData[idx] || 0) : 0;
+
+        minHeight = Math.min(minHeight, height);
+        maxHeight = Math.max(maxHeight, height);
+
+        positions.push(x * step, height, z * step);
+      }
+    }
+
+    console.log(`[EditorEngine] ${name}: vertices=${positions.length / 3}, heightRange=[${minHeight.toFixed(2)}, ${maxHeight.toFixed(2)}]`);
+
+    // Create indices
+    for (let z = 0; z < targetRes; z++) {
+      for (let x = 0; x < targetRes; x++) {
+        const topLeft = z * targetResPlus1 + x;
+        const topRight = topLeft + 1;
+        const bottomLeft = (z + 1) * targetResPlus1 + x;
+        const bottomRight = bottomLeft + 1;
+
+        indices.push(topLeft, bottomLeft, topRight);
+        indices.push(topRight, bottomLeft, bottomRight);
+      }
+    }
+
+    console.log(`[EditorEngine] ${name}: indices=${indices.length}`);
+
+    try {
+      const mesh = new Mesh(name, this.scene);
+      const vertexData = new VertexData();
+      vertexData.positions = positions;
+      vertexData.indices = indices;
+
+      // Compute normals for proper rendering
+      VertexData.ComputeNormals(positions, indices, normals);
+      vertexData.normals = normals;
+
+      vertexData.applyToMesh(mesh);
+
+      // Force update bounding info
+      mesh.refreshBoundingInfo();
+      const bb = mesh.getBoundingInfo().boundingBox;
+      console.log(`[EditorEngine] ${name}: boundingBox min=(${bb.minimumWorld.x.toFixed(1)}, ${bb.minimumWorld.y.toFixed(1)}, ${bb.minimumWorld.z.toFixed(1)}) max=(${bb.maximumWorld.x.toFixed(1)}, ${bb.maximumWorld.y.toFixed(1)}, ${bb.maximumWorld.z.toFixed(1)})`);
+
+      return mesh;
+    } catch (error) {
+      console.error(`[EditorEngine] Failed to create mesh ${name}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Clear all neighboring tile preview meshes
+   */
+  private clearNeighborTilePreviews(): void {
+    // Clear terrain meshes
+    for (const mesh of this.neighborTileMeshes.values()) {
+      // Dispose material only if it's owned by this mesh (not shared)
+      if ((mesh as any)._ownMaterial && mesh.material) {
+        mesh.material.dispose();
+      }
+      mesh.dispose();
+    }
+    this.neighborTileMeshes.clear();
+
+    // Clear foliage meshes
+    for (const meshes of this.neighborFoliageMeshes.values()) {
+      for (const mesh of meshes) {
+        // Foliage meshes share material with base meshes, don't dispose material
+        mesh.dispose();
+      }
+    }
+    this.neighborFoliageMeshes.clear();
+
+    // Clear water meshes (don't dispose shared shader material)
+    for (const mesh of this.neighborWaterMeshes.values()) {
+      // Only dispose material if it's a StandardMaterial (fallback), not shared ShaderMaterial
+      if (mesh.material && mesh.material instanceof StandardMaterial) {
+        mesh.material.dispose();
+      }
+      mesh.dispose();
+    }
+    this.neighborWaterMeshes.clear();
+  }
+
+  /**
+   * Decode Base64 to Float32Array (utility method)
+   */
+  private decodeFloat32Array(base64: string): Float32Array {
+    const binary = atob(base64);
+    const uint8 = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      uint8[i] = binary.charCodeAt(i);
+    }
+    return new Float32Array(uint8.buffer);
+  }
+
   dispose(): void {
     if (this.isGameMode) {
       this.exitGameMode();
     }
+    // Clear neighbor tile previews
+    this.clearNeighborTilePreviews();
+
     if (this.propManager) {
       this.propManager.dispose();
       this.propManager = null;

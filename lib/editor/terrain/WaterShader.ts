@@ -685,6 +685,13 @@ export class WaterSystem {
   }
 
   /**
+   * Get water material for sharing with other meshes
+   */
+  getMaterial(): ShaderMaterial | null {
+    return this.waterMaterial;
+  }
+
+  /**
    * Dispose resources
    */
   dispose(): void {

@@ -14,6 +14,7 @@ import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
 import { FoliageSystem } from "../foliage/FoliageSystem";
 import { BiomeDecorator } from "../terrain/BiomeDecorator";
+import { getManualTileManager } from "../tiles/ManualTileManager";
 
 export type TileMode = "clone" | "mirror";
 
@@ -25,6 +26,7 @@ export class GamePreview {
   private biomeDecorator: BiomeDecorator | null = null;
   private camera: FreeCamera | null = null;
   private tileClones: Mesh[] = [];
+  private existingTileRefs: Mesh[] = [];  // References to existing tiles (not cloned, don't dispose)
   private originalMesh: Mesh | null = null;
   private unifiedWater: Mesh | null = null;
   private originalWaterVisible: boolean = true;
@@ -32,9 +34,13 @@ export class GamePreview {
   // Tile mode: "clone" (random extension) or "mirror" (symmetric mirroring)
   private tileMode: TileMode = "mirror";
 
+  // Grid size from World tab (default 3 for 3x3)
+  private gridSize = 3;
+
   // Store original thin instance data for restoration
   private originalFoliageMatrices: Map<Mesh, Float32Array> = new Map();
   private originalFoliageCounts: Map<Mesh, number> = new Map();
+  private neighborFoliageMeshesEnabled: Mesh[] = [];
 
   // Free camera state
   private moveSpeed = 30;
@@ -79,14 +85,29 @@ export class GamePreview {
   enable(terrainMesh: Mesh): void {
     this.originalMesh = terrainMesh;
 
+    // Get grid size from World tab config
+    const tileManager = getManualTileManager();
+    const worldConfig = tileManager.getWorldConfig();
+    this.gridSize = worldConfig.gridSize || 3;
+
+    console.log("=== [GamePreview] enable() ===");
+    console.log("  gridSize from worldConfig:", this.gridSize);
+    console.log("  tileMode:", this.tileMode);
+    console.log("  terrainMesh:", terrainMesh?.name);
+
     // Note: Terrain LOD is disabled by EditorEngine before calling enable()
     // to ensure we get the full resolution mesh for cloning
 
-    // Create 3x3 tile grid for terrain
+    // Create NxN tile grid for terrain based on gridSize
     this.createTileGrid();
+    console.log("  After createTileGrid: tileClones.length =", this.tileClones.length);
 
     // Extend foliage to cover all tiles
     this.extendFoliage();
+    console.log("  After extendFoliage");
+
+    // Enable neighbor tile foliage (from edited biomes)
+    this.enableNeighborFoliage();
 
     // Adjust foliage LOD distances for game mode
     // Use smaller distances for performance - foliage fades into fog
@@ -123,11 +144,32 @@ export class GamePreview {
     this.scene.fogColor = skyColor;
 
     // Sync terrain shader fog with scene fog (same color = seamless blend)
+    // Apply to original mesh material
+    if (this.originalMesh && this.originalMesh.material) {
+      const material = this.originalMesh.material as ShaderMaterial;
+      if (material.setFloat && material.setColor3) {
+        material.setFloat("uFogDensity", fogDensity);
+        material.setColor3("uFogColor", skyColor);
+      }
+    }
+
+    // Also apply to terrainMeshRef if available
     if (this.terrainMeshRef) {
       const material = this.terrainMeshRef.getMaterial() as ShaderMaterial | null;
       if (material && material.setFloat && material.setColor3) {
         material.setFloat("uFogDensity", fogDensity);
         material.setColor3("uFogColor", skyColor);
+      }
+    }
+
+    // Apply fog to all tile clones
+    for (const clone of this.tileClones) {
+      if (clone.material) {
+        const mat = clone.material as ShaderMaterial;
+        if (mat.setFloat && mat.setColor3) {
+          mat.setFloat("uFogDensity", fogDensity);
+          mat.setColor3("uFogColor", skyColor);
+        }
       }
     }
 
@@ -200,9 +242,17 @@ export class GamePreview {
       originalWater.alwaysSelectAsActiveMesh = false;
     }
 
-    // Collect terrain clones for disposal
+    // Collect terrain clones for disposal (only cloned tiles, not existing ones)
     const tilesToDispose = [...this.tileClones];
     this.tileClones = [];
+
+    // Restore existing tiles (don't dispose, just reset state)
+    for (const tile of this.existingTileRefs) {
+      if (!tile.isDisposed()) {
+        tile.alwaysSelectAsActiveMesh = false;
+      }
+    }
+    this.existingTileRefs = [];
 
     // Remove terrain clones from scene
     for (const clone of tilesToDispose) {
@@ -244,16 +294,25 @@ export class GamePreview {
   }
 
   private createTileGrid(): void {
-    if (!this.originalMesh) return;
+    if (!this.originalMesh) {
+      console.log("=== [GamePreview] createTileGrid ERROR: No originalMesh! ===");
+      return;
+    }
 
     const size = this.heightmap.getScale();
+
+    console.log("=== [GamePreview] createTileGrid ===");
+    console.log("  tileMode:", this.tileMode);
+    console.log("  tileSize:", size);
 
     // Refresh original mesh bounding info
     this.originalMesh.refreshBoundingInfo();
 
     if (this.tileMode === "mirror") {
+      console.log("  → createMirroredTileGrid");
       this.createMirroredTileGrid(size);
     } else {
+      console.log("  → createClonedTileGrid");
       this.createClonedTileGrid(size);
     }
 
@@ -263,14 +322,31 @@ export class GamePreview {
 
   /**
    * Create tiles using simple cloning (original behavior)
+   * Uses gridSize to determine the NxN grid range.
+   * Uses existing edited tiles if available.
    */
   private createClonedTileGrid(size: number): void {
     if (!this.originalMesh) return;
 
-    for (let x = -1; x <= 1; x++) {
-      for (let z = -1; z <= 1; z++) {
+    const halfGrid = Math.floor(this.gridSize / 2);
+
+    for (let x = -halfGrid; x <= halfGrid; x++) {
+      for (let z = -halfGrid; z <= halfGrid; z++) {
         if (x === 0 && z === 0) continue;
 
+        // Check if there's an existing edited neighbor tile mesh
+        const existingTile = this.scene.getMeshByName(`default_tile_${x}_${z}`) as Mesh;
+
+        if (existingTile) {
+          // Use the existing edited tile
+          existingTile.isVisible = true;
+          existingTile.alwaysSelectAsActiveMesh = true;
+          existingTile.refreshBoundingInfo();
+          this.existingTileRefs.push(existingTile);
+          continue;
+        }
+
+        // No existing tile - clone from center tile
         const clone = this.originalMesh.clone(`tile_${x}_${z}`);
         if (clone) {
           clone.position.x = x * size;
@@ -287,67 +363,72 @@ export class GamePreview {
   /**
    * Create tiles using symmetric mirroring for seamless water/terrain connections.
    * Mirroring ensures edges match perfectly without needing to modify original data.
+   * Uses gridSize to determine the NxN grid range.
    *
-   * Layout (looking down, +Z is up):
-   *   (-1,-1) (0,-1) (1,-1)    XZ-mir  Z-mir  XZ-mir
-   *   (-1, 0) (0, 0) (1, 0)    X-mir   orig   X-mir
-   *   (-1, 1) (0, 1) (1, 1)    XZ-mir  Z-mir  XZ-mir
+   * Mirroring pattern: odd coordinates mirror on that axis
+   *   tx % 2 !== 0 -> mirror X
+   *   tz % 2 !== 0 -> mirror Z
    */
   private createMirroredTileGrid(size: number): void {
-    if (!this.originalMesh) return;
+    if (!this.originalMesh) {
+      console.log("  [createMirroredTileGrid] ERROR: No originalMesh!");
+      return;
+    }
 
-    for (let tx = -1; tx <= 1; tx++) {
-      for (let tz = -1; tz <= 1; tz++) {
+    const halfGrid = Math.floor(this.gridSize / 2);
+    console.log("=== [GamePreview] createMirroredTileGrid ===");
+    console.log("  gridSize:", this.gridSize, "halfGrid:", halfGrid);
+    console.log("  tileSize:", size);
+    console.log("  range: (", -halfGrid, ",", -halfGrid, ") to (", halfGrid, ",", halfGrid, ")");
+    console.log("  expected tiles:", this.gridSize * this.gridSize - 1);
+
+    let tileCount = 0;
+    let existingUsed = 0;
+    let clonesCreated = 0;
+
+    for (let tx = -halfGrid; tx <= halfGrid; tx++) {
+      for (let tz = -halfGrid; tz <= halfGrid; tz++) {
         if (tx === 0 && tz === 0) continue;
 
-        const clone = this.originalMesh.clone(`tile_${tx}_${tz}`);
-        if (!clone) continue;
+        // Check if there's an existing edited neighbor tile mesh
+        const existingTile = this.scene.getMeshByName(`default_tile_${tx}_${tz}`) as Mesh;
 
-        // Determine mirroring based on position
-        // X-axis neighbors (left/right) mirror on X
-        // Z-axis neighbors (top/bottom) mirror on Z
-        // Diagonal neighbors mirror on both
-        const mirrorX = tx !== 0;
-        const mirrorZ = tz !== 0;
+        if (existingTile) {
+          // Use the existing edited tile - just ensure it's visible and not culled
+          existingTile.isVisible = true;
+          existingTile.alwaysSelectAsActiveMesh = true;
+          existingTile.refreshBoundingInfo();
+          this.existingTileRefs.push(existingTile);  // Track separately (don't dispose)
+          existingUsed++;
+          tileCount++;
+          continue;
+        }
+
+        // No existing tile - clone from center tile with mirroring
+        const clone = this.originalMesh.clone(`tile_${tx}_${tz}`);
+        if (!clone) {
+          console.log("  [WARN] Failed to clone tile at", tx, tz);
+          continue;
+        }
+
+        // Mirror on odd coordinates for seamless tiling
+        const mirrorX = tx % 2 !== 0;
+        const mirrorZ = tz % 2 !== 0;
 
         // Apply scaling for mirroring
-        // When mirroring, flip the scale on that axis
         const scaleX = mirrorX ? -1 : 1;
         const scaleZ = mirrorZ ? -1 : 1;
         clone.scaling = new Vector3(scaleX, 1, scaleZ);
 
         // Position calculation:
-        // When scaling is -1, the mesh flips around its local origin (0,0)
-        // Original mesh spans (0,0) to (size,size)
-        // After scaling.x=-1: mesh spans (0,0) to (-size,size) in local coords
-        // We need to position it so edges align with the original tile
-        let posX: number;
-        let posZ: number;
-
-        if (mirrorX) {
-          // X-mirrored: mesh flips around x=0
-          // tx < 0: want tile at x=-size to x=0, so position.x = 0
-          // tx > 0: want tile at x=size to x=2*size, so position.x = 2*size
-          posX = tx < 0 ? 0 : size * 2;
-        } else {
-          // Not X-mirrored: normal positioning
-          posX = tx * size;
-        }
-
-        if (mirrorZ) {
-          // Z-mirrored: mesh flips around z=0
-          // tz < 0: want tile at z=-size to z=0, so position.z = 0
-          // tz > 0: want tile at z=size to z=2*size, so position.z = 2*size
-          posZ = tz < 0 ? 0 : size * 2;
-        } else {
-          // Not Z-mirrored: normal positioning
-          posZ = tz * size;
-        }
+        // When mirrored, the mesh flips around its local origin
+        // posX = mirrorX ? (tx + 1) * size : tx * size
+        const posX = mirrorX ? (tx + 1) * size : tx * size;
+        const posZ = mirrorZ ? (tz + 1) * size : tz * size;
 
         clone.position = new Vector3(posX, 0, posZ);
 
         // Ensure material handles backface correctly
-        // Mirrored meshes need double-sided rendering or adjusted culling
         if (clone.material) {
           const mat = clone.material.clone(`mat_tile_${tx}_${tz}`);
           if (mat && "backFaceCulling" in mat) {
@@ -359,8 +440,12 @@ export class GamePreview {
         clone.refreshBoundingInfo();
         clone.alwaysSelectAsActiveMesh = true;
         this.tileClones.push(clone);
+        clonesCreated++;
+        tileCount++;
       }
     }
+    console.log("  TOTAL:", tileCount, "tiles (existing:", existingUsed, ", cloned:", clonesCreated, ")");
+    console.log("  tileClones.length:", this.tileClones.length);
   }
 
   /**
@@ -583,14 +668,51 @@ export class GamePreview {
     }
     this.originalFoliageMatrices.clear();
     this.originalFoliageCounts.clear();
+
+    // Restore neighbor foliage meshes
+    for (const mesh of this.neighborFoliageMeshesEnabled) {
+      if (!mesh.isDisposed()) {
+        mesh.alwaysSelectAsActiveMesh = false;
+      }
+    }
+    this.neighborFoliageMeshesEnabled = [];
   }
 
   /**
-   * Create a unified water plane covering the entire 3x3 grid
+   * Enable neighbor tile foliage meshes for game mode visibility
+   */
+  private enableNeighborFoliage(): void {
+    // Find all neighbor foliage meshes created by EditorEngine
+    const neighborFoliage = this.scene.meshes.filter(
+      (mesh) => mesh.name.startsWith("neighbor_foliage_")
+    ) as Mesh[];
+
+    console.log(`[GamePreview] Found ${neighborFoliage.length} neighbor foliage meshes`);
+
+    for (const mesh of neighborFoliage) {
+      // Ensure visible and always rendered (not culled)
+      mesh.isVisible = true;
+      mesh.alwaysSelectAsActiveMesh = true;
+      this.neighborFoliageMeshesEnabled.push(mesh);
+    }
+  }
+
+  /**
+   * Create a unified water plane covering the entire NxN grid
    */
   private createUnifiedWater(): void {
+    console.log("=== [GamePreview] createUnifiedWater ===");
+
     const originalWater = this.scene.getMeshByName("water_plane") as Mesh;
-    if (!originalWater) return;
+    if (!originalWater) {
+      console.log("  ERROR: No original water_plane found in scene!");
+      console.log("  Available meshes:", this.scene.meshes.map(m => m.name).join(", "));
+      return;
+    }
+
+    console.log("  originalWater found:", originalWater.name);
+    console.log("  originalWater.position.y:", originalWater.position.y);
+    console.log("  originalWater.material:", originalWater.material?.name || "null");
 
     // Store original visibility
     this.originalWaterVisible = originalWater.isVisible;
@@ -599,16 +721,22 @@ export class GamePreview {
     originalWater.isVisible = false;
 
     const tileSize = this.heightmap.getScale();
-    const totalSize = tileSize * 3;
+    const totalSize = tileSize * this.gridSize;
+    const halfGrid = Math.floor(this.gridSize / 2);
 
-    // Create unified water plane
+    console.log("  tileSize:", tileSize, "gridSize:", this.gridSize);
+    console.log("  totalSize:", totalSize, "(", this.gridSize, "x", this.gridSize, "tiles)");
+
+    // Create unified water plane covering full grid
     this.unifiedWater = MeshBuilder.CreateGround(
       "unified_water",
-      { width: totalSize, height: totalSize, subdivisions: 64 },
+      { width: totalSize, height: totalSize, subdivisions: Math.min(128, this.gridSize * 16) },
       this.scene
     );
 
-    // Position at center of 3x3 grid
+    // Position at center of NxN grid
+    // Grid spans from -halfGrid to +halfGrid, center tile is at (0,0) to (tileSize, tileSize)
+    // Water center should be at (tileSize/2, tileSize/2) relative to center tile
     this.unifiedWater.position.x = tileSize / 2;
     this.unifiedWater.position.y = originalWater.position.y;
     this.unifiedWater.position.z = tileSize / 2;
@@ -616,6 +744,11 @@ export class GamePreview {
     // Use same material as original water
     this.unifiedWater.material = originalWater.material;
     this.unifiedWater.alwaysSelectAsActiveMesh = true;
+
+    console.log("  unifiedWater created:");
+    console.log("    size:", totalSize, "x", totalSize);
+    console.log("    position:", this.unifiedWater.position.toString());
+    console.log("    material:", this.unifiedWater.material?.name || "null");
   }
 
   private setupCamera(): void {
