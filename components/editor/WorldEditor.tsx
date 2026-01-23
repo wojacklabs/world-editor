@@ -53,6 +53,10 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
         engineRef.current = engine;
         setEngineReady(true);
 
+        // DEBUG: Expose engine globally for testing
+        (window as unknown as { editorEngine: EditorEngine }).editorEngine = engine;
+        console.log("[WorldEditor] EditorEngine exposed as window.editorEngine for debugging");
+
         engine.setOnModified(() => {
           setModified(true);
         });
