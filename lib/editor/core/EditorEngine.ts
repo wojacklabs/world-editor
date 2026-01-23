@@ -109,6 +109,21 @@ export class EditorEngine {
   // Tiles that were modified in the current stroke (for edge syncing)
   private modifiedTiles: Set<string> = new Set();
 
+  // Per-tile dirty flags for streaming auto-save
+  private tileDirtyFlags: Map<string, {
+    heightmapDirty: boolean;
+    splatmapDirty: boolean;
+    foliageDirty: boolean;
+    waterDirty: boolean;
+    lastModified: number;
+  }> = new Map();
+
+  // Tile loading state for streaming
+  private tileLoadingState: Map<string, {
+    loaded: boolean;
+    loading: boolean;
+  }> = new Map();
+
   // Default tile template for infinite expansion (saved from initial terrain)
   private defaultTileTemplate: {
     heightmapData: Float32Array;
@@ -644,10 +659,15 @@ export class EditorEngine {
       if (gx === 0 && gy === 0) {
         this.terrainMesh?.updateFromHeightmap();
         this.terrainMesh?.updateSplatTexture();
+        this.markTileDirty(0, 0, 'heightmap');
+        this.markTileDirty(0, 0, 'splatmap');
       } else {
         this.updateNeighborTileMesh(gx, gy);
         this.updateNeighborTileSplatmap(gx, gy);
         this.updateNeighborTileFoliage(gx, gy);
+        // Mark neighbor tiles as dirty (they were modified during edge sync)
+        this.markTileDirty(gx, gy, 'heightmap');
+        this.markTileDirty(gx, gy, 'splatmap');
       }
     }
 
@@ -1094,6 +1114,7 @@ export class EditorEngine {
         this.foliageDirty = true;
         this.biomeDirty = true;
         this.modifiedTiles.add("0,0");
+        this.markTileDirty(0, 0, 'heightmap');
         this.onModified?.();
       }
     } else {
@@ -1103,6 +1124,7 @@ export class EditorEngine {
       if (modified) {
         this.updateNeighborTileMesh(gridX, gridY);
         this.modifiedTiles.add(`${gridX},${gridY}`);
+        this.markTileDirty(gridX, gridY, 'heightmap');
         this.onModified?.();
       }
     }
@@ -1572,6 +1594,10 @@ export class EditorEngine {
         this.biomeDirty = true;
         this.foliageDirty = true;
         this.modifiedTiles.add("0,0");
+        this.markTileDirty(0, 0, 'splatmap');
+        if (material === "water") {
+          this.markTileDirty(0, 0, 'water');
+        }
         this.onModified?.();
       }
     } else {
@@ -1591,6 +1617,7 @@ export class EditorEngine {
         this.ensureWaterSystem();
         // Remove foliage in water area
         this.removeNeighborFoliageInWaterArea(gridX, gridY, localX, localZ, settings.size);
+        this.markTileDirty(gridX, gridY, 'water');
       }
 
       if (modified) {
@@ -1602,6 +1629,7 @@ export class EditorEngine {
           this.rebuildNeighborTileFoliage(gridX, gridY);
         }
         this.modifiedTiles.add(`${gridX},${gridY}`);
+        this.markTileDirty(gridX, gridY, 'splatmap');
         this.onModified?.();
       }
     }
@@ -4642,7 +4670,7 @@ export class EditorEngine {
    * StreamingManager callback: Cell 언로드 요청
    * 해당 Cell에 속한 Tile들을 언로드
    */
-  private handleStreamingUnloadCell(cellX: number, cellZ: number): void {
+  private async handleStreamingUnloadCell(cellX: number, cellZ: number): Promise<void> {
     if (!this.cellManager) return;
 
     const tile = this.cellManager.cellToTile(cellX, cellZ);
@@ -4655,7 +4683,13 @@ export class EditorEngine {
       return;
     }
 
-    // TODO: Phase 2 - check dirty flag and auto-save before unload
+    // Auto-save dirty tile before unload
+    if (this.isTileDirty(tile.gridX, tile.gridY)) {
+      await this.autoSaveTileBeforeUnload(tile.gridX, tile.gridY);
+    }
+
+    // Update tile loading state
+    this.tileLoadingState.delete(tileKey);
 
     // Dispose tile mesh
     const tileMesh = this.neighborTileMeshes.get(tileKey);
@@ -4749,6 +4783,175 @@ export class EditorEngine {
    */
   getStreamingManager(): StreamingManager | null {
     return this.streamingManager;
+  }
+
+  // ============================================================================
+  // TILE DIRTY FLAG MANAGEMENT
+  // ============================================================================
+
+  /**
+   * Mark a tile as dirty (needs saving)
+   */
+  private markTileDirty(gridX: number, gridY: number, type: 'heightmap' | 'splatmap' | 'foliage' | 'water'): void {
+    const key = `${gridX}_${gridY}`;
+    let flags = this.tileDirtyFlags.get(key);
+
+    if (!flags) {
+      flags = {
+        heightmapDirty: false,
+        splatmapDirty: false,
+        foliageDirty: false,
+        waterDirty: false,
+        lastModified: Date.now(),
+      };
+      this.tileDirtyFlags.set(key, flags);
+    }
+
+    switch (type) {
+      case 'heightmap':
+        flags.heightmapDirty = true;
+        break;
+      case 'splatmap':
+        flags.splatmapDirty = true;
+        break;
+      case 'foliage':
+        flags.foliageDirty = true;
+        break;
+      case 'water':
+        flags.waterDirty = true;
+        break;
+    }
+
+    flags.lastModified = Date.now();
+  }
+
+  /**
+   * Check if a tile has any unsaved changes
+   */
+  private isTileDirty(gridX: number, gridY: number): boolean {
+    const key = `${gridX}_${gridY}`;
+    const flags = this.tileDirtyFlags.get(key);
+    if (!flags) return false;
+    return flags.heightmapDirty || flags.splatmapDirty || flags.foliageDirty || flags.waterDirty;
+  }
+
+  /**
+   * Clear dirty flags for a tile (after saving)
+   */
+  private clearTileDirtyFlags(gridX: number, gridY: number): void {
+    const key = `${gridX}_${gridY}`;
+    this.tileDirtyFlags.delete(key);
+  }
+
+  /**
+   * Get dirty flags for a tile
+   */
+  getTileDirtyFlags(gridX: number, gridY: number): {
+    heightmapDirty: boolean;
+    splatmapDirty: boolean;
+    foliageDirty: boolean;
+    waterDirty: boolean;
+    lastModified: number;
+  } | null {
+    const key = `${gridX}_${gridY}`;
+    return this.tileDirtyFlags.get(key) || null;
+  }
+
+  /**
+   * Get all dirty tiles
+   */
+  getAllDirtyTiles(): Array<{
+    gridX: number;
+    gridY: number;
+    flags: {
+      heightmapDirty: boolean;
+      splatmapDirty: boolean;
+      foliageDirty: boolean;
+      waterDirty: boolean;
+      lastModified: number;
+    };
+  }> {
+    const result: Array<{
+      gridX: number;
+      gridY: number;
+      flags: {
+        heightmapDirty: boolean;
+        splatmapDirty: boolean;
+        foliageDirty: boolean;
+        waterDirty: boolean;
+        lastModified: number;
+      };
+    }> = [];
+
+    for (const [key, flags] of this.tileDirtyFlags.entries()) {
+      if (flags.heightmapDirty || flags.splatmapDirty || flags.foliageDirty || flags.waterDirty) {
+        const [gridX, gridY] = key.split('_').map(Number);
+        result.push({ gridX, gridY, flags });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Auto-save a dirty tile before unload
+   */
+  private async autoSaveTileBeforeUnload(gridX: number, gridY: number): Promise<boolean> {
+    const key = `${gridX}_${gridY}`;
+    const flags = this.tileDirtyFlags.get(key);
+
+    if (!flags || !this.isTileDirty(gridX, gridY)) {
+      return true; // Nothing to save
+    }
+
+    console.log(`[EditorEngine] Auto-saving dirty tile (${gridX},${gridY}) before unload...`);
+
+    try {
+      const tileData = this.editableTileData.get(key);
+      if (!tileData) {
+        console.warn(`[EditorEngine] No editable data for tile (${gridX},${gridY}), skipping auto-save`);
+        return true;
+      }
+
+      // Get the tile manager
+      const tileManager = getManualTileManager();
+
+      // Create a tile ID for this position (or find existing)
+      const tileId = `autosave_${gridX}_${gridY}_${Date.now()}`;
+
+      // Get foliage data if available
+      let foliageData: Record<string, string> | undefined;
+      const foliageMeshes = this.neighborFoliageMeshes.get(key);
+      if (foliageMeshes && this.foliageSystem) {
+        foliageData = this.foliageSystem.exportTileData();
+      }
+
+      // Save the tile using saveTileFromCurrent
+      tileManager.saveTileFromCurrent(
+        `Auto-save (${gridX},${gridY})`,
+        tileData.heightmapData,
+        tileData.splatmapData,
+        tileData.waterMaskData,
+        tileData.resolution,
+        this.heightmap?.getScale() || 64,
+        this.seaLevel,
+        this.waterDepth,
+        tileId,  // existing ID
+        foliageData
+      );
+
+      // Update world config to track this placement
+      tileManager.setPlacement(gridX, gridY, tileId);
+
+      // Clear dirty flags after successful save
+      this.clearTileDirtyFlags(gridX, gridY);
+
+      console.log(`[EditorEngine] Auto-saved tile (${gridX},${gridY}) as ${tileId}`);
+      return true;
+    } catch (error) {
+      console.error(`[EditorEngine] Failed to auto-save tile (${gridX},${gridY}):`, error);
+      return false;
+    }
   }
 
   /**
