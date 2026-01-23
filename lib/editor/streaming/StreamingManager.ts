@@ -78,7 +78,13 @@ export class StreamingManager {
   private enabled: boolean = true;
   private updateObserver: Observer<Scene> | null = null;
   private loadQueue: Array<{ x: number; z: number; lod: StreamingLOD }> = [];
+  private loadQueueSet: Set<string> = new Set();  // O(1) lookup for queue
   private activeLoads: number = 0;
+
+  // Performance: frame skipping and object reuse
+  private frameCounter: number = 0;
+  private readonly UPDATE_INTERVAL: number = 5;  // Update every N frames
+  private requiredCellsCache: Set<string> = new Set();  // Reusable Set
 
   // Protected cells (won't be unloaded while protected)
   private protectedCells: Set<string> = new Set();
@@ -116,9 +122,16 @@ export class StreamingManager {
   }
 
   /**
-   * Main update loop - called every frame
+   * Main update loop - called every frame (with frame skipping for performance)
    */
   private update(): void {
+    // Frame skipping: only run full update every N frames
+    this.frameCounter++;
+    const isFullUpdate = this.frameCounter >= this.UPDATE_INTERVAL;
+    if (isFullUpdate) {
+      this.frameCounter = 0;
+    }
+
     const camera = this.scene.activeCamera;
     if (!camera) return;
 
@@ -126,14 +139,17 @@ export class StreamingManager {
     const cellX = Math.floor(cameraPos.x / this.config.cellSize);
     const cellZ = Math.floor(cameraPos.z / this.config.cellSize);
 
-    // Check if we moved to a new cell
+    // Check if we moved to a new cell (always check, but only full update periodically)
     if (cellX !== this.currentCellX || cellZ !== this.currentCellZ) {
       this.currentCellX = cellX;
       this.currentCellZ = cellZ;
       this.updateCellsAroundCamera(cellX, cellZ);
+    } else if (isFullUpdate) {
+      // Periodic update for unloading stale cells even when not moving
+      this.updateCellsAroundCamera(cellX, cellZ);
     }
 
-    // Process load queue
+    // Process load queue (always process to avoid stalling)
     this.processLoadQueue();
   }
 
@@ -142,7 +158,9 @@ export class StreamingManager {
    */
   private updateCellsAroundCamera(centerX: number, centerZ: number): void {
     const now = Date.now();
-    const requiredCells = new Set<string>();
+    // Reuse Set to avoid GC pressure
+    this.requiredCellsCache.clear();
+    const requiredCells = this.requiredCellsCache;
 
     // Determine which cells should be loaded at which LOD
     for (let dx = -this.config.farRadius; dx <= this.config.farRadius; dx++) {
@@ -194,10 +212,10 @@ export class StreamingManager {
    */
   private queueCellLoad(x: number, z: number, lod: StreamingLOD): void {
     const key = this.getCellKey(x, z);
-    
-    // Check if already queued or loading
+
+    // Check if already queued or loading (O(1) lookup)
     if (this.cells.has(key)) return;
-    if (this.loadQueue.some(item => item.x === x && item.z === z)) return;
+    if (this.loadQueueSet.has(key)) return;
 
     // Create cell entry
     const cell: StreamingCell = {
@@ -212,12 +230,15 @@ export class StreamingManager {
     };
     this.cells.set(key, cell);
 
+    // Add to queue set for O(1) lookup
+    this.loadQueueSet.add(key);
+
     // Add to load queue (prioritize by distance to camera)
     const distance = Math.max(
       Math.abs(x - this.currentCellX),
       Math.abs(z - this.currentCellZ)
     );
-    
+
     // Insert in priority order (closer cells first)
     let inserted = false;
     for (let i = 0; i < this.loadQueue.length; i++) {
@@ -237,10 +258,15 @@ export class StreamingManager {
   }
 
   /**
-   * Process the load queue
+   * Process the load queue (limited items per frame to avoid stalling)
    */
-  private async processLoadQueue(): Promise<void> {
+  private processLoadQueue(): void {
+    // Process at most 2 items per frame to avoid blocking
+    let processed = 0;
+    const maxPerFrame = 2;
+
     while (
+      processed < maxPerFrame &&
       this.loadQueue.length > 0 &&
       this.activeLoads < this.config.maxConcurrentLoads
     ) {
@@ -248,25 +274,43 @@ export class StreamingManager {
       if (!item) break;
 
       const key = this.getCellKey(item.x, item.z);
+      // Remove from lookup set
+      this.loadQueueSet.delete(key);
+
       const cell = this.cells.get(key);
       if (!cell || cell.state !== CellState.Loading) continue;
 
       this.activeLoads++;
+      processed++;
 
-      try {
-        if (this.onLoadCell) {
-          await this.onLoadCell(item.x, item.z, item.lod);
-        }
-        cell.state = CellState.Loaded;
-        cell.terrainLoaded = true;
-        cell.foliageLoaded = item.lod === StreamingLOD.Near;
-        cell.propsLoaded = item.lod <= StreamingLOD.Mid;
-      } catch (error) {
-        console.error(`[StreamingManager] Failed to load cell (${item.x}, ${item.z}):`, error);
-        this.cells.delete(key);
-      } finally {
-        this.activeLoads--;
+      // Use non-blocking async load
+      this.loadCellAsync(item.x, item.z, item.lod, key, cell);
+    }
+  }
+
+  /**
+   * Async cell loading (non-blocking)
+   */
+  private async loadCellAsync(
+    x: number,
+    z: number,
+    lod: StreamingLOD,
+    key: string,
+    cell: StreamingCell
+  ): Promise<void> {
+    try {
+      if (this.onLoadCell) {
+        await this.onLoadCell(x, z, lod);
       }
+      cell.state = CellState.Loaded;
+      cell.terrainLoaded = true;
+      cell.foliageLoaded = lod === StreamingLOD.Near;
+      cell.propsLoaded = lod <= StreamingLOD.Mid;
+    } catch (error) {
+      console.error(`[StreamingManager] Failed to load cell (${x}, ${z}):`, error);
+      this.cells.delete(key);
+    } finally {
+      this.activeLoads--;
     }
   }
 
@@ -332,6 +376,7 @@ export class StreamingManager {
     }
     this.cells.clear();
     this.loadQueue = [];
+    this.loadQueueSet.clear();
 
     // Load immediate area synchronously
     for (let dx = -this.config.nearRadius; dx <= this.config.nearRadius; dx++) {
@@ -455,5 +500,7 @@ export class StreamingManager {
     }
     this.cells.clear();
     this.loadQueue = [];
+    this.loadQueueSet.clear();
+    this.requiredCellsCache.clear();
   }
 }
