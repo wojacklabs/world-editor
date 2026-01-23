@@ -80,6 +80,9 @@ export class StreamingManager {
   private loadQueue: Array<{ x: number; z: number; lod: StreamingLOD }> = [];
   private activeLoads: number = 0;
 
+  // Protected cells (won't be unloaded while protected)
+  private protectedCells: Set<string> = new Set();
+
   // Callbacks for cell operations
   private onLoadCell: ((x: number, z: number, lod: StreamingLOD) => Promise<void>) | null = null;
   private onUnloadCell: ((x: number, z: number) => void) | null = null;
@@ -286,6 +289,12 @@ export class StreamingManager {
    */
   private unloadCell(x: number, z: number): void {
     const key = this.getCellKey(x, z);
+
+    // Don't unload protected cells
+    if (this.protectedCells.has(key)) {
+      return;
+    }
+
     const cell = this.cells.get(key);
     if (!cell) return;
 
@@ -382,6 +391,44 @@ export class StreamingManager {
    */
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+  }
+
+  /**
+   * Protect a cell from being unloaded (for editing)
+   */
+  protectCell(x: number, z: number): void {
+    const key = this.getCellKey(x, z);
+    this.protectedCells.add(key);
+  }
+
+  /**
+   * Remove protection from a cell
+   */
+  unprotectCell(x: number, z: number): void {
+    const key = this.getCellKey(x, z);
+    this.protectedCells.delete(key);
+  }
+
+  /**
+   * Check if a cell is protected
+   */
+  isCellProtected(x: number, z: number): boolean {
+    const key = this.getCellKey(x, z);
+    return this.protectedCells.has(key);
+  }
+
+  /**
+   * Get count of protected cells
+   */
+  getProtectedCellCount(): number {
+    return this.protectedCells.size;
+  }
+
+  /**
+   * Clear all cell protections
+   */
+  clearAllProtections(): void {
+    this.protectedCells.clear();
   }
 
   /**

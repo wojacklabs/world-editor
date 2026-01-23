@@ -34,6 +34,9 @@ export class GamePreview {
   // Tile mode: "clone" (random extension) or "mirror" (symmetric mirroring)
   private tileMode: TileMode = "mirror";
 
+  // Streaming mode: use StreamingManager for dynamic tile loading
+  private useStreaming = false;
+
   // Grid size from World tab (default 3 for 3x3)
   private gridSize = 3;
 
@@ -65,7 +68,8 @@ export class GamePreview {
     terrainMesh?: TerrainMesh | null,
     foliageSystem?: FoliageSystem | null,
     biomeDecorator?: BiomeDecorator | null,
-    tileMode: TileMode = "mirror"
+    tileMode: TileMode = "mirror",
+    useStreaming: boolean = false
   ) {
     this.scene = scene;
     this.heightmap = heightmap;
@@ -73,6 +77,7 @@ export class GamePreview {
     this.foliageSystem = foliageSystem || null;
     this.biomeDecorator = biomeDecorator || null;
     this.tileMode = tileMode;
+    this.useStreaming = useStreaming;
   }
 
   setTileMode(mode: TileMode): void {
@@ -94,21 +99,31 @@ export class GamePreview {
     console.log("=== [GamePreview] enable() ===");
     console.log("  gridSize from worldConfig:", this.gridSize);
     console.log("  tileMode:", this.tileMode);
+    console.log("  useStreaming:", this.useStreaming);
     console.log("  terrainMesh:", terrainMesh?.name);
 
     // Note: Terrain LOD is disabled by EditorEngine before calling enable()
     // to ensure we get the full resolution mesh for cloning
 
-    // Create NxN tile grid for terrain based on gridSize
-    this.createTileGrid();
-    console.log("  After createTileGrid: tileClones.length =", this.tileClones.length);
+    if (this.useStreaming) {
+      // Streaming mode: tiles are dynamically loaded by StreamingManager
+      // No need to clone/mirror tiles - they are already managed by EditorEngine
+      console.log("  Streaming mode enabled - skipping tile cloning");
 
-    // Extend foliage to cover all tiles
-    this.extendFoliage();
-    console.log("  After extendFoliage");
+      // Enable neighbor tile foliage (from edited biomes)
+      this.enableNeighborFoliage();
+    } else {
+      // Legacy mode: Create NxN tile grid for terrain based on gridSize
+      this.createTileGrid();
+      console.log("  After createTileGrid: tileClones.length =", this.tileClones.length);
 
-    // Enable neighbor tile foliage (from edited biomes)
-    this.enableNeighborFoliage();
+      // Extend foliage to cover all tiles
+      this.extendFoliage();
+      console.log("  After extendFoliage");
+
+      // Enable neighbor tile foliage (from edited biomes)
+      this.enableNeighborFoliage();
+    }
 
     // Adjust foliage LOD distances for game mode
     // Use smaller distances for performance - foliage fades into fog

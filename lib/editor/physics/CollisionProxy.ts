@@ -448,6 +448,27 @@ export class CollisionProxy {
   }
 
   /**
+   * Rebuild collision proxy for loaded tiles only (for streaming)
+   * @param loadedTileKeys Array of loaded tile keys (format: "gridX_gridY")
+   */
+  rebuildForLoadedTiles(loadedTileKeys: string[]): void {
+    // Placeholder for streaming integration
+    // When streaming is enabled, this method rebuilds terrain collision
+    // for only the currently loaded tiles instead of the entire terrain.
+    //
+    // Implementation would:
+    // 1. Dispose current terrain proxy
+    // 2. Build a new proxy covering only the loaded tile areas
+    // 3. Keep prop proxies that are within loaded tiles
+    //
+    // For now, just rebuild the full terrain proxy if heightmap is set
+    if (this.heightmap) {
+      this.buildTerrainProxy();
+    }
+    console.log(`[CollisionProxy] rebuildForLoadedTiles called with ${loadedTileKeys.length} tiles (placeholder)`);
+  }
+
+  /**
    * Dispose all resources
    */
   dispose(): void {
