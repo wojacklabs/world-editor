@@ -353,6 +353,11 @@ export default function EditorPage() {
     engine.updateWorldGrid();
   }, [engine]);
 
+  const handleSelectGridCell = useCallback((gridX: number, gridY: number) => {
+    if (!engine) return;
+    engine.focusOnGridCell(gridX, gridY);
+  }, [engine]);
+
   // Mark tile dirty when modified
   useEffect(() => {
     if (engine) {
@@ -687,6 +692,7 @@ export default function EditorPage() {
               tileMode={tileMode}
               onTileModeChange={handleTileModeChange}
               onWorldGridChange={handleWorldGridChange}
+              onSelectGridCell={handleSelectGridCell}
             />
             {/* Placed Asset Panel */}
             <PlacedAssetPanel
