@@ -34,8 +34,8 @@ import { createTerrainMaterial, createSplatTexture } from "../terrain/TerrainSha
 import { SplatMap } from "../terrain/SplatMap";
 import { BiomeDecorator } from "../terrain/BiomeDecorator";
 import { GamePreview, TileMode } from "./GamePreview";
-import { PropManager } from "../props/PropManager";
-import { FoliageSystem } from "../foliage/FoliageSystem";
+import { PropManager, PropLOD } from "../props/PropManager";
+import { FoliageSystem, FoliageLOD } from "../foliage/FoliageSystem";
 import { ImpostorSystem } from "../foliage/ImpostorSystem";
 import { initializeKTX2Support } from "./KTX2Setup";
 import { StreamingManager, StreamingLOD } from "../streaming/StreamingManager";
@@ -4776,19 +4776,62 @@ export class EditorEngine {
 
     console.log(`[EditorEngine] Streaming update LOD cell (${cellX},${cellZ}) -> tile (${tile.gridX},${tile.gridY}), LOD=${StreamingLOD[lod]}`);
 
-    // LOD-based foliage management
+    // Map StreamingLOD to FoliageLOD
+    const foliageLOD = this.mapToFoliageLOD(lod);
+    const propLOD = this.mapToPropLOD(lod);
+
+    // LOD-based foliage management with density control
     if (this.foliageSystem) {
-      if (lod === StreamingLOD.Near) {
-        // Load foliage for Near cells
-        if (!this.foliageSystem.isCellLoaded(cellX, cellZ)) {
-          this.foliageSystem.generateCell(cellX, cellZ);
-        }
-      } else {
-        // Unload foliage for Mid/Far cells (save memory)
+      if (lod === StreamingLOD.Far) {
+        // Unload foliage for Far cells (save memory)
         if (this.foliageSystem.isCellLoaded(cellX, cellZ)) {
           this.foliageSystem.unloadCell(cellX, cellZ);
         }
+      } else {
+        // Near/Mid: load or update density
+        if (!this.foliageSystem.isCellLoaded(cellX, cellZ)) {
+          this.foliageSystem.generateCell(cellX, cellZ);
+        }
+        // Update LOD density (Near: 100%, Mid: 50%)
+        this.foliageSystem.updateCellLOD(cellX, cellZ, foliageLOD);
       }
+    }
+
+    // LOD-based prop visibility
+    if (this.propManager) {
+      this.propManager.updateTileLOD(tile.gridX, tile.gridY, propLOD);
+    }
+  }
+
+  /**
+   * Map StreamingLOD to FoliageLOD
+   */
+  private mapToFoliageLOD(streamingLOD: StreamingLOD): FoliageLOD {
+    switch (streamingLOD) {
+      case StreamingLOD.Near:
+        return FoliageLOD.Near;
+      case StreamingLOD.Mid:
+        return FoliageLOD.Mid;
+      case StreamingLOD.Far:
+        return FoliageLOD.Far;
+      default:
+        return FoliageLOD.Near;
+    }
+  }
+
+  /**
+   * Map StreamingLOD to PropLOD
+   */
+  private mapToPropLOD(streamingLOD: StreamingLOD): PropLOD {
+    switch (streamingLOD) {
+      case StreamingLOD.Near:
+        return PropLOD.Near;
+      case StreamingLOD.Mid:
+        return PropLOD.Mid;
+      case StreamingLOD.Far:
+        return PropLOD.Far;
+      default:
+        return PropLOD.Near;
     }
   }
 

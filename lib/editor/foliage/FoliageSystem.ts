@@ -101,13 +101,21 @@ interface FoliageTypeConfig {
   colorVariation: number;
 }
 
+// LOD level for density control
+export enum FoliageLOD {
+  Near = 0,   // 100% density
+  Mid = 1,    // 50% density
+  Far = 2,    // Unloaded
+}
+
 // Chunk for spatial organization
 interface FoliageChunk {
   x: number;
   z: number;
-  instances: Map<string, Float32Array>;  // type -> matrix buffer
+  instances: Map<string, Float32Array>;  // type -> matrix buffer (full density)
   mesh: Map<string, Mesh>;               // type -> thin instance mesh
   visible: boolean;
+  currentLOD: FoliageLOD;                // Current LOD level for density
 }
 
 // Register grass blade shader with fog and distance-based LOD
@@ -1029,6 +1037,7 @@ export class FoliageSystem {
       instances: new Map(),
       mesh: new Map(),
       visible: true,
+      currentLOD: FoliageLOD.Near,  // Default to full density
     };
 
     // Generate instances for each foliage type
@@ -1769,6 +1778,7 @@ export class FoliageSystem {
           instances: new Map(),
           mesh: new Map(),
           visible: true,
+          currentLOD: FoliageLOD.Near,
         };
         this.chunks.set(chunkKey, chunk);
       }
@@ -1993,6 +2003,80 @@ export class FoliageSystem {
 
     this.loadedCells.delete(cellKey);
     console.log(`[FoliageSystem] Cell ${cellKey} unloaded (${unloadedCount} chunks disposed)`);
+  }
+
+  /**
+   * Update LOD for a specific cell (adjusts foliage density)
+   * Near: 100% density, Mid: 50% density, Far: should be unloaded
+   */
+  updateCellLOD(cellX: number, cellZ: number, lod: FoliageLOD): void {
+    const cellKey = `${cellX}_${cellZ}`;
+
+    if (!this.loadedCells.has(cellKey)) {
+      // If not loaded and LOD is Near/Mid, generate it
+      if (lod !== FoliageLOD.Far) {
+        this.generateCell(cellX, cellZ);
+      } else {
+        return;
+      }
+    }
+
+    // Get LOD density multiplier
+    const densityMultiplier = this.getLODDensityMultiplier(lod);
+
+    const chunks = this.getChunksInCell(cellX, cellZ);
+    let updatedCount = 0;
+
+    for (const { chunkX, chunkZ } of chunks) {
+      const chunkKey = `${chunkX}_${chunkZ}`;
+      const chunk = this.chunks.get(chunkKey);
+
+      if (chunk && chunk.currentLOD !== lod) {
+        chunk.currentLOD = lod;
+
+        // Update thin instance counts based on density multiplier
+        for (const [typeName, fullMatrices] of chunk.instances) {
+          const mesh = chunk.mesh.get(typeName);
+          if (mesh && fullMatrices.length > 0) {
+            const fullInstanceCount = fullMatrices.length / 16;
+            const targetCount = Math.max(1, Math.floor(fullInstanceCount * densityMultiplier));
+
+            if (densityMultiplier < 1.0) {
+              // Reduce density: use subset of matrices
+              const reducedMatrices = fullMatrices.slice(0, targetCount * 16);
+              mesh.thinInstanceSetBuffer("matrix", reducedMatrices, 16, false);
+              mesh.thinInstanceCount = targetCount;
+            } else {
+              // Full density: use all matrices
+              mesh.thinInstanceSetBuffer("matrix", fullMatrices, 16, false);
+              mesh.thinInstanceCount = fullInstanceCount;
+            }
+            mesh.thinInstanceRefreshBoundingInfo();
+          }
+        }
+        updatedCount++;
+      }
+    }
+
+    if (updatedCount > 0) {
+      console.log(`[FoliageSystem] Cell ${cellKey} LOD updated to ${FoliageLOD[lod]} (${updatedCount} chunks, density=${densityMultiplier * 100}%)`);
+    }
+  }
+
+  /**
+   * Get density multiplier for LOD level
+   */
+  private getLODDensityMultiplier(lod: FoliageLOD): number {
+    switch (lod) {
+      case FoliageLOD.Near:
+        return 1.0;    // 100% density
+      case FoliageLOD.Mid:
+        return 0.5;    // 50% density
+      case FoliageLOD.Far:
+        return 0.0;    // Should be unloaded
+      default:
+        return 1.0;
+    }
   }
 
   /**

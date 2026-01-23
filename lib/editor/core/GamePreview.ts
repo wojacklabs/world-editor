@@ -46,8 +46,8 @@ export class GamePreview {
   private neighborFoliageMeshesEnabled: Mesh[] = [];
 
   // Free camera state
-  private moveSpeed = 30;
-  private fastMoveSpeed = 60;
+  private moveSpeed = 1.875;
+  private fastMoveSpeed = 3.75;
 
   // Input state
   private inputMap: { [key: string]: boolean } = {};

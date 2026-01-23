@@ -8,6 +8,13 @@ import * as BABYLON from "@babylonjs/core";
 import { Heightmap } from "../terrain/Heightmap";
 import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from "./ProceduralAsset";
 
+// LOD level for props visibility
+export enum PropLOD {
+  Near = 0,   // All props visible
+  Mid = 1,    // Medium/large props only
+  Far = 2,    // Large props only (landmarks)
+}
+
 export interface PropInstance {
   id: string;
   assetType: AssetType;
@@ -119,6 +126,56 @@ export class PropManager {
       }
     }
     return result;
+  }
+
+  /**
+   * Update LOD for props in a specific tile
+   * Near: all props visible, Mid: medium/large only, Far: large only
+   */
+  updateTileLOD(gridX: number, gridY: number, lod: PropLOD): void {
+    const tileKey = `${gridX}_${gridY}`;
+    const tileProps = this.propsByTile.get(tileKey);
+    if (!tileProps) return;
+
+    let visibleCount = 0;
+    let hiddenCount = 0;
+
+    for (const propId of tileProps) {
+      const instance = this.instances.get(propId);
+      if (!instance || !instance.mesh) continue;
+
+      const size = instance.params.size;
+      const shouldBeVisible = this.shouldPropBeVisible(size, lod);
+
+      if (instance.mesh.isEnabled() !== shouldBeVisible) {
+        instance.mesh.setEnabled(shouldBeVisible);
+        if (shouldBeVisible) {
+          visibleCount++;
+        } else {
+          hiddenCount++;
+        }
+      }
+    }
+
+    if (visibleCount > 0 || hiddenCount > 0) {
+      console.log(`[PropManager] Tile (${gridX},${gridY}) LOD=${PropLOD[lod]}: ${visibleCount} visible, ${hiddenCount} hidden`);
+    }
+  }
+
+  /**
+   * Determine if a prop should be visible based on size and LOD
+   */
+  private shouldPropBeVisible(size: number, lod: PropLOD): boolean {
+    switch (lod) {
+      case PropLOD.Near:
+        return true;  // All props visible
+      case PropLOD.Mid:
+        return size >= 0.5;  // Medium/large props only (size >= 0.5)
+      case PropLOD.Far:
+        return size >= 1.0;  // Large props only (landmarks, size >= 1.0)
+      default:
+        return true;
+    }
   }
 
   /**
