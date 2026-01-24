@@ -767,46 +767,43 @@ export class FoliageSystem {
     const normals: number[] = [];
     const colors: number[] = [];
 
-    // Create 3 crossing quads for a grass clump
-    const bladeCount = 3;
+    // Create 2 crossing quads for a grass clump (optimized from 3)
+    // backFaceCulling=false handles visibility from both sides
+    const bladeCount = 2;
     const bladeWidth = 0.08;
     const bladeHeight = 0.5;
 
     for (let i = 0; i < bladeCount; i++) {
-      const angle = (i / bladeCount) * Math.PI;
+      const angle = (i / bladeCount) * Math.PI;  // 0° and 90°
       const cos = Math.cos(angle);
       const sin = Math.sin(angle);
-      
+
       const baseIdx = positions.length / 3;
-      
+
       // Four vertices per blade (2 triangles)
       // Bottom left
       positions.push(-bladeWidth * cos, 0, -bladeWidth * sin);
       normals.push(sin, 0, -cos);
       colors.push(0.25, 0.4, 0.15, 1.0);  // darker at base
-      
+
       // Bottom right
       positions.push(bladeWidth * cos, 0, bladeWidth * sin);
       normals.push(sin, 0, -cos);
       colors.push(0.25, 0.4, 0.15, 1.0);
-      
+
       // Top right
       positions.push(bladeWidth * cos * 0.3, bladeHeight, bladeWidth * sin * 0.3);
       normals.push(sin, 0.2, -cos);
       colors.push(0.4, 0.6, 0.25, 1.0);  // lighter at tip
-      
+
       // Top left
       positions.push(-bladeWidth * cos * 0.3, bladeHeight, -bladeWidth * sin * 0.3);
       normals.push(sin, 0.2, -cos);
       colors.push(0.4, 0.6, 0.25, 1.0);
-      
-      // Two triangles
+
+      // Two triangles only (no back faces - backFaceCulling=false handles it)
       indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
       indices.push(baseIdx, baseIdx + 2, baseIdx + 3);
-      
-      // Back faces
-      indices.push(baseIdx + 2, baseIdx + 1, baseIdx);
-      indices.push(baseIdx + 3, baseIdx + 2, baseIdx);
     }
 
     const mesh = new Mesh("grass_base", this.scene);
