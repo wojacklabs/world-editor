@@ -12,7 +12,7 @@ import PlacedAssetPanel from "@/components/editor/PlacedAssetPanel";
 import { useEditorStore } from "@/lib/editor/store/editorStore";
 import { SavedAsset } from "@/lib/editor/assets/AssetLibrary";
 import { MeshData, createMeshFromData } from "@/lib/editor/assets/CustomMeshBuilder";
-import { getManualTileManager, type SeamlessDirection } from "@/lib/editor/tiles/ManualTileManager";
+import { getManualTileManager } from "@/lib/editor/tiles/ManualTileManager";
 
 import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
@@ -45,7 +45,6 @@ export default function EditorPage() {
   const [dispStrength, setDispStrength] = useState(0.5);
   const [terrainResolution, setTerrainResolution] = useState(512);
   const [terrainSize, setTerrainSize] = useState(64);
-  const [tileMode, setTileMode] = useState<"clone" | "mirror">("mirror");
   const [activeTileId, setActiveTileId] = useState<string | null>(null);
   const [tileDirty, setTileDirty] = useState(false);
   const { setModified, resetState } = useEditorStore();
@@ -184,57 +183,13 @@ export default function EditorPage() {
     a.click();
   }, [engine]);
 
-  const handleExportWorldProject = useCallback(() => {
-    if (!engine) return;
-
-    const tileData = engine.getCurrentTileData();
-    if (!tileData) return;
-
-    const tileManager = getManualTileManager();
-
-    // Export full world with all tiles and World Grid config
-    const json = tileManager.exportFullWorld("world_project", {
-      heightmapData: tileData.heightmapData,
-      splatmapData: tileData.splatmapData,
-      waterMaskData: tileData.waterMaskData,
-      resolution: tileData.resolution,
-      size: tileData.size,
-      seaLevel: tileData.seaLevel,
-      waterDepth: tileData.waterDepth,
-      foliageData: tileData.foliageData,
-    });
-
-    // Download as JSON file
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "world_project.json";
-    a.click();
-    URL.revokeObjectURL(url);
-
-    console.log("[Page] World project exported");
-  }, [engine]);
-
-  const handleMakeSeamless = useCallback(() => {
-    if (!engine) return;
-
-    // Use the comprehensive makeSeamless that handles
-    // heightmap, splat map (biomes), water, and regenerates foliage
-    engine.makeSeamless();
-    setModified(true);
-  }, [engine, setModified]);
-
-  const handleMakeSeamlessDirection = useCallback((direction: "left" | "right" | "top" | "bottom" | "all") => {
-    if (!engine) return;
-
-    if (direction === "all") {
-      engine.makeSeamless();
-    } else {
-      engine.makeSeamlessDirection(direction);
+  const handleTerrainSizeChange = useCallback((value: number) => {
+    setTerrainSize(value);
+    if (engine) {
+      engine.createNewTerrain(value, terrainResolution);
+      setModified(true);
     }
-    setModified(true);
-  }, [engine, setModified]);
+  }, [engine, terrainResolution, setModified]);
 
   const handleDispStrengthChange = useCallback((value: number) => {
     setDispStrength(value);
@@ -260,13 +215,6 @@ export default function EditorPage() {
   const handleToggleGameMode = useCallback(() => {
     if (engine) {
       engine.toggleGameMode();
-    }
-  }, [engine]);
-
-  const handleTileModeChange = useCallback((mode: "clone" | "mirror") => {
-    setTileMode(mode);
-    if (engine) {
-      engine.setTileMode(mode);
     }
   }, [engine]);
 
@@ -347,17 +295,6 @@ export default function EditorPage() {
     setTileDirty(false);
     console.log(`[Page] New tile created: ${name} (${newId})`);
   }, [engine, terrainResolution]);
-
-  const handleWorldGridChange = useCallback(() => {
-    if (!engine) return;
-    // Trigger engine to update world grid rendering
-    engine.updateWorldGrid();
-  }, [engine]);
-
-  const handleSelectGridCell = useCallback((gridX: number, gridY: number) => {
-    if (!engine) return;
-    engine.focusOnGridCell(gridX, gridY);
-  }, [engine]);
 
   // Mark tile dirty when modified
   useEffect(() => {
@@ -679,7 +616,6 @@ export default function EditorPage() {
         onSave={handleSave}
         onExportGLB={handleExportGLB}
         onExportHeightmap={handleExportHeightmap}
-        onExportWorldProject={handleExportWorldProject}
         onToggleGameMode={handleToggleGameMode}
         onOpenAIChat={() => setIsChatOpen(true)}
         onOpenLibrary={() => setIsLibraryOpen(true)}
@@ -698,23 +634,18 @@ export default function EditorPage() {
 
         {!isGameMode && (
           <div className="flex flex-col bg-zinc-950 overflow-y-auto">
-            {/* Unified Tile Panel with Tile/World tabs */}
             <TilePanel
               onSaveTile={handleSaveTile}
               onLoadTile={handleLoadTile}
               onCreateNewTile={handleCreateNewTile}
               activeTileId={activeTileId}
               isDirty={tileDirty}
-              onMakeSeamless={handleMakeSeamless}
-              onMakeSeamlessDirection={handleMakeSeamlessDirection}
               dispStrength={dispStrength}
               onDispStrengthChange={handleDispStrengthChange}
               terrainResolution={terrainResolution}
               onTerrainResolutionChange={handleTerrainResolutionChange}
-              tileMode={tileMode}
-              onTileModeChange={handleTileModeChange}
-              onWorldGridChange={handleWorldGridChange}
-              onSelectGridCell={handleSelectGridCell}
+              terrainSize={terrainSize}
+              onTerrainSizeChange={handleTerrainSizeChange}
             />
             {/* Placed Asset Panel */}
             <PlacedAssetPanel
