@@ -32,7 +32,7 @@ import { TerrainMesh } from "../terrain/TerrainMesh";
 import { createTerrainMaterial, createSplatTexture } from "../terrain/TerrainShader";
 import { SplatMap } from "../terrain/SplatMap";
 import { BiomeDecorator } from "../terrain/BiomeDecorator";
-import { GamePreview, TileMode } from "./GamePreview";
+import { GamePreview } from "./GamePreview";
 import { PropManager } from "../props/PropManager";
 import { FoliageSystem } from "../foliage/FoliageSystem";
 import { ImpostorSystem } from "../foliage/ImpostorSystem";
@@ -1069,15 +1069,12 @@ export class EditorEngine {
     this.camera.detachControl();
 
     // Create and enable game preview with foliage and water systems
-    const useStreaming = false; // Streaming disabled after tile system removal
     this.gamePreview = new GamePreview(
       this.scene,
       this.heightmap,
       this.terrainMesh,
       this.foliageSystem,
-      this.biomeDecorator,
-      "mirror", // Default to mirror mode after tile system removal
-      useStreaming
+      this.biomeDecorator
     );
     this.gamePreview.enable(mesh);
 
