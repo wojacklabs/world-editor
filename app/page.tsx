@@ -44,6 +44,7 @@ export default function EditorPage() {
   const [projectName, setProjectName] = useState("terrain-project");
   const [dispStrength, setDispStrength] = useState(0.5);
   const [terrainResolution, setTerrainResolution] = useState(512);
+  const [terrainSize, setTerrainSize] = useState(64);
   const [tileMode, setTileMode] = useState<"clone" | "mirror">("mirror");
   const [activeTileId, setActiveTileId] = useState<string | null>(null);
   const [tileDirty, setTileDirty] = useState(false);
@@ -60,14 +61,14 @@ export default function EditorPage() {
 
   const handleNewProject = useCallback(() => {
     if (engine) {
-      engine.createNewTerrain(64, terrainResolution);
+      engine.createNewTerrain(terrainSize, terrainResolution);
       resetState();
       // Clear all placed assets
       placedAssets.forEach((asset) => asset.node.dispose());
       setPlacedAssets([]);
       setSelectedAssetId(null);
     }
-  }, [engine, resetState, placedAssets, terrainResolution]);
+  }, [engine, resetState, placedAssets, terrainSize, terrainResolution]);
 
   const handleSave = useCallback(() => {
     setIsSaveDialogOpen(true);
@@ -251,10 +252,10 @@ export default function EditorPage() {
     setTerrainResolution(value);
     if (engine) {
       // Recreate terrain with new resolution
-      engine.createNewTerrain(64, value);
+      engine.createNewTerrain(terrainSize, value);
       setModified(true);
     }
-  }, [engine, setModified]);
+  }, [engine, terrainSize, setModified]);
 
   const handleToggleGameMode = useCallback(() => {
     if (engine) {

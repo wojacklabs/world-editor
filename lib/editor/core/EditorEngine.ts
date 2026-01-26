@@ -463,8 +463,10 @@ export class EditorEngine {
     this.heightmap = new Heightmap(resolution, size);
     this.heightmap.generateFromNoise(Math.random() * 1000, 0.5); // Very low amplitude for mostly flat base
 
-    // Make seamless so tiles connect properly when repeated
-    this.heightmap.makeSeamless();
+    // Only make seamless for small tiles that might be repeated
+    if (size <= 64) {
+      this.heightmap.makeSeamless();
+    }
 
     // Create terrain mesh
     this.terrainMesh = new TerrainMesh(this.scene, this.heightmap);
@@ -496,14 +498,26 @@ export class EditorEngine {
     this.propManager = new PropManager(this.scene, this.heightmap);
     this.propManager.setTileSize(size);  // Set tile size for streaming grouping
 
-    // Save initial tile as default template for infinite expansion
-    this.saveDefaultTileTemplate();
-    console.log("[EditorEngine] Default tile template saved for infinite expansion");
+    // Save initial tile as default template (only for small tiles that might be repeated)
+    if (size <= 64) {
+      this.saveDefaultTileTemplate();
+      console.log("[EditorEngine] Default tile template saved for infinite expansion");
+    }
 
     // Update CellManager with actual tile size
     if (this.cellManager) {
       this.cellManager.updateTileSize(size);
     }
+
+    // Update grid and camera to match terrain size
+    if (this.gridMesh) {
+      const gridScale = Math.max(256, size * 4);
+      this.gridMesh.scaling.x = gridScale / 256;
+      this.gridMesh.scaling.z = gridScale / 256;
+      this.gridMesh.position.x = size / 2;
+      this.gridMesh.position.z = size / 2;
+    }
+    this.focusOnTerrain();
   }
 
   /**
