@@ -339,10 +339,6 @@ export class EditorEngine {
               this.foliageSystem.generateAll();
               this.foliageDirty = false;
             }
-            // Sync tile edges for seamless connections
-            this.syncTileEdges();
-            // Release edit protection for cells
-            this.releaseEditProtection();
           }
           break;
         case PointerEventTypes.POINTERMOVE:
@@ -379,15 +375,11 @@ export class EditorEngine {
     this.lastPointerX = currentX;
     this.lastPointerY = currentY;
 
-    // Raycast to terrain (including neighbor tiles)
+    // Raycast to terrain
     const pickResult = this.scene.pick(
       currentX,
       currentY,
-      (mesh) => mesh.name.startsWith("terrain") ||
-                mesh.name.startsWith("neighbor_") ||
-                mesh.name.startsWith("default_tile_") ||
-                mesh.name.startsWith("mirrored_") ||
-                mesh.name.startsWith("flat_grass_")
+      (mesh) => mesh.name.startsWith("terrain")
     );
 
     this.currentPickInfo = pickResult;
@@ -1117,42 +1109,20 @@ export class EditorEngine {
     if (!this.currentPickInfo.pickedPoint || !this.heightmap || !this.terrainMesh) return;
 
     const point = this.currentPickInfo.pickedPoint;
-    const { gridX, gridY, localX, localZ } = this.getGridPositionFromWorld(point.x, point.z);
 
-    // Protect the editing cell and neighbors from unloading
-    if (this.cellManager) {
-      const cell = this.cellManager.worldToCell(point.x, point.z);
-      this.protectCellForEditing(cell.x, cell.z);
-    }
+    const modified = this.heightmap.applyBrush(
+      point.x,
+      point.z,
+      tool,
+      settings,
+      deltaTime
+    );
 
-    // Center tile (0,0) - use main heightmap
-    if (gridX === 0 && gridY === 0) {
-      const modified = this.heightmap.applyBrush(
-        point.x,
-        point.z,
-        tool,
-        settings,
-        deltaTime
-      );
-
-      if (modified) {
-        this.terrainMesh.updateFromHeightmap();
-        this.foliageDirty = true;
-        this.biomeDirty = true;
-        this.modifiedTiles.add("0,0");
-        this.markTileDirty(0, 0, 'heightmap');
-        this.onModified?.();
-      }
-    } else {
-      // Neighbor tile - use editable tile data
-      this.ensureEditableTileData(gridX, gridY);
-      const modified = this.applyBrushToNeighborTile(gridX, gridY, localX, localZ, tool, settings, deltaTime);
-      if (modified) {
-        this.updateNeighborTileMesh(gridX, gridY);
-        this.modifiedTiles.add(`${gridX},${gridY}`);
-        this.markTileDirty(gridX, gridY, 'heightmap');
-        this.onModified?.();
-      }
+    if (modified) {
+      this.terrainMesh.updateFromHeightmap();
+      this.foliageDirty = true;
+      this.biomeDirty = true;
+      this.onModified?.();
     }
   }
 
@@ -1583,87 +1553,39 @@ export class EditorEngine {
     if (!this.currentPickInfo.pickedPoint || !this.heightmap || !this.terrainMesh) return;
 
     const point = this.currentPickInfo.pickedPoint;
-    const { gridX, gridY, localX, localZ } = this.getGridPositionFromWorld(point.x, point.z);
+    const splatMap = this.terrainMesh.getSplatMap();
+    const scale = this.heightmap.getScale();
+    const resolution = splatMap.getResolution();
+    const splatX = (point.x / scale) * (resolution - 1);
+    const splatZ = (point.z / scale) * (resolution - 1);
+    const splatRadius = (settings.size / scale) * (resolution - 1);
 
-    // Protect the editing cell and neighbors from unloading
-    if (this.cellManager) {
-      const cell = this.cellManager.worldToCell(point.x, point.z);
-      this.protectCellForEditing(cell.x, cell.z);
+    const modified = splatMap.paint(
+      splatX,
+      splatZ,
+      splatRadius,
+      material,
+      settings.strength,
+      settings.falloff
+    );
+
+    // For water, auto-set seaLevel if not already set, then carve basin and paint shore
+    if (material === "water" && modified) {
+      if (this.seaLevel < -50) {
+        const terrainHeight = point.y;
+        const waterSurfaceOffset = this.waterDepth * 0.8;
+        this.setSeaLevel(terrainHeight - waterSurfaceOffset);
+      }
+      this.carveWaterBasin(point.x, point.z, settings);
+      this.paintShoreTexture(point.x, point.z, settings.size);
+      this.terrainMesh.updateWaterMaskTexture();
     }
 
-    // Center tile (0,0) - use main splatmap
-    if (gridX === 0 && gridY === 0) {
-      const splatMap = this.terrainMesh.getSplatMap();
-      const scale = this.heightmap.getScale();
-      const resolution = splatMap.getResolution();
-      const splatX = (point.x / scale) * (resolution - 1);
-      const splatZ = (point.z / scale) * (resolution - 1);
-      const splatRadius = (settings.size / scale) * (resolution - 1);
-
-      const modified = splatMap.paint(
-        splatX,
-        splatZ,
-        splatRadius,
-        material,
-        settings.strength,
-        settings.falloff
-      );
-
-      // For water, auto-set seaLevel if not already set, then carve basin and paint shore
-      if (material === "water" && modified) {
-        if (this.seaLevel < -50) {
-          const terrainHeight = point.y;
-          const waterSurfaceOffset = this.waterDepth * 0.8;
-          this.setSeaLevel(terrainHeight - waterSurfaceOffset);
-        }
-        this.carveWaterBasin(point.x, point.z, settings);
-        this.paintShoreTexture(point.x, point.z, settings.size);
-        this.terrainMesh.updateWaterMaskTexture();
-      }
-
-      if (modified) {
-        this.terrainMesh.updateSplatTexture();
-        this.biomeDirty = true;
-        this.foliageDirty = true;
-        this.modifiedTiles.add("0,0");
-        this.markTileDirty(0, 0, 'splatmap');
-        if (material === "water") {
-          this.markTileDirty(0, 0, 'water');
-        }
-        this.onModified?.();
-      }
-    } else {
-      // Neighbor tile - use editable tile data
-      this.ensureEditableTileData(gridX, gridY);
-      const modified = this.applyBiomeBrushToNeighborTile(gridX, gridY, localX, localZ, material, settings);
-
-      // For water, carve basin in neighbor tile
-      if (material === "water" && modified) {
-        if (this.seaLevel < -50) {
-          const terrainHeight = point.y;
-          const waterSurfaceOffset = this.waterDepth * 0.8;
-          this.setSeaLevel(terrainHeight - waterSurfaceOffset);
-        }
-        this.carveWaterBasinToNeighborTile(gridX, gridY, localX, localZ, settings);
-        // Ensure WaterSystem exists for shader material
-        this.ensureWaterSystem();
-        // Remove foliage in water area
-        this.removeNeighborFoliageInWaterArea(gridX, gridY, localX, localZ, settings.size);
-        this.markTileDirty(gridX, gridY, 'water');
-      }
-
-      if (modified) {
-        this.updateNeighborTileSplatmap(gridX, gridY);
-        this.updateNeighborTileMesh(gridX, gridY);
-        // Rebuild foliage for biome props (grass, rock, pebble, sandRock)
-        // For water, only remove foliage in water areas (already done above)
-        if (material !== "water") {
-          this.rebuildNeighborTileFoliage(gridX, gridY);
-        }
-        this.modifiedTiles.add(`${gridX},${gridY}`);
-        this.markTileDirty(gridX, gridY, 'splatmap');
-        this.onModified?.();
-      }
+    if (modified) {
+      this.terrainMesh.updateSplatTexture();
+      this.biomeDirty = true;
+      this.foliageDirty = true;
+      this.onModified?.();
     }
   }
 
