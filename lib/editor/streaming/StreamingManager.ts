@@ -75,7 +75,7 @@ export class StreamingManager {
   private cells: Map<string, StreamingCell> = new Map();
   private currentCellX: number = 0;
   private currentCellZ: number = 0;
-  private enabled: boolean = true;
+  private enabled: boolean = false;  // Disabled by default
   private updateObserver: Observer<Scene> | null = null;
   private loadQueue: Array<{ x: number; z: number; lod: StreamingLOD }> = [];
   private loadQueueSet: Set<string> = new Set();  // O(1) lookup for queue

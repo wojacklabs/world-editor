@@ -8,6 +8,8 @@
  * 4. Connect tiles with direction-aware seamless stitching
  */
 
+import { DataCodec } from "../../loader";
+
 export type SeamlessDirection = "left" | "right" | "top" | "bottom";
 
 /**
@@ -267,9 +269,9 @@ export class ManualTileManager {
       modifiedAt: now,
       resolution,
       size,
-      heightmap: this.encodeFloat32Array(heightmapData),
-      splatmap: this.encodeFloat32Array(splatmapData),
-      waterMask: this.encodeFloat32Array(waterMaskData),
+      heightmap: DataCodec.encodeFloat32Array(heightmapData),
+      splatmap: DataCodec.encodeFloat32Array(splatmapData),
+      waterMask: DataCodec.encodeFloat32Array(waterMaskData),
       seaLevel: -100,
       waterDepth: 2.0,
       connections: {},
@@ -309,9 +311,9 @@ export class ManualTileManager {
       modifiedAt: now,
       resolution,
       size,
-      heightmap: this.encodeFloat32Array(heightmapData),
-      splatmap: this.encodeFloat32Array(splatmapData),
-      waterMask: this.encodeFloat32Array(waterMaskData),
+      heightmap: DataCodec.encodeFloat32Array(heightmapData),
+      splatmap: DataCodec.encodeFloat32Array(splatmapData),
+      waterMask: DataCodec.encodeFloat32Array(waterMaskData),
       seaLevel,
       waterDepth,
       foliageData: foliageData || existingTile?.foliageData,
@@ -339,9 +341,9 @@ export class ManualTileManager {
       id: tileData.id,
       name: tileData.name,
       isDirty: false,
-      heightmapData: this.decodeFloat32Array(tileData.heightmap),
-      splatmapData: this.decodeFloat32Array(tileData.splatmap),
-      waterMaskData: this.decodeFloat32Array(tileData.waterMask),
+      heightmapData: DataCodec.decodeFloat32Array(tileData.heightmap),
+      splatmapData: DataCodec.decodeFloat32Array(tileData.splatmap),
+      waterMaskData: DataCodec.decodeFloat32Array(tileData.waterMask),
       resolution: tileData.resolution,
       size: tileData.size,
       seaLevel: tileData.seaLevel,
@@ -457,9 +459,9 @@ export class ManualTileManager {
     const tileData = this.tiles.get(tileId);
     if (!tileData) return null;
 
-    const heightmap = this.decodeFloat32Array(tileData.heightmap);
-    const splatmap = this.decodeFloat32Array(tileData.splatmap);
-    const waterMask = this.decodeFloat32Array(tileData.waterMask);
+    const heightmap = DataCodec.decodeFloat32Array(tileData.heightmap);
+    const splatmap = DataCodec.decodeFloat32Array(tileData.splatmap);
+    const waterMask = DataCodec.decodeFloat32Array(tileData.waterMask);
     const res = tileData.resolution + 1;
 
     const heights = new Float32Array(res);
@@ -819,30 +821,6 @@ export class ManualTileManager {
   }
 
   /**
-   * Encode Float32Array to Base64
-   */
-  private encodeFloat32Array(arr: Float32Array): string {
-    const uint8 = new Uint8Array(arr.buffer);
-    let binary = "";
-    for (let i = 0; i < uint8.length; i++) {
-      binary += String.fromCharCode(uint8[i]);
-    }
-    return btoa(binary);
-  }
-
-  /**
-   * Decode Base64 to Float32Array
-   */
-  private decodeFloat32Array(base64: string): Float32Array {
-    const binary = atob(base64);
-    const uint8 = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      uint8[i] = binary.charCodeAt(i);
-    }
-    return new Float32Array(uint8.buffer);
-  }
-
-  /**
    * Check if running in browser
    */
   private isBrowser(): boolean {
@@ -879,9 +857,9 @@ export class ManualTileManager {
       terrain: {
         size,
         resolution,
-        heightmap: this.encodeFloat32Array(heightmapData),
-        splatmap: this.encodeFloat32Array(splatmapData),
-        waterMask: this.encodeFloat32Array(waterMaskData),
+        heightmap: DataCodec.encodeFloat32Array(heightmapData),
+        splatmap: DataCodec.encodeFloat32Array(splatmapData),
+        waterMask: DataCodec.encodeFloat32Array(waterMaskData),
       },
 
       // Foliage data for recreation in target project
@@ -974,9 +952,9 @@ export class ManualTileManager {
         terrain: {
           size: currentTileData.size,
           resolution: currentTileData.resolution,
-          heightmap: this.encodeFloat32Array(currentTileData.heightmapData),
-          splatmap: this.encodeFloat32Array(currentTileData.splatmapData),
-          waterMask: this.encodeFloat32Array(currentTileData.waterMaskData),
+          heightmap: DataCodec.encodeFloat32Array(currentTileData.heightmapData),
+          splatmap: DataCodec.encodeFloat32Array(currentTileData.splatmapData),
+          waterMask: DataCodec.encodeFloat32Array(currentTileData.waterMaskData),
         },
         foliage: currentTileData.foliageData || {},
       },

@@ -46,8 +46,8 @@ export class GamePreview {
   private neighborFoliageMeshesEnabled: Mesh[] = [];
 
   // Free camera state
-  private moveSpeed = 1.875;
-  private fastMoveSpeed = 3.75;
+  private moveSpeed = 5.625;      // 3x speed (was 1.875)
+  private fastMoveSpeed = 11.25;  // 3x speed (was 3.75)
 
   // Input state
   private inputMap: { [key: string]: boolean } = {};
@@ -595,7 +595,7 @@ export class GamePreview {
       mesh.thinInstanceSetBuffer("matrix", extendedMatrices, 16, false);
       mesh.thinInstanceCount = wrappedCount * 9;
       mesh.thinInstanceRefreshBoundingInfo();
-      mesh.alwaysSelectAsActiveMesh = true;
+      // Note: frustum culling enabled (no alwaysSelectAsActiveMesh)
     }
   }
 
@@ -693,7 +693,7 @@ export class GamePreview {
       mesh.thinInstanceSetBuffer("matrix", new Float32Array(extendedMatrices), 16, false);
       mesh.thinInstanceCount = extendedMatrices.length / 16;
       mesh.thinInstanceRefreshBoundingInfo();
-      mesh.alwaysSelectAsActiveMesh = true;
+      // Note: frustum culling enabled (no alwaysSelectAsActiveMesh)
     }
   }
 
@@ -736,9 +736,8 @@ export class GamePreview {
     console.log(`[GamePreview] Found ${neighborFoliage.length} neighbor foliage meshes`);
 
     for (const mesh of neighborFoliage) {
-      // Ensure visible and always rendered (not culled)
+      // Ensure visible (frustum culling enabled for performance)
       mesh.isVisible = true;
-      mesh.alwaysSelectAsActiveMesh = true;
       this.neighborFoliageMeshesEnabled.push(mesh);
     }
   }

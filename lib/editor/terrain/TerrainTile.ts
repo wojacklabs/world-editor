@@ -734,6 +734,19 @@ export class TerrainTile {
       this.material.dispose();
       this.material = null;
     }
+    // Dispose decoration materials
+    if (this.grassMaterial) {
+      this.grassMaterial.dispose();
+      this.grassMaterial = null;
+    }
+    if (this.pebbleMat) {
+      this.pebbleMat.dispose();
+      this.pebbleMat = null;
+    }
+    if (this.rockMat) {
+      this.rockMat.dispose();
+      this.rockMat = null;
+    }
     for (const mesh of this.decorationMeshes) {
       mesh.dispose();
     }

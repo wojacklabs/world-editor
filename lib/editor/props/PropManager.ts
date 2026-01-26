@@ -7,10 +7,37 @@ import {
   ShaderMaterial,
   Effect,
   VertexBuffer,
+  Frustum,
+  BoundingInfo,
+  BoundingSphere,
 } from "@babylonjs/core";
 import * as BABYLON from "@babylonjs/core";
 import { Heightmap } from "../terrain/Heightmap";
 import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from "./ProceduralAsset";
+
+// ============================================
+// LOD Configuration
+// ============================================
+export enum MeshLOD {
+  High = 0,   // Near distance, full detail
+  Medium = 1, // Medium distance, reduced detail
+  Low = 2,    // Far distance, minimal detail
+}
+
+// Subdivision levels for each LOD tier
+// IcoSphere triangles: 20 × 4^subdivisions (1=80, 2=320, 3=1280, 4=5120)
+const LOD_SUBDIVISIONS: Record<AssetType, Record<MeshLOD, number>> = {
+  rock: { [MeshLOD.High]: 3, [MeshLOD.Medium]: 2, [MeshLOD.Low]: 2 },   // 1280/320/320 tri
+  tree: { [MeshLOD.High]: 3, [MeshLOD.Medium]: 2, [MeshLOD.Low]: 2 },   // 1280/320/320 tri
+  bush: { [MeshLOD.High]: 3, [MeshLOD.Medium]: 2, [MeshLOD.Low]: 2 },   // 1280/320/320 tri
+  grass_clump: { [MeshLOD.High]: 0, [MeshLOD.Medium]: 0, [MeshLOD.Low]: 0 },  // Grass doesn't use subdivisions
+};
+
+// Distance thresholds for LOD switching (in world units)
+const LOD_DISTANCES = {
+  highToMedium: 30,   // Switch from High to Medium at 30 units
+  mediumToLow: 80,    // Switch from Medium to Low at 80 units
+};
 
 // ============================================
 // Thin instance shaders for props (supports world0-world3 attributes)
@@ -354,20 +381,33 @@ export class PropManager {
   private heightmap: Heightmap;
   private instances: Map<string, PropInstance> = new Map();
 
-  // Thin instancing: base variation meshes per type
-  private variationMeshes: Map<AssetType, Mesh[]> = new Map();
+  // Thin instancing: base variation meshes per type, per LOD level
+  // Key: AssetType -> LOD level -> Mesh[]
+  private variationMeshes: Map<AssetType, Map<MeshLOD, Mesh[]>> = new Map();
   // Thin instancing: shared materials per type
   private sharedMaterials: Map<AssetType, ShaderMaterial> = new Map();
-  // Thin instancing: group meshes for thin instances
+  // Thin instancing: group meshes for thin instances (per LOD)
+  // Key format: "assetType_variationIndex_lodLevel"
   private instanceGroups: Map<InstanceGroupKey, Mesh> = new Map();
-  // Track which props belong to which group
+  // Track which props belong to which group (base group without LOD suffix)
   private propsByGroup: Map<InstanceGroupKey, Set<string>> = new Map();
   // Dirty flag to rebuild instance buffers
   private dirtyGroups: Set<InstanceGroupKey> = new Set();
 
+  // Buffer cache for partial updates (avoid reallocating Float32Array)
+  private bufferCache: Map<InstanceGroupKey, Float32Array> = new Map();
+  // Reusable objects to avoid GC pressure
+  private readonly _tempQuaternion = new BABYLON.Quaternion();
+  private readonly _tempMatrix = new Matrix();
+  private readonly _tempVector3 = new Vector3();
+
   // Tile-based grouping for streaming
   private propsByTile: Map<string, Set<string>> = new Map();  // tileKey -> Set<propId>
   private tileSize: number = 64;  // Default tile size
+
+  // Spatial hash for fast picking (O(1) lookup instead of O(n))
+  private spatialHash: Map<string, Set<string>> = new Map();  // gridKey -> Set<propId>
+  private readonly SPATIAL_GRID_SIZE = 8;  // 8x8 unit grid cells
 
   // Preview system
   private previewAsset: ProceduralAsset | null = null;
@@ -375,54 +415,185 @@ export class PropManager {
   private previewParams: AssetParams | null = null;
   private previewVisible = false;
 
+  // Async initialization state
+  private initializationComplete = false;
+  private initializationPromise: Promise<void> | null = null;
+  private isDisposed = false;
+
+  // Frustum culling
+  private frustumPlanesCache: BABYLON.Plane[] = [];
+  private lastFrustumUpdateFrame = -1;
+
   constructor(scene: Scene, heightmap: Heightmap) {
     this.scene = scene;
     this.heightmap = heightmap;
-    this.initializeVariations();
+    // Start async initialization
+    this.initializationPromise = this.initializeVariationsAsync();
   }
 
   /**
-   * Initialize base variation meshes for each asset type
-   * These are template meshes used for thin instancing
+   * Wait for initialization to complete
    */
-  private initializeVariations(): void {
+  async waitForInitialization(): Promise<void> {
+    if (this.initializationPromise) {
+      await this.initializationPromise;
+    }
+  }
+
+  /**
+   * Check if initialization is complete
+   */
+  isReady(): boolean {
+    return this.initializationComplete;
+  }
+
+  /**
+   * Initialize base variation meshes for each asset type (async version)
+   * Creates meshes for all LOD levels progressively to avoid blocking
+   */
+  private async initializeVariationsAsync(): Promise<void> {
     const assetTypes: AssetType[] = ["rock", "tree", "bush", "grass_clump"];
+    const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
+    let meshCount = 0;
+    const startTime = performance.now();
 
+    // Create shared materials first (fast, synchronous)
     for (const assetType of assetTypes) {
-      const variations: Mesh[] = [];
-
-      // Create N variation meshes with fixed seeds
-      for (let i = 0; i < VARIATIONS_PER_TYPE; i++) {
-        const seed = i * 1000 + 42;  // Fixed seeds for consistent variations
-        const params: AssetParams = {
-          ...DEFAULT_ASSET_PARAMS[assetType],
-          seed,
-          size: 1.0,  // Base size 1.0, scaling applied via instance matrix
-        };
-
-        const asset = new ProceduralAsset(this.scene, params);
-        const mesh = asset.generate();
-
-        if (mesh) {
-          mesh.name = `${assetType}_variation_${i}`;
-          mesh.isVisible = false;  // Template mesh is invisible
-          mesh.isPickable = false;
-
-          // Detach material from this template (we'll use shared material)
-          mesh.material = null;
-
-          variations.push(mesh);
-        }
-      }
-
-      this.variationMeshes.set(assetType, variations);
-
-      // Create shared material for this type
       const material = this.createSharedMaterial(assetType);
       this.sharedMaterials.set(assetType, material);
     }
 
-    console.log(`[PropManager] Initialized ${assetTypes.length} asset types with ${VARIATIONS_PER_TYPE} variations each`);
+    // Initialize empty maps for all asset types
+    for (const assetType of assetTypes) {
+      this.variationMeshes.set(assetType, new Map());
+    }
+
+    // Create meshes progressively using requestAnimationFrame batching
+    // Process one (assetType, LOD, variation) combination per frame to avoid blocking
+    const batchSize = 4;  // Process 4 meshes per frame
+    let currentBatch: Array<{ assetType: AssetType; lod: MeshLOD; variationIdx: number }> = [];
+
+    // Build the full work queue
+    for (const assetType of assetTypes) {
+      for (const lod of lodLevels) {
+        for (let i = 0; i < VARIATIONS_PER_TYPE; i++) {
+          currentBatch.push({ assetType, lod, variationIdx: i });
+        }
+      }
+    }
+
+    // Process batches
+    const processBatch = (startIdx: number): Promise<void> => {
+      return new Promise((resolve) => {
+        requestAnimationFrame(() => {
+          // Skip if disposed during async init (React Strict Mode, etc.)
+          if (this.isDisposed) {
+            resolve();
+            return;
+          }
+
+          const endIdx = Math.min(startIdx + batchSize, currentBatch.length);
+
+          for (let i = startIdx; i < endIdx; i++) {
+            const { assetType, lod, variationIdx } = currentBatch[i];
+            const lodMap = this.variationMeshes.get(assetType);
+
+            // Safety check - skip if map was cleared
+            if (!lodMap) {
+              continue;
+            }
+
+            // Initialize LOD array if not exists
+            if (!lodMap.has(lod)) {
+              lodMap.set(lod, []);
+            }
+
+            const seed = variationIdx * 1000 + 42;
+            const subdivision = LOD_SUBDIVISIONS[assetType][lod];
+
+            const params: AssetParams = {
+              ...DEFAULT_ASSET_PARAMS[assetType],
+              seed,
+              size: 1.0,
+              subdivisionOverride: subdivision > 0 ? subdivision : undefined,
+            };
+
+            const asset = new ProceduralAsset(this.scene, params);
+            const mesh = asset.generate();
+
+            if (mesh) {
+              mesh.name = `${assetType}_var${variationIdx}_lod${lod}`;
+              mesh.isVisible = false;
+              mesh.isPickable = false;
+              mesh.material = null;
+              lodMap.get(lod)!.push(mesh);
+              meshCount++;
+            }
+          }
+
+          if (endIdx < currentBatch.length) {
+            processBatch(endIdx).then(resolve);
+          } else {
+            resolve();
+          }
+        });
+      });
+    };
+
+    await processBatch(0);
+
+    const elapsed = performance.now() - startTime;
+    this.initializationComplete = true;
+    console.log(`[PropManager] Async init complete: ${meshCount} meshes (${assetTypes.length} types × ${lodLevels.length} LODs × ${VARIATIONS_PER_TYPE} variations) in ${elapsed.toFixed(0)}ms`);
+  }
+
+  /**
+   * Synchronous initialization (legacy, for backward compatibility)
+   * Use initializeVariationsAsync() for non-blocking initialization
+   */
+  private initializeVariations(): void {
+    const assetTypes: AssetType[] = ["rock", "tree", "bush", "grass_clump"];
+    const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
+
+    for (const assetType of assetTypes) {
+      const lodMap = new Map<MeshLOD, Mesh[]>();
+
+      for (const lod of lodLevels) {
+        const variations: Mesh[] = [];
+
+        for (let i = 0; i < VARIATIONS_PER_TYPE; i++) {
+          const seed = i * 1000 + 42;
+          const subdivision = LOD_SUBDIVISIONS[assetType][lod];
+
+          const params: AssetParams = {
+            ...DEFAULT_ASSET_PARAMS[assetType],
+            seed,
+            size: 1.0,
+            subdivisionOverride: subdivision > 0 ? subdivision : undefined,
+          };
+
+          const asset = new ProceduralAsset(this.scene, params);
+          const mesh = asset.generate();
+
+          if (mesh) {
+            mesh.name = `${assetType}_var${i}_lod${lod}`;
+            mesh.isVisible = false;
+            mesh.isPickable = false;
+            mesh.material = null;
+            variations.push(mesh);
+          }
+        }
+
+        lodMap.set(lod, variations);
+      }
+
+      this.variationMeshes.set(assetType, lodMap);
+      const material = this.createSharedMaterial(assetType);
+      this.sharedMaterials.set(assetType, material);
+    }
+
+    this.initializationComplete = true;
+    console.log(`[PropManager] Initialized ${assetTypes.length} asset types with ${VARIATIONS_PER_TYPE} variations × 3 LOD levels each`);
   }
 
   /**
@@ -436,6 +607,9 @@ export class PropManager {
 
     if (needsWind) {
       // Use thin instance wind shader for foliage
+      // NOTE: Do NOT include world0-world3 in attributes - Babylon.js adds them
+      // automatically when using thinInstanceSetBuffer("matrix", ...)
+      // Including them manually causes WebGPU validation errors (duplicate locations)
       material = new ShaderMaterial(
         `prop_thin_wind_${assetType}`,
         this.scene,
@@ -444,7 +618,7 @@ export class PropManager {
           fragment: "propThinWind",
         },
         {
-          attributes: ["position", "normal", "uv", "color", "world0", "world1", "world2", "world3"],
+          attributes: ["position", "normal", "uv", "color"],
           uniforms: [
             "viewProjection",
             "cameraPosition",
@@ -495,6 +669,8 @@ export class PropManager {
       material.setFloat("uTime", 0);
     } else {
       // Rock uses thin instance static shader
+      // NOTE: Do NOT include world0-world3 in attributes - Babylon.js adds them
+      // automatically when using thinInstanceSetBuffer("matrix", ...)
       material = new ShaderMaterial(
         `prop_thin_${assetType}`,
         this.scene,
@@ -503,7 +679,7 @@ export class PropManager {
           fragment: "propThin",
         },
         {
-          attributes: ["position", "normal", "uv", "world0", "world1", "world2", "world3"],
+          attributes: ["position", "normal", "uv"],
           uniforms: [
             "viewProjection",
             "cameraPosition",
@@ -551,10 +727,79 @@ export class PropManager {
   }
 
   /**
-   * Get instance group key
+   * Get base instance group key (without LOD)
    */
   private getGroupKey(assetType: AssetType, variationIndex: number): InstanceGroupKey {
     return `${assetType}_${variationIndex}`;
+  }
+
+  /**
+   * Get instance group key with LOD level
+   */
+  private getGroupKeyWithLOD(assetType: AssetType, variationIndex: number, lod: MeshLOD): InstanceGroupKey {
+    return `${assetType}_${variationIndex}_${lod}`;
+  }
+
+  /**
+   * Parse group key with LOD
+   */
+  private parseGroupKeyWithLOD(groupKey: InstanceGroupKey): { assetType: AssetType; variationIndex: number; lod: MeshLOD } | null {
+    const parts = groupKey.split("_");
+    if (parts.length < 3) return null;
+    return {
+      assetType: parts[0] as AssetType,
+      variationIndex: parseInt(parts[1], 10),
+      lod: parseInt(parts[2], 10) as MeshLOD,
+    };
+  }
+
+  /**
+   * Determine LOD level based on distance from camera
+   */
+  private getLODForDistance(distance: number): MeshLOD {
+    if (distance < LOD_DISTANCES.highToMedium) {
+      return MeshLOD.High;
+    } else if (distance < LOD_DISTANCES.mediumToLow) {
+      return MeshLOD.Medium;
+    } else {
+      return MeshLOD.Low;
+    }
+  }
+
+  /**
+   * Update frustum planes cache (call once per frame before rebuilding)
+   */
+  private updateFrustumPlanes(): void {
+    const frameNumber = this.scene.getFrameId();
+    if (this.lastFrustumUpdateFrame === frameNumber) return;
+
+    const camera = this.scene.activeCamera;
+    if (!camera) return;
+
+    // Get view-projection matrix
+    const viewMatrix = camera.getViewMatrix();
+    const projMatrix = camera.getProjectionMatrix();
+    const vpMatrix = viewMatrix.multiply(projMatrix);
+
+    // Extract frustum planes
+    this.frustumPlanesCache = Frustum.GetPlanes(vpMatrix);
+    this.lastFrustumUpdateFrame = frameNumber;
+  }
+
+  /**
+   * Check if a point is inside the camera frustum
+   */
+  private isInFrustum(position: Vector3, radius: number = 1): boolean {
+    if (this.frustumPlanesCache.length === 0) return true;
+
+    // Simple sphere-frustum test
+    for (const plane of this.frustumPlanesCache) {
+      const distance = plane.dotCoordinate(position);
+      if (distance < -radius) {
+        return false;  // Outside this plane
+      }
+    }
+    return true;
   }
 
   /**
@@ -598,6 +843,44 @@ export class PropManager {
       tileProps.delete(propId);
       if (tileProps.size === 0) {
         this.propsByTile.delete(tileKey);
+      }
+    }
+  }
+
+  /**
+   * Get spatial hash grid key for a position
+   */
+  private getSpatialKey(x: number, z: number): string {
+    const gx = Math.floor(x / this.SPATIAL_GRID_SIZE);
+    const gz = Math.floor(z / this.SPATIAL_GRID_SIZE);
+    return `${gx}_${gz}`;
+  }
+
+  /**
+   * Register prop to spatial hash
+   */
+  private registerPropToSpatialHash(propId: string, x: number, z: number): void {
+    const key = this.getSpatialKey(x, z);
+    let cell = this.spatialHash.get(key);
+    if (!cell) {
+      cell = new Set();
+      this.spatialHash.set(key, cell);
+    }
+    cell.add(propId);
+  }
+
+  /**
+   * Unregister prop from spatial hash
+   */
+  private unregisterPropFromSpatialHash(propId: string): void {
+    const instance = this.instances.get(propId);
+    if (!instance) return;
+    const key = this.getSpatialKey(instance.position.x, instance.position.z);
+    const cell = this.spatialHash.get(key);
+    if (cell) {
+      cell.delete(propId);
+      if (cell.size === 0) {
+        this.spatialHash.delete(key);
       }
     }
   }
@@ -730,123 +1013,240 @@ export class PropManager {
   }
 
   /**
-   * Rebuild all dirty instance groups
+   * Rebuild all dirty instance groups with LOD support
    */
   rebuildDirtyGroups(): void {
+    if (!this.initializationComplete) return;
+
+    // Update frustum planes for culling
+    this.updateFrustumPlanes();
+
     for (const groupKey of this.dirtyGroups) {
-      this.rebuildInstanceGroup(groupKey);
+      this.rebuildInstanceGroupWithLOD(groupKey);
     }
     this.dirtyGroups.clear();
   }
 
   /**
-   * Rebuild a single instance group's thin instance buffer
+   * Rebuild a single instance group with LOD and frustum culling support
    */
-  private rebuildInstanceGroup(groupKey: InstanceGroupKey): void {
-    const propIds = this.propsByGroup.get(groupKey);
-    const [assetType, variationIndexStr] = groupKey.split("_") as [AssetType, string];
+  private rebuildInstanceGroupWithLOD(baseGroupKey: InstanceGroupKey): void {
+    const propIds = this.propsByGroup.get(baseGroupKey);
+    const [assetType, variationIndexStr] = baseGroupKey.split("_") as [AssetType, string];
     const variationIndex = parseInt(variationIndexStr, 10);
 
-    // Get variation mesh
-    const variations = this.variationMeshes.get(assetType);
-    if (!variations || !variations[variationIndex]) return;
+    // Get variation meshes for all LOD levels
+    const lodMeshMap = this.variationMeshes.get(assetType);
+    if (!lodMeshMap) return;
 
-    const baseMesh = variations[variationIndex];
+    // Get camera position for LOD calculation
+    const camera = this.scene.activeCamera;
+    const cameraPos = camera ? camera.position : Vector3.Zero();
 
-    // Get or create instance group mesh
-    let groupMesh = this.instanceGroups.get(groupKey);
+    // Categorize instances by LOD level
+    const lodMatrices: Map<MeshLOD, Float32Array> = new Map();
+    const lodCounts: Map<MeshLOD, number> = new Map();
+
+    // Initialize LOD buffers
+    const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
+    for (const lod of lodLevels) {
+      lodCounts.set(lod, 0);
+    }
 
     if (!propIds || propIds.size === 0) {
-      // No props in group - hide or dispose group mesh
-      if (groupMesh) {
-        groupMesh.isVisible = false;
-        groupMesh.thinInstanceCount = 0;
+      // No props - hide all LOD meshes for this group
+      for (const lod of lodLevels) {
+        const lodGroupKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
+        const groupMesh = this.instanceGroups.get(lodGroupKey);
+        if (groupMesh) {
+          groupMesh.isVisible = false;
+          groupMesh.thinInstanceCount = 0;
+        }
       }
       return;
     }
 
-    // Create group mesh if needed
-    if (!groupMesh) {
-      groupMesh = baseMesh.clone(`inst_${groupKey}`, null);
-      if (!groupMesh) return;
-
-      groupMesh.makeGeometryUnique();
-      groupMesh.isPickable = true;
-
-      // Apply shared material
-      const material = this.sharedMaterials.get(assetType);
-      if (material) {
-        groupMesh.material = material;
-      }
-
-      this.instanceGroups.set(groupKey, groupMesh);
-    }
-
-    // Count visible instances first
-    let visibleCount = 0;
+    // First pass: count instances per LOD (with frustum culling)
     for (const propId of propIds) {
       const instance = this.instances.get(propId);
-      if (instance && instance.visible) {
-        visibleCount++;
+      if (!instance || !instance.visible) continue;
+
+      // Frustum culling check
+      const radius = Math.max(instance.scale.x, instance.scale.y, instance.scale.z) * 2;
+      if (!this.isInFrustum(instance.position, radius)) {
+        continue;  // Skip instances outside frustum
+      }
+
+      // Calculate distance to camera
+      const dx = instance.position.x - cameraPos.x;
+      const dy = instance.position.y - cameraPos.y;
+      const dz = instance.position.z - cameraPos.z;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+      // Determine LOD
+      const lod = this.getLODForDistance(distance);
+      lodCounts.set(lod, (lodCounts.get(lod) || 0) + 1);
+    }
+
+    // Allocate buffers for each LOD
+    for (const lod of lodLevels) {
+      const count = lodCounts.get(lod) || 0;
+      if (count > 0) {
+        const bufferKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
+        let buffer = this.bufferCache.get(bufferKey);
+        const requiredSize = count * 16;
+        if (!buffer || buffer.length < requiredSize) {
+          buffer = new Float32Array(Math.ceil(requiredSize * 1.5));
+          this.bufferCache.set(bufferKey, buffer);
+        }
+        lodMatrices.set(lod, buffer);
       }
     }
 
-    if (visibleCount === 0) {
-      // No visible props in group
-      groupMesh.isVisible = false;
-      groupMesh.thinInstanceCount = 0;
-      return;
+    // Second pass: fill matrices
+    const lodIndices = new Map<MeshLOD, number>();
+    for (const lod of lodLevels) {
+      lodIndices.set(lod, 0);
     }
-
-    // Build instance matrices for visible instances only
-    const matrices = new Float32Array(visibleCount * 16);
-    let index = 0;
 
     for (const propId of propIds) {
       const instance = this.instances.get(propId);
       if (!instance || !instance.visible) continue;
 
+      // Frustum culling check (same as first pass)
+      const radius = Math.max(instance.scale.x, instance.scale.y, instance.scale.z) * 2;
+      if (!this.isInFrustum(instance.position, radius)) {
+        continue;
+      }
+
+      // Calculate distance and LOD
+      const dx = instance.position.x - cameraPos.x;
+      const dy = instance.position.y - cameraPos.y;
+      const dz = instance.position.z - cameraPos.z;
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const lod = this.getLODForDistance(distance);
+
+      const matrices = lodMatrices.get(lod);
+      if (!matrices) continue;
+
       // Build transform matrix
-      const matrix = Matrix.Compose(
+      BABYLON.Quaternion.FromEulerAnglesToRef(
+        instance.rotation.x,
+        instance.rotation.y,
+        instance.rotation.z,
+        this._tempQuaternion
+      );
+      Matrix.ComposeToRef(
         instance.scale,
-        BABYLON.Quaternion.FromEulerAngles(
-          instance.rotation.x,
-          instance.rotation.y,
-          instance.rotation.z
-        ),
-        instance.position
+        this._tempQuaternion,
+        instance.position,
+        this._tempMatrix
       );
 
-      matrix.copyToArray(matrices, index * 16);
-      index++;
+      const index = lodIndices.get(lod) || 0;
+      this._tempMatrix.copyToArray(matrices, index * 16);
+      lodIndices.set(lod, index + 1);
     }
 
-    // Apply thin instances
-    groupMesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
-    groupMesh.thinInstanceCount = index;
-    groupMesh.thinInstanceRefreshBoundingInfo();
-    groupMesh.isVisible = true;
+    // Apply matrices to each LOD mesh
+    for (const lod of lodLevels) {
+      const lodGroupKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
+      const count = lodIndices.get(lod) || 0;
+
+      if (count === 0) {
+        // Hide this LOD mesh
+        const groupMesh = this.instanceGroups.get(lodGroupKey);
+        if (groupMesh) {
+          groupMesh.isVisible = false;
+          groupMesh.thinInstanceCount = 0;
+        }
+        continue;
+      }
+
+      // Get or create LOD group mesh
+      let groupMesh = this.instanceGroups.get(lodGroupKey);
+      if (!groupMesh) {
+        const lodMeshes = lodMeshMap.get(lod);
+        if (!lodMeshes || !lodMeshes[variationIndex]) continue;
+
+        const baseMesh = lodMeshes[variationIndex];
+        groupMesh = baseMesh.clone(`inst_${lodGroupKey}`, null);
+        if (!groupMesh) continue;
+
+        groupMesh.makeGeometryUnique();
+        groupMesh.isPickable = true;
+
+        const material = this.sharedMaterials.get(assetType);
+        if (material) {
+          groupMesh.material = material;
+        }
+
+        this.instanceGroups.set(lodGroupKey, groupMesh);
+      }
+
+      // Apply thin instances
+      const matrices = lodMatrices.get(lod)!;
+      groupMesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
+      groupMesh.thinInstanceCount = count;
+      groupMesh.thinInstanceRefreshBoundingInfo();
+      groupMesh.isVisible = true;
+    }
+  }
+
+  /**
+   * Legacy rebuild method (for backward compatibility)
+   */
+  private rebuildInstanceGroup(groupKey: InstanceGroupKey): void {
+    this.rebuildInstanceGroupWithLOD(groupKey);
   }
 
   /**
    * Get mesh at a world position (for picking)
+   * Uses spatial hash for O(1) lookup instead of O(n) linear search
    */
   getInstanceAtPosition(worldX: number, worldZ: number, tolerance: number = 0.5): PropInstance | null {
     let closest: PropInstance | null = null;
-    let closestDist = tolerance;
+    let closestDistSq = tolerance * tolerance;
 
-    for (const instance of this.instances.values()) {
-      const dx = instance.position.x - worldX;
-      const dz = instance.position.z - worldZ;
-      const dist = Math.sqrt(dx * dx + dz * dz);
+    // Calculate grid cell range to search based on tolerance
+    const gridRadius = Math.ceil(tolerance / this.SPATIAL_GRID_SIZE) + 1;
+    const centerGx = Math.floor(worldX / this.SPATIAL_GRID_SIZE);
+    const centerGz = Math.floor(worldZ / this.SPATIAL_GRID_SIZE);
 
-      if (dist < closestDist) {
-        closestDist = dist;
-        closest = instance;
+    // Search only nearby grid cells
+    for (let dx = -gridRadius; dx <= gridRadius; dx++) {
+      for (let dz = -gridRadius; dz <= gridRadius; dz++) {
+        const key = `${centerGx + dx}_${centerGz + dz}`;
+        const cell = this.spatialHash.get(key);
+        if (!cell) continue;
+
+        for (const propId of cell) {
+          const instance = this.instances.get(propId);
+          if (!instance) continue;
+
+          const px = instance.position.x - worldX;
+          const pz = instance.position.z - worldZ;
+          const distSq = px * px + pz * pz;
+
+          if (distSq < closestDistSq) {
+            closestDistSq = distSq;
+            closest = instance;
+          }
+        }
       }
     }
 
     return closest;
+  }
+
+  /**
+   * Convert any seed to a variation seed that matches pre-generated variation meshes.
+   * Variation meshes are generated with seeds: 42, 1042, 2042, 3042, 4042, 5042, 6042, 7042
+   * This ensures preview matches the installed mesh.
+   */
+  private toVariationSeed(seed: number): number {
+    const variationIndex = this.getVariationIndex(seed);
+    return variationIndex * 1000 + 42;
   }
 
   // Create or update the preview with given params
@@ -858,12 +1258,16 @@ export class PropManager {
       this.previewMesh = null;
     }
 
+    // Convert seed to variation seed pattern to match pre-generated variation meshes
+    const rawSeed = seed ?? Math.random() * 10000;
+    const variationSeed = this.toVariationSeed(rawSeed);
+
     // Create new preview params
     this.previewParams = {
       ...DEFAULT_ASSET_PARAMS[type],
       type,
       size,
-      seed: seed ?? Math.random() * 10000,
+      seed: variationSeed,
     };
 
     // Generate preview asset
@@ -888,7 +1292,9 @@ export class PropManager {
   randomizePreview(): number {
     if (!this.previewParams) return 0;
 
-    const newSeed = Math.random() * 10000;
+    // Pick random variation index and convert to variation seed
+    const randomVariationIndex = Math.floor(Math.random() * VARIATIONS_PER_TYPE);
+    const newSeed = randomVariationIndex * 1000 + 42;
     this.createPreview(this.previewParams.type, this.previewParams.size, newSeed);
     return newSeed;
   }
@@ -983,7 +1389,9 @@ export class PropManager {
   // Place the current preview as a permanent prop
   // Returns { id, newSeed } so caller can update store
   placeCurrentPreview(): { id: string; newSeed: number } | null {
-    if (!this.previewMesh || !this.previewParams || !this.previewAsset) return null;
+    if (!this.previewMesh || !this.previewParams || !this.previewAsset) {
+      return null;
+    }
 
     const x = this.previewMesh.position.x;
     const z = this.previewMesh.position.z;
@@ -1020,6 +1428,8 @@ export class PropManager {
 
     // Register to tile group for streaming
     this.registerPropToTile(id, x, z);
+    // Register to spatial hash for fast picking
+    this.registerPropToSpatialHash(id, x, z);
 
     // Mark group dirty and rebuild
     this.markGroupDirty(groupKey);
@@ -1089,6 +1499,8 @@ export class PropManager {
 
     // Register to tile group for streaming
     this.registerPropToTile(id, x, z);
+    // Register to spatial hash for fast picking
+    this.registerPropToSpatialHash(id, x, z);
 
     // Mark group dirty and rebuild
     this.markGroupDirty(groupKey);
@@ -1104,6 +1516,8 @@ export class PropManager {
 
     // Unregister from tile group
     this.unregisterPropFromTile(id);
+    // Unregister from spatial hash
+    this.unregisterPropFromSpatialHash(id);
 
     // Unregister from instance group
     const groupKey = this.getGroupKey(instance.assetType, instance.variationIndex);
@@ -1137,6 +1551,8 @@ export class PropManager {
     this.propsByTile.clear();
     this.propsByGroup.clear();
     this.dirtyGroups.clear();
+    this.bufferCache.clear();  // Clear buffer cache
+    this.spatialHash.clear();  // Clear spatial hash
 
     // Hide all instance group meshes
     for (const groupMesh of this.instanceGroups.values()) {
@@ -1228,6 +1644,8 @@ export class PropManager {
 
       // Register to tile
       this.registerPropToTile(item.id, item.position.x, item.position.z);
+      // Register to spatial hash
+      this.registerPropToSpatialHash(item.id, item.position.x, item.position.z);
     }
 
     // Rebuild all affected groups at once
@@ -1240,6 +1658,7 @@ export class PropManager {
   }
 
   dispose(): void {
+    this.isDisposed = true;  // Prevent pending async callbacks from running
     this.clearAll();
 
     // Dispose preview
@@ -1255,10 +1674,12 @@ export class PropManager {
     }
     this.instanceGroups.clear();
 
-    // Dispose variation meshes
-    for (const variations of this.variationMeshes.values()) {
-      for (const mesh of variations) {
-        mesh.dispose();
+    // Dispose variation meshes (now Map<AssetType, Map<MeshLOD, Mesh[]>>)
+    for (const lodMap of this.variationMeshes.values()) {
+      for (const meshes of lodMap.values()) {
+        for (const mesh of meshes) {
+          mesh.dispose();
+        }
       }
     }
     this.variationMeshes.clear();
