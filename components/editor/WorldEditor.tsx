@@ -186,7 +186,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       const pickResult = scene.pick(
         scene.pointerX,
         scene.pointerY,
-        (mesh) => mesh.name === "terrain"
+        (mesh) => mesh.name.startsWith("terrain")
       );
 
       if (pickResult?.hit && pickResult.pickedPoint) {
@@ -218,7 +218,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       const pickResult = scene.pick(
         scene.pointerX,
         scene.pointerY,
-        (mesh) => mesh.name === "terrain"
+        (mesh) => mesh.name.startsWith("terrain")
       );
 
       if (pickResult?.hit && pickResult.pickedPoint) {
@@ -285,7 +285,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       const pickResult = scene.pick(
         scene.pointerX,
         scene.pointerY,
-        (mesh) => mesh.name === "terrain"
+        (mesh) => mesh.name.startsWith("terrain")
       );
 
       if (pickResult?.hit && pickResult.pickedPoint) {

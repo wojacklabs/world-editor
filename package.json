@@ -28,7 +28,6 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.1.1",
-    "puppeteer": "^24.35.0",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

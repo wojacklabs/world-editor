@@ -4,6 +4,7 @@ import {
   MeshBuilder,
   Vector3,
   Matrix,
+  Quaternion,
   Color3,
   Color4,
   VertexData,
@@ -14,6 +15,8 @@ import {
 } from "@babylonjs/core";
 import { Heightmap } from "../terrain/Heightmap";
 import { SplatMap } from "../terrain/SplatMap";
+import { MathPools } from "../utils/ObjectPool";
+import { DataCodec } from "../../loader";
 
 // ============================================
 // Noise functions for procedural rock generation (copied from ProceduralAsset)
@@ -103,9 +106,10 @@ interface FoliageTypeConfig {
 
 // LOD level for density control
 export enum FoliageLOD {
-  Near = 0,   // 100% density
-  Mid = 1,    // 50% density
-  Far = 2,    // Unloaded
+  Near = 0,     // 100% density (3D meshes)
+  Mid = 1,      // 50% density (3D meshes)
+  Impostor = 2, // Billboard impostors (far distance)
+  Far = 3,      // Unloaded
 }
 
 // Chunk for spatial organization
@@ -114,6 +118,7 @@ interface FoliageChunk {
   z: number;
   instances: Map<string, Float32Array>;  // type -> matrix buffer (full density)
   mesh: Map<string, Mesh>;               // type -> thin instance mesh
+  impostorMesh: Mesh | null;             // Impostor billboard mesh for this chunk
   visible: boolean;
   currentLOD: FoliageLOD;                // Current LOD level for density
 }
@@ -270,6 +275,90 @@ void main() {
 }
 `;
 
+// Impostor billboard shader (camera-facing quads)
+Effect.ShadersStore["impostorVertexShader"] = `
+precision highp float;
+
+attribute vec3 position;
+attribute vec2 uv;
+
+// Thin instance world matrix
+attribute vec4 world0;
+attribute vec4 world1;
+attribute vec4 world2;
+attribute vec4 world3;
+
+uniform mat4 view;
+uniform mat4 viewProjection;
+uniform vec3 uCameraPosition;
+
+varying vec2 vUV;
+varying vec3 vWorldPosition;
+varying float vScale;
+
+void main() {
+    // Extract position and scale from instance matrix
+    vec3 instancePos = vec3(world0.w, world1.w, world2.w);
+    float scaleX = length(vec3(world0.x, world1.x, world2.x));
+    float scaleY = length(vec3(world0.y, world1.y, world2.y));
+    vScale = max(scaleX, scaleY);
+
+    // Billboard: rotate to face camera (Y-axis only for stability)
+    vec3 toCamera = uCameraPosition - instancePos;
+    toCamera.y = 0.0;
+    float len = length(toCamera);
+    if (len > 0.01) {
+        toCamera /= len;
+    } else {
+        toCamera = vec3(0.0, 0.0, 1.0);
+    }
+    vec3 right = vec3(toCamera.z, 0.0, -toCamera.x);
+    vec3 up = vec3(0.0, 1.0, 0.0);
+
+    // Apply billboard transform (scale position by instance scale)
+    vec3 billboardPos = instancePos
+        + right * position.x * scaleX
+        + up * position.y * scaleY;
+
+    vWorldPosition = billboardPos;
+    vUV = uv;
+
+    gl_Position = viewProjection * vec4(billboardPos, 1.0);
+}
+`;
+
+Effect.ShadersStore["impostorFragmentShader"] = `
+precision highp float;
+
+uniform vec3 uBaseColor;
+uniform vec3 uCameraPosition;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+
+varying vec2 vUV;
+varying vec3 vWorldPosition;
+varying float vScale;
+
+void main() {
+    // Circular billboard with soft edges
+    vec2 centered = vUV - 0.5;
+    float dist = length(centered);
+    float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+    if (alpha < 0.01) discard;
+
+    // Simple shading (lighter at top)
+    float heightGradient = vUV.y * 0.2 + 0.9;
+    vec3 color = uBaseColor * heightGradient;
+
+    // Fog
+    float distanceToCamera = length(vWorldPosition - uCameraPosition);
+    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
+
+    gl_FragColor = vec4(color, alpha * 0.8);
+}
+`;
+
 Effect.ShadersStore["grassFragmentShader"] = `
 precision highp float;
 
@@ -357,6 +446,11 @@ export class FoliageSystem {
   // Materials
   private grassMaterial: ShaderMaterial | null = null;
   private rockMaterial: ShaderMaterial | null = null;
+  private impostorGrassMaterial: ShaderMaterial | null = null;
+  private impostorRockMaterial: ShaderMaterial | null = null;
+
+  // Impostor base mesh (simple quad billboard)
+  private impostorBaseMesh: Mesh | null = null;
   
   // Performance settings
   private maxInstancesPerChunk = 5000;
@@ -366,8 +460,25 @@ export class FoliageSystem {
     far: 450,    // fade out distance
   };
 
+  // Reusable objects for matrix generation (avoid GC pressure)
+  private readonly _tempScale = new Vector3();
+  private readonly _tempPosition = new Vector3();
+  private readonly _tempQuaternion = new Quaternion();
+  private readonly _tempMatrix = new Matrix();
+  private readonly _tempRotMatrixY = new Matrix();
+  private readonly _tempRotMatrixX = new Matrix();
+  private readonly _tempRotMatrixZ = new Matrix();
+  private readonly _tempRotMatrix = new Matrix();
+  private readonly _tempFinalMatrix = new Matrix();
+
   // Wrapping mode for infinite terrain support (disable in game mode)
   private useWrapping = true;
+
+  // Camera position caching for updateVisibility optimization
+  private lastVisibilityCamX = -Infinity;
+  private lastVisibilityCamZ = -Infinity;
+  private lastVisibilityCamY = -Infinity;
+  private readonly VISIBILITY_UPDATE_THRESHOLD = 2.0;  // Only update if moved > 2 units
 
   // Random seed for consistent generation
   private seed: number;
@@ -387,6 +498,7 @@ export class FoliageSystem {
     this.initializeFoliageTypes();
     this.createBaseMeshes();
     this.createMaterials();
+    this.createImpostorSystem();
   }
 
   /**
@@ -928,6 +1040,81 @@ export class FoliageSystem {
   }
 
   /**
+   * Create impostor system (billboard meshes and materials)
+   */
+  private createImpostorSystem(): void {
+    console.log("[FoliageSystem] Creating impostor system...");
+
+    // Create base impostor mesh (simple quad facing camera)
+    this.impostorBaseMesh = MeshBuilder.CreatePlane("impostor_base", {
+      width: 1,
+      height: 1,
+    }, this.scene);
+    this.impostorBaseMesh.isVisible = false;
+    this.impostorBaseMesh.isPickable = false;
+
+    // Grass impostor material (green billboards)
+    this.impostorGrassMaterial = new ShaderMaterial(
+      "impostor_grass_mat",
+      this.scene,
+      {
+        vertex: "impostor",
+        fragment: "impostor",
+      },
+      {
+        attributes: ["position", "uv", "world0", "world1", "world2", "world3"],
+        uniforms: [
+          "view",
+          "viewProjection",
+          "uCameraPosition",
+          "uBaseColor",
+          "uFogColor",
+          "uFogDensity",
+        ],
+        needAlphaBlending: true,
+      }
+    );
+
+    this.impostorGrassMaterial.setColor3("uBaseColor", new Color3(0.35, 0.55, 0.25));
+    this.impostorGrassMaterial.setVector3("uCameraPosition", new Vector3(0, 0, 0));
+    this.impostorGrassMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+    this.impostorGrassMaterial.setFloat("uFogDensity", 0.008);
+    this.impostorGrassMaterial.backFaceCulling = false;
+    this.impostorGrassMaterial.alphaMode = 2; // ALPHA_COMBINE
+
+    // Rock impostor material (gray billboards)
+    this.impostorRockMaterial = new ShaderMaterial(
+      "impostor_rock_mat",
+      this.scene,
+      {
+        vertex: "impostor",
+        fragment: "impostor",
+      },
+      {
+        attributes: ["position", "uv", "world0", "world1", "world2", "world3"],
+        uniforms: [
+          "view",
+          "viewProjection",
+          "uCameraPosition",
+          "uBaseColor",
+          "uFogColor",
+          "uFogDensity",
+        ],
+        needAlphaBlending: true,
+      }
+    );
+
+    this.impostorRockMaterial.setColor3("uBaseColor", new Color3(0.5, 0.48, 0.45));
+    this.impostorRockMaterial.setVector3("uCameraPosition", new Vector3(0, 0, 0));
+    this.impostorRockMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+    this.impostorRockMaterial.setFloat("uFogDensity", 0.008);
+    this.impostorRockMaterial.backFaceCulling = false;
+    this.impostorRockMaterial.alphaMode = 2; // ALPHA_COMBINE
+
+    console.log("[FoliageSystem] Impostor system created");
+  }
+
+  /**
    * Sync fog settings with scene fog for consistent appearance
    * Call this when entering game mode or when scene fog changes
    */
@@ -951,6 +1138,16 @@ export class FoliageSystem {
       this.rockMaterial.setFloat("uFogHeightFalloff", fogHeightFalloff);
       this.rockMaterial.setFloat("uFogHeightDensity", fogHeightDensity);
     }
+
+    // Impostor materials (simpler fog, no height factor)
+    if (this.impostorGrassMaterial) {
+      this.impostorGrassMaterial.setColor3("uFogColor", fogColor);
+      this.impostorGrassMaterial.setFloat("uFogDensity", fogDensity);
+    }
+    if (this.impostorRockMaterial) {
+      this.impostorRockMaterial.setColor3("uFogColor", fogColor);
+      this.impostorRockMaterial.setFloat("uFogDensity", fogDensity);
+    }
   }
 
   /**
@@ -963,6 +1160,13 @@ export class FoliageSystem {
     }
     if (this.rockMaterial) {
       this.rockMaterial.setVector3("uCameraPosition", cameraPosition);
+    }
+    // Update impostor materials
+    if (this.impostorGrassMaterial) {
+      this.impostorGrassMaterial.setVector3("uCameraPosition", cameraPosition);
+    }
+    if (this.impostorRockMaterial) {
+      this.impostorRockMaterial.setVector3("uCameraPosition", cameraPosition);
     }
   }
 
@@ -1033,6 +1237,7 @@ export class FoliageSystem {
       z: chunkZ,
       instances: new Map(),
       mesh: new Map(),
+      impostorMesh: null,  // Created on-demand when LOD switches to Impostor
       visible: true,
       currentLOD: FoliageLOD.Near,  // Default to full density
     };
@@ -1058,6 +1263,8 @@ export class FoliageSystem {
           const matrices = variationMatrices[v];
           if (matrices && matrices.length > 0) {
             const variationKey = `${typeName}_v${v}`;
+            // Shuffle for even distribution when LOD reduces density
+            this.shuffleMatrices(matrices, chunkX * 1000 + chunkZ * 100 + v);
             chunk.instances.set(variationKey, matrices);
 
             // Create a completely independent mesh with copied vertex data
@@ -1107,6 +1314,8 @@ export class FoliageSystem {
           const matrices = variationMatrices[v];
           if (matrices && matrices.length > 0) {
             const variationKey = `${typeName}_v${v}`;
+            // Shuffle for even distribution when LOD reduces density
+            this.shuffleMatrices(matrices, chunkX * 1000 + chunkZ * 100 + v + 50);
             chunk.instances.set(variationKey, matrices);
 
             // Create a completely independent mesh with copied vertex data
@@ -1149,6 +1358,8 @@ export class FoliageSystem {
         );
 
         if (matrices.length > 0) {
+          // Shuffle for even distribution when LOD reduces density
+          this.shuffleMatrices(matrices, chunkX * 1000 + chunkZ * 100 + typeName.charCodeAt(0));
           chunk.instances.set(typeName, matrices);
 
           // Create thin instance mesh for this chunk
@@ -1199,6 +1410,12 @@ export class FoliageSystem {
     endX: number,
     endZ: number
   ): Float32Array[] {
+    // Early exit if no variations available
+    if (this.rockVariations.length === 0) {
+      console.warn("[FoliageSystem] No rock variations available for generation");
+      return [];
+    }
+
     const variationMatrices: number[][] = [];
     for (let i = 0; i < this.rockVariations.length; i++) {
       variationMatrices.push([]);
@@ -1260,26 +1477,29 @@ export class FoliageSystem {
       const rotationX = (this.seededRandom() - 0.5) * 0.2;  // Slight tilt
       const rotationZ = (this.seededRandom() - 0.5) * 0.2;
 
-      // Create transformation matrix
-      const matrix = Matrix.Compose(
-        new Vector3(scale, scale, scale),
-        Vector3.Zero().toQuaternion(),
-        new Vector3(x, y + config.yOffset, z)
-      );
+      // Create transformation matrix using reusable objects
+      this._tempScale.set(scale, scale, scale);
+      this._tempPosition.set(x, y + config.yOffset, z);
+      this._tempQuaternion.set(0, 0, 0, 1);  // Identity quaternion
+      Matrix.ComposeToRef(this._tempScale, this._tempQuaternion, this._tempPosition, this._tempMatrix);
 
-      // Apply rotations
-      const rotMatrixY = Matrix.RotationY(rotationY);
-      const rotMatrixX = Matrix.RotationX(rotationX);
-      const rotMatrixZ = Matrix.RotationZ(rotationZ);
-      const rotMatrix = rotMatrixZ.multiply(rotMatrixX).multiply(rotMatrixY);
-      const finalMatrix = rotMatrix.multiply(matrix);
+      // Apply rotations using reusable matrices
+      Matrix.RotationYToRef(rotationY, this._tempRotMatrixY);
+      Matrix.RotationXToRef(rotationX, this._tempRotMatrixX);
+      Matrix.RotationZToRef(rotationZ, this._tempRotMatrixZ);
+      this._tempRotMatrixZ.multiplyToRef(this._tempRotMatrixX, this._tempRotMatrix);
+      this._tempRotMatrix.multiplyToRef(this._tempRotMatrixY, this._tempFinalMatrix);
+      this._tempFinalMatrix.multiplyToRef(this._tempMatrix, this._tempRotMatrix);
 
       // Select variation based on seeded random
       const variationIndex = Math.floor(this.seededRandom() * this.rockVariations.length);
 
-      // Add matrix values to the appropriate variation array
-      const matrixArray = finalMatrix.toArray();
-      variationMatrices[variationIndex].push(...matrixArray);
+      // Add matrix values to the appropriate variation array (inline to avoid toArray allocation)
+      const m = this._tempRotMatrix.m;
+      variationMatrices[variationIndex].push(
+        m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+        m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]
+      );
     }
 
     return variationMatrices.map((arr) => new Float32Array(arr));
@@ -1295,6 +1515,12 @@ export class FoliageSystem {
     endX: number,
     endZ: number
   ): Float32Array[] {
+    // Early exit if no variations available
+    if (this.grassVariations.length === 0) {
+      console.warn("[FoliageSystem] No grass variations available for generation");
+      return [];
+    }
+
     const variationMatrices: number[][] = [];
     for (let i = 0; i < this.grassVariations.length; i++) {
       variationMatrices.push([]);
@@ -1352,23 +1578,25 @@ export class FoliageSystem {
       // Random rotation (Y axis only for grass)
       const rotationY = this.seededRandom() * Math.PI * 2;
 
-      // Create transformation matrix
-      const matrix = Matrix.Compose(
-        new Vector3(scale, scale, scale),
-        Vector3.Zero().toQuaternion(),
-        new Vector3(x, y + config.yOffset, z)
-      );
+      // Create transformation matrix using reusable objects
+      this._tempScale.set(scale, scale, scale);
+      this._tempPosition.set(x, y + config.yOffset, z);
+      this._tempQuaternion.set(0, 0, 0, 1);  // Identity quaternion
+      Matrix.ComposeToRef(this._tempScale, this._tempQuaternion, this._tempPosition, this._tempMatrix);
 
-      // Apply Y rotation
-      const rotMatrixY = Matrix.RotationY(rotationY);
-      const finalMatrix = rotMatrixY.multiply(matrix);
+      // Apply Y rotation using reusable matrix
+      Matrix.RotationYToRef(rotationY, this._tempRotMatrixY);
+      this._tempRotMatrixY.multiplyToRef(this._tempMatrix, this._tempFinalMatrix);
 
       // Select variation based on seeded random
       const variationIndex = Math.floor(this.seededRandom() * this.grassVariations.length);
 
-      // Add matrix values to the appropriate variation array
-      const matrixArray = finalMatrix.toArray();
-      variationMatrices[variationIndex].push(...matrixArray);
+      // Add matrix values inline (avoid toArray allocation)
+      const m = this._tempFinalMatrix.m;
+      variationMatrices[variationIndex].push(
+        m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+        m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]
+      );
     }
 
     return variationMatrices.map((arr) => new Float32Array(arr));
@@ -1440,20 +1668,22 @@ export class FoliageSystem {
       // Random rotation
       const rotationY = this.seededRandom() * Math.PI * 2;
 
-      // Create transformation matrix
-      const matrix = Matrix.Compose(
-        new Vector3(scale, scale, scale),
-        Vector3.Zero().toQuaternion(),  // will apply rotation separately
-        new Vector3(x, y + config.yOffset, z)
+      // Create transformation matrix using reusable objects
+      this._tempScale.set(scale, scale, scale);
+      this._tempPosition.set(x, y + config.yOffset, z);
+      this._tempQuaternion.set(0, 0, 0, 1);  // Identity quaternion
+      Matrix.ComposeToRef(this._tempScale, this._tempQuaternion, this._tempPosition, this._tempMatrix);
+
+      // Apply Y rotation using reusable matrix
+      Matrix.RotationYToRef(rotationY, this._tempRotMatrixY);
+      this._tempRotMatrixY.multiplyToRef(this._tempMatrix, this._tempFinalMatrix);
+
+      // Add matrix values inline (avoid toArray allocation)
+      const m = this._tempFinalMatrix.m;
+      matrices.push(
+        m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+        m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]
       );
-
-      // Apply Y rotation
-      const rotMatrix = Matrix.RotationY(rotationY);
-      const finalMatrix = rotMatrix.multiply(matrix);
-
-      // Add matrix values to array
-      const matrixArray = finalMatrix.toArray();
-      matrices.push(...matrixArray);
     }
 
     return new Float32Array(matrices);
@@ -1486,6 +1716,7 @@ export class FoliageSystem {
    * Update foliage visibility based on camera position
    * Supports infinite terrain by wrapping camera position to terrain bounds (when useWrapping is true)
    * Optimized: uses squared distance to avoid sqrt per chunk
+   * Optimized: skips update if camera hasn't moved significantly
    */
   updateVisibility(cameraPosition: Vector3): void {
     // Camera position for distance calculation
@@ -1503,6 +1734,21 @@ export class FoliageSystem {
       camX = cameraPosition.x;
       camZ = cameraPosition.z;
     }
+
+    // Early exit: skip update if camera hasn't moved significantly
+    const moveDx = camX - this.lastVisibilityCamX;
+    const moveDz = camZ - this.lastVisibilityCamZ;
+    const moveDistSq = moveDx * moveDx + moveDz * moveDz;
+    const heightChanged = Math.abs(cameraPosition.y - this.lastVisibilityCamY) > 5.0;
+
+    if (moveDistSq < this.VISIBILITY_UPDATE_THRESHOLD * this.VISIBILITY_UPDATE_THRESHOLD && !heightChanged) {
+      return;  // Camera hasn't moved enough, skip chunk iteration
+    }
+
+    // Update cached position
+    this.lastVisibilityCamX = camX;
+    this.lastVisibilityCamZ = camZ;
+    this.lastVisibilityCamY = cameraPosition.y;
 
     // Calculate effective LOD distance (match GPU shader logic)
     const cameraHeight = Math.max(0, cameraPosition.y - 10);
@@ -1647,8 +1893,17 @@ export class FoliageSystem {
       for (const mesh of chunk.mesh.values()) {
         mesh.dispose();
       }
+      // Dispose impostor mesh if exists
+      if (chunk.impostorMesh) {
+        chunk.impostorMesh.dispose();
+      }
     }
     this.chunks.clear();
+
+    // Invalidate visibility cache so next updateVisibility runs full check
+    this.lastVisibilityCamX = -Infinity;
+    this.lastVisibilityCamZ = -Infinity;
+    this.lastVisibilityCamY = -Infinity;
   }
 
   // ============================================
@@ -1682,7 +1937,7 @@ export class FoliageSystem {
     for (const [typeName, values] of typeMatrices) {
       if (values.length > 0) {
         const float32 = new Float32Array(values);
-        result[typeName] = this.encodeFloat32Array(float32);
+        result[typeName] = DataCodec.encodeFloat32Array(float32);
       }
     }
 
@@ -1710,7 +1965,7 @@ export class FoliageSystem {
     let totalImported = 0;
 
     for (const [typeName, base64] of Object.entries(data)) {
-      const matrices = this.decodeFloat32Array(base64);
+      const matrices = DataCodec.decodeFloat32Array(base64);
       if (matrices.length === 0) continue;
 
       const instanceCount = matrices.length / 16;
@@ -1774,6 +2029,7 @@ export class FoliageSystem {
           z: cz,
           instances: new Map(),
           mesh: new Map(),
+          impostorMesh: null,
           visible: true,
           currentLOD: FoliageLOD.Near,
         };
@@ -1861,35 +2117,6 @@ export class FoliageSystem {
     mesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
     mesh.thinInstanceCount = instanceCount;
     mesh.thinInstanceRefreshBoundingInfo();
-  }
-
-  /**
-   * Encode Float32Array to Base64
-   */
-  private encodeFloat32Array(arr: Float32Array): string {
-    const uint8 = new Uint8Array(arr.buffer);
-    let binary = "";
-    for (let i = 0; i < uint8.length; i++) {
-      binary += String.fromCharCode(uint8[i]);
-    }
-    return btoa(binary);
-  }
-
-  /**
-   * Decode Base64 to Float32Array
-   */
-  private decodeFloat32Array(base64: string): Float32Array {
-    try {
-      const binary = atob(base64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-      }
-      return new Float32Array(bytes.buffer);
-    } catch {
-      console.error("[FoliageSystem] Failed to decode base64");
-      return new Float32Array(0);
-    }
   }
 
   // ============================================
@@ -1993,6 +2220,10 @@ export class FoliageSystem {
         for (const mesh of chunk.mesh.values()) {
           mesh.dispose();
         }
+        // Dispose impostor mesh if exists
+        if (chunk.impostorMesh) {
+          chunk.impostorMesh.dispose();
+        }
         this.chunks.delete(chunkKey);
         unloadedCount++;
       }
@@ -2004,13 +2235,13 @@ export class FoliageSystem {
 
   /**
    * Update LOD for a specific cell (adjusts foliage density)
-   * Near: 100% density, Mid: 50% density, Far: should be unloaded
+   * Near: 100% density (3D), Mid: 50% density (3D), Impostor: billboards, Far: unloaded
    */
   updateCellLOD(cellX: number, cellZ: number, lod: FoliageLOD): void {
     const cellKey = `${cellX}_${cellZ}`;
 
     if (!this.loadedCells.has(cellKey)) {
-      // If not loaded and LOD is Near/Mid, generate it
+      // If not loaded and LOD is Near/Mid/Impostor, generate it
       if (lod !== FoliageLOD.Far) {
         this.generateCell(cellX, cellZ);
       } else {
@@ -2020,6 +2251,7 @@ export class FoliageSystem {
 
     // Get LOD density multiplier
     const densityMultiplier = this.getLODDensityMultiplier(lod);
+    const useImpostor = lod === FoliageLOD.Impostor;
 
     const chunks = this.getChunksInCell(cellX, cellZ);
     let updatedCount = 0;
@@ -2029,26 +2261,30 @@ export class FoliageSystem {
       const chunk = this.chunks.get(chunkKey);
 
       if (chunk && chunk.currentLOD !== lod) {
+        const prevLOD = chunk.currentLOD;
         chunk.currentLOD = lod;
 
-        // Update thin instance counts based on density multiplier
-        for (const [typeName, fullMatrices] of chunk.instances) {
-          const mesh = chunk.mesh.get(typeName);
-          if (mesh && fullMatrices.length > 0) {
-            const fullInstanceCount = fullMatrices.length / 16;
-            const targetCount = Math.max(1, Math.floor(fullInstanceCount * densityMultiplier));
+        if (useImpostor) {
+          // Switch to impostor mode: hide 3D meshes, show impostor
+          for (const mesh of chunk.mesh.values()) {
+            mesh.setEnabled(false);
+          }
+          this.createOrShowChunkImpostor(chunk);
+        } else {
+          // Switch to 3D mesh mode: show 3D meshes, hide impostor
+          if (chunk.impostorMesh) {
+            chunk.impostorMesh.setEnabled(false);
+          }
 
-            if (densityMultiplier < 1.0) {
-              // Reduce density: use subset of matrices
-              const reducedMatrices = fullMatrices.slice(0, targetCount * 16);
-              mesh.thinInstanceSetBuffer("matrix", reducedMatrices, 16, false);
+          // Update thin instance counts based on density multiplier
+          for (const [typeName, fullMatrices] of chunk.instances) {
+            const mesh = chunk.mesh.get(typeName);
+            if (mesh && fullMatrices.length > 0) {
+              mesh.setEnabled(true);
+              const fullInstanceCount = fullMatrices.length / 16;
+              const targetCount = Math.max(1, Math.floor(fullInstanceCount * densityMultiplier));
               mesh.thinInstanceCount = targetCount;
-            } else {
-              // Full density: use all matrices
-              mesh.thinInstanceSetBuffer("matrix", fullMatrices, 16, false);
-              mesh.thinInstanceCount = fullInstanceCount;
             }
-            mesh.thinInstanceRefreshBoundingInfo();
           }
         }
         updatedCount++;
@@ -2056,7 +2292,113 @@ export class FoliageSystem {
     }
 
     if (updatedCount > 0) {
-      console.log(`[FoliageSystem] Cell ${cellKey} LOD updated to ${FoliageLOD[lod]} (${updatedCount} chunks, density=${densityMultiplier * 100}%)`);
+      console.log(`[FoliageSystem] Cell ${cellKey} LOD updated to ${FoliageLOD[lod]} (${updatedCount} chunks)`);
+    }
+  }
+
+  /**
+   * Create or show impostor mesh for a chunk
+   * Aggregates all foliage instances into a single impostor billboard mesh
+   */
+  private createOrShowChunkImpostor(chunk: FoliageChunk): void {
+    if (!this.impostorBaseMesh) return;
+
+    if (chunk.impostorMesh) {
+      // Already exists, just show it
+      chunk.impostorMesh.setEnabled(true);
+      return;
+    }
+
+    // Aggregate all instance positions for impostor
+    // Sample every Nth instance to reduce impostor count
+    const IMPOSTOR_SAMPLE_RATE = 4;  // Use 1/4 of instances for impostors
+    const matrices: number[] = [];
+    let isGrassType = false;
+
+    for (const [typeName, fullMatrices] of chunk.instances) {
+      // Determine if this is grass or rock type
+      if (typeName.startsWith("grass")) {
+        isGrassType = true;
+      }
+
+      const instanceCount = fullMatrices.length / 16;
+      for (let i = 0; i < instanceCount; i += IMPOSTOR_SAMPLE_RATE) {
+        const baseIdx = i * 16;
+        // Extract position (translation) and scale from matrix
+        const x = fullMatrices[baseIdx + 12];
+        const y = fullMatrices[baseIdx + 13];
+        const z = fullMatrices[baseIdx + 14];
+        const scaleX = Math.sqrt(
+          fullMatrices[baseIdx] * fullMatrices[baseIdx] +
+          fullMatrices[baseIdx + 4] * fullMatrices[baseIdx + 4] +
+          fullMatrices[baseIdx + 8] * fullMatrices[baseIdx + 8]
+        );
+
+        // Create impostor matrix using reusable objects
+        const scale = scaleX * 1.5;  // Slightly larger to compensate for fewer instances
+        this._tempScale.set(scale, scale, 1);
+        this._tempPosition.set(x, y + scale * 0.5, z);  // Offset Y to center billboard
+        this._tempQuaternion.set(0, 0, 0, 1);
+        Matrix.ComposeToRef(this._tempScale, this._tempQuaternion, this._tempPosition, this._tempMatrix);
+        const m = this._tempMatrix.m;
+        matrices.push(
+          m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+          m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]
+        );
+      }
+    }
+
+    if (matrices.length === 0) return;
+
+    // Create impostor mesh for this chunk
+    const impostorMesh = this.impostorBaseMesh.clone(`impostor_${chunk.x}_${chunk.z}`, null);
+    if (!impostorMesh) return;
+
+    impostorMesh.makeGeometryUnique();
+    impostorMesh.material = isGrassType ? this.impostorGrassMaterial : this.impostorRockMaterial;
+    impostorMesh.isVisible = true;
+    impostorMesh.isPickable = false;
+
+    // Set thin instances
+    const float32Matrices = new Float32Array(matrices);
+    const instanceCount = float32Matrices.length / 16;
+    impostorMesh.thinInstanceSetBuffer("matrix", float32Matrices, 16, false);
+    impostorMesh.thinInstanceCount = instanceCount;
+    impostorMesh.thinInstanceRefreshBoundingInfo();
+
+    chunk.impostorMesh = impostorMesh;
+  }
+
+  /**
+   * Shuffle matrices in-place for even LOD distribution
+   * Uses Fisher-Yates shuffle with seeded random for determinism
+   */
+  private shuffleMatrices(matrices: Float32Array, seed: number): void {
+    const count = matrices.length / 16;
+    if (count <= 1) return;
+
+    // Simple seeded random (deterministic per chunk)
+    let s = seed;
+    const random = (): number => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff;
+    };
+
+    // Fisher-Yates shuffle (swap 4x4 matrices)
+    const temp = new Float32Array(16);
+    for (let i = count - 1; i > 0; i--) {
+      const j = Math.floor(random() * (i + 1));
+      if (i !== j) {
+        // Swap matrix at index i with matrix at index j
+        const iOffset = i * 16;
+        const jOffset = j * 16;
+        // Copy i to temp
+        for (let k = 0; k < 16; k++) temp[k] = matrices[iOffset + k];
+        // Copy j to i
+        for (let k = 0; k < 16; k++) matrices[iOffset + k] = matrices[jOffset + k];
+        // Copy temp to j
+        for (let k = 0; k < 16; k++) matrices[jOffset + k] = temp[k];
+      }
     }
   }
 
@@ -2069,6 +2411,8 @@ export class FoliageSystem {
         return 1.0;    // 100% density
       case FoliageLOD.Mid:
         return 0.5;    // 50% density
+      case FoliageLOD.Impostor:
+        return 0.0;    // Using impostor billboards instead
       case FoliageLOD.Far:
         return 0.0;    // Should be unloaded
       default:
@@ -2140,6 +2484,20 @@ export class FoliageSystem {
     }
     if (this.rockMaterial) {
       this.rockMaterial.dispose();
+    }
+
+    // Dispose impostor system
+    if (this.impostorBaseMesh) {
+      this.impostorBaseMesh.dispose();
+      this.impostorBaseMesh = null;
+    }
+    if (this.impostorGrassMaterial) {
+      this.impostorGrassMaterial.dispose();
+      this.impostorGrassMaterial = null;
+    }
+    if (this.impostorRockMaterial) {
+      this.impostorRockMaterial.dispose();
+      this.impostorRockMaterial = null;
     }
   }
 }

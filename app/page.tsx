@@ -548,6 +548,26 @@ export default function EditorPage() {
     });
   }, [handleUpdateAsset]);
 
+  // Handle procedural asset placement (Props tab)
+  const handleProceduralAssetPlace = useCallback((
+    assetType: string,
+    _name: string,
+    position: { x: number; y: number; z: number },
+    scale: number,
+    seed: number
+  ): { id: string; newSeed: number } | null => {
+    if (!engine) return null;
+
+    const result = engine.placeProp(assetType, position.x, position.z, { size: scale, seed });
+    if (result) {
+      setModified(true);
+      // Generate new seed for next placement
+      const newSeed = Math.random() * 10000;
+      return { id: result, newSeed };
+    }
+    return null;
+  }, [engine, setModified]);
+
   // Handle library asset placement at specific position (click-to-place)
   const handleLibraryAssetPlace = useCallback(async (
     glbPath: string,
@@ -671,6 +691,7 @@ export default function EditorPage() {
           <WorldEditor
             onEngineReady={handleEngineReady}
             onLibraryAssetPlace={handleLibraryAssetPlace}
+            onProceduralAssetPlace={handleProceduralAssetPlace}
           />
         </div>
 
