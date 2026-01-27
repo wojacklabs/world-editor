@@ -5,6 +5,7 @@ export type ToolType = "select" | "heightmap" | "biome" | "props";
 export type HeightmapTool = "raise" | "lower" | "flatten" | "smooth";
 export type MaterialType = "grass" | "dirt" | "rock" | "sand" | "water";
 export type BiomeType = "grass" | "dirt" | "rock" | "sand" | "water";
+export type WaterType = "river" | "lake";
 
 // Procedural asset types
 export type ProceduralAssetType = "rock" | "tree" | "bush" | "grass_clump";
@@ -144,6 +145,9 @@ export interface EditorState {
   // Debug visibility
   debugVisibility: DebugVisibility;
   debugRenderMode: DebugRenderMode;
+  // Water type
+  waterType: WaterType;
+  waterFlowAngle: number; // degrees 0-360, river flow direction
   // Placement mode
   pendingAsset: PendingAsset | null;
 }
@@ -184,6 +188,8 @@ export const DEFAULT_EDITOR_STATE: EditorState = {
   showWireframe: false,
   debugVisibility: DEFAULT_DEBUG_VISIBILITY,
   debugRenderMode: "normal",
+  waterType: "lake",
+  waterFlowAngle: 0,
   pendingAsset: null,
 };
 

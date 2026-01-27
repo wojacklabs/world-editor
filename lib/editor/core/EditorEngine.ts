@@ -26,7 +26,7 @@ import {
   Quaternion,
 } from "@babylonjs/core";
 import { GridMaterial } from "@babylonjs/materials";
-import type { BrushSettings, ToolType, HeightmapTool, MaterialType } from "../types/EditorTypes";
+import type { BrushSettings, ToolType, HeightmapTool, MaterialType, WaterType } from "../types/EditorTypes";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
 import { createTerrainMaterial, createSplatTexture } from "../terrain/TerrainShader";
@@ -65,10 +65,14 @@ export class EditorEngine {
   // Water system
   private seaLevel: number = -100;  // Default below terrain, set properly when water is activated
   private waterDepth: number = 2.0;  // How deep water carves into terrain
+  private waterType: WaterType = "lake";
+  private waterFlowAngle: number = 0;  // degrees 0-360
+  private waterDirectionIndicator: Mesh | null = null;
 
   // Foliage system (Thin Instance based)
   private foliageSystem: FoliageSystem | null = null;
   private foliageDirty = false;
+  private propsDirty = false;
 
   // Impostor system (Billboard LOD)
   private impostorSystem: ImpostorSystem | null = null;
@@ -263,6 +267,12 @@ export class EditorEngine {
               this.foliageSystem.generateAll();
               this.foliageDirty = false;
             }
+            // Update prop heights to match terrain
+            if (this.propsDirty && this.propManager) {
+              this.propManager.updateAllHeights();
+              this.propManager.rebuildDirtyGroups();
+              this.propsDirty = false;
+            }
           }
           break;
         case PointerEventTypes.POINTERMOVE:
@@ -453,6 +463,7 @@ export class EditorEngine {
       this.terrainMesh.updateFromHeightmap();
       this.foliageDirty = true;
       this.biomeDirty = true;
+      this.propsDirty = true;
       this.onModified?.();
     }
   }
@@ -580,6 +591,7 @@ export class EditorEngine {
       this.carveWaterBasin(point.x, point.z, settings);
       this.paintShoreTexture(point.x, point.z, settings.size);
       this.terrainMesh.updateWaterMaskTexture();
+      this.propsDirty = true;
     }
 
     if (modified) {
@@ -813,6 +825,106 @@ export class EditorEngine {
 
   setWaterDepth(depth: number): void {
     this.waterDepth = Math.max(0.5, depth);
+  }
+
+  setWaterReflections(enabled: boolean): void {
+    const waterSystem = this.biomeDecorator?.getWaterSystem();
+    if (waterSystem) {
+      waterSystem.setReflectionEnabled(enabled);
+    }
+  }
+
+  /**
+   * Set water type (river or lake)
+   */
+  setWaterType(type: WaterType): void {
+    this.waterType = type;
+    const angleRadians = (this.waterFlowAngle * Math.PI) / 180;
+    if (this.biomeDecorator) {
+      this.biomeDecorator.setWaterType(type, angleRadians);
+    }
+    this.updateWaterDirectionIndicator();
+  }
+
+  getWaterType(): WaterType {
+    return this.waterType;
+  }
+
+  /**
+   * Set water flow direction angle (degrees 0-360)
+   * Only meaningful for river type
+   */
+  setWaterFlowAngle(angleDegrees: number): void {
+    this.waterFlowAngle = angleDegrees;
+    const angleRadians = (angleDegrees * Math.PI) / 180;
+    if (this.biomeDecorator) {
+      this.biomeDecorator.setWaveAngle(angleRadians);
+    }
+    this.updateWaterDirectionIndicator();
+  }
+
+  getWaterFlowAngle(): number {
+    return this.waterFlowAngle;
+  }
+
+  /**
+   * Create or update the water direction indicator (arrow triangle)
+   * Only visible when waterType is "river"
+   */
+  private updateWaterDirectionIndicator(): void {
+    if (this.waterType !== "river") {
+      // Hide indicator for lake type
+      if (this.waterDirectionIndicator) {
+        this.waterDirectionIndicator.isVisible = false;
+      }
+      return;
+    }
+
+    // Create indicator if it doesn't exist
+    if (!this.waterDirectionIndicator) {
+      this.waterDirectionIndicator = MeshBuilder.CreateDisc(
+        "water_direction_indicator",
+        { radius: 2, tessellation: 3 },
+        this.scene
+      );
+      const mat = new StandardMaterial("water_dir_mat", this.scene);
+      mat.diffuseColor = new Color3(0.2, 0.6, 1.0);
+      mat.emissiveColor = new Color3(0.1, 0.3, 0.6);
+      mat.alpha = 0.5;
+      mat.backFaceCulling = false;
+      this.waterDirectionIndicator.material = mat;
+      this.waterDirectionIndicator.rotation.x = Math.PI / 2; // Lay flat
+      this.waterDirectionIndicator.isPickable = false;
+    }
+
+    // Position at water level
+    const waterSystem = this.biomeDecorator?.getWaterSystem();
+    const waterMesh = waterSystem?.getMesh();
+    if (waterMesh) {
+      this.waterDirectionIndicator.position.x = waterMesh.position.x;
+      this.waterDirectionIndicator.position.y = waterMesh.position.y + 0.15;
+      this.waterDirectionIndicator.position.z = waterMesh.position.z;
+    } else if (this.heightmap) {
+      const size = this.heightmap.getScale();
+      this.waterDirectionIndicator.position.x = size / 2;
+      this.waterDirectionIndicator.position.y = this.seaLevel + 0.15;
+      this.waterDirectionIndicator.position.z = size / 2;
+    }
+
+    // Rotate to match flow direction (Y-axis rotation on the flat disc)
+    const angleRadians = (this.waterFlowAngle * Math.PI) / 180;
+    this.waterDirectionIndicator.rotation.y = angleRadians;
+    this.waterDirectionIndicator.isVisible = true;
+  }
+
+  /**
+   * Dispose the direction indicator
+   */
+  private disposeWaterDirectionIndicator(): void {
+    if (this.waterDirectionIndicator) {
+      this.waterDirectionIndicator.dispose();
+      this.waterDirectionIndicator = null;
+    }
   }
 
   /**
@@ -1064,6 +1176,7 @@ export class EditorEngine {
     // Hide editor elements
     if (this.gridMesh) this.gridMesh.isVisible = false;
     if (this.brushPreview) this.brushPreview.isVisible = false;
+    if (this.waterDirectionIndicator) this.waterDirectionIndicator.isVisible = false;
 
     // Detach editor camera
     this.camera.detachControl();
@@ -1091,9 +1204,18 @@ export class EditorEngine {
       this.gamePreview = null;
     }
 
-    // Re-enable terrain LOD
+    // Re-enable terrain LOD and ensure mesh is visible
     if (this.terrainMesh) {
       this.terrainMesh.setLODEnabled(true);
+      const mesh = this.terrainMesh.getMesh();
+      if (mesh) {
+        mesh.setEnabled(true);
+      }
+    }
+
+    // Reset foliage chunk visibility (game mode culls distant chunks)
+    if (this.foliageSystem) {
+      this.foliageSystem.resetAllChunkVisibility();
     }
 
     // Restore editor camera
@@ -1107,6 +1229,10 @@ export class EditorEngine {
 
     // Show editor elements
     if (this.gridMesh) this.gridMesh.isVisible = true;
+    // Restore direction indicator if river type
+    if (this.waterDirectionIndicator && this.waterType === "river") {
+      this.waterDirectionIndicator.isVisible = true;
+    }
 
     this.isGameMode = false;
     this.onGameModeChange?.(false);
@@ -1306,6 +1432,7 @@ export class EditorEngine {
       this.assetPool.dispose();
       this.assetPool = null;
     }
+    this.disposeWaterDirectionIndicator();
     if (this.brushPreview) {
       this.brushPreview.dispose();
       this.brushPreview = null;

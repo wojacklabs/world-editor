@@ -1028,6 +1028,21 @@ export class PropManager {
   }
 
   /**
+   * Re-sample Y positions from heightmap for all prop instances.
+   * Call this after terrain height changes to keep props grounded.
+   */
+  updateAllHeights(): void {
+    for (const [, instance] of this.instances) {
+      const newY = this.heightmap.getInterpolatedHeight(instance.position.x, instance.position.z);
+      if (instance.position.y !== newY) {
+        instance.position.y = newY;
+        const groupKey = `${instance.assetType}_${instance.variationIndex}`;
+        this.markGroupDirty(groupKey);
+      }
+    }
+  }
+
+  /**
    * Rebuild a single instance group with LOD and frustum culling support
    */
   private rebuildInstanceGroupWithLOD(baseGroupKey: InstanceGroupKey): void {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEditorStore } from "@/lib/editor/store/editorStore";
-import type { ToolType, HeightmapTool, MaterialType, BiomeType, ProceduralAssetType } from "@/lib/editor/types/EditorTypes";
+import type { ToolType, HeightmapTool, MaterialType, BiomeType, ProceduralAssetType, WaterType } from "@/lib/editor/types/EditorTypes";
 
 const BIOME_COLORS: Record<BiomeType, string> = {
   grass: "#4a7c23",
@@ -28,6 +28,10 @@ export default function EditorSidebar() {
     setBrushSize,
     setBrushStrength,
     randomizeAssetSeed,
+    waterType,
+    waterFlowAngle,
+    setWaterType,
+    setWaterFlowAngle,
     setPendingAsset,
     clearPendingAsset,
   } = useEditorStore();
@@ -216,6 +220,54 @@ export default function EditorSidebar() {
                 className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer hover:[&::-webkit-slider-thumb]:bg-zinc-300"
               />
             </div>
+
+            {/* Water Type Controls */}
+            {selectedMaterial === "water" && (
+              <div className="space-y-3">
+                <div>
+                  <h3 className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide mb-2">
+                    Water Type
+                  </h3>
+                  <div className="flex gap-1">
+                    {(["lake", "river"] as WaterType[]).map((type) => (
+                      <button
+                        key={type}
+                        onClick={() => setWaterType(type)}
+                        className={`flex-1 py-2 text-[11px] rounded-md transition-all ${
+                          waterType === type
+                            ? "bg-zinc-700 text-zinc-100"
+                            : "bg-zinc-900 text-zinc-500 hover:text-zinc-300"
+                        }`}
+                      >
+                        {type === "lake" ? "Lake" : "River"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-zinc-600 mt-1">
+                    {waterType === "lake" ? "잔잔한 호수" : "흐르는 강"}
+                  </p>
+                </div>
+
+                {/* Flow Direction (River only) */}
+                {waterType === "river" && (
+                  <div>
+                    <div className="flex justify-between text-[11px] mb-2">
+                      <span className="text-zinc-500">Direction</span>
+                      <span className="text-zinc-400 tabular-nums">{Math.round(waterFlowAngle)}&deg;</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="360"
+                      step="5"
+                      value={waterFlowAngle}
+                      onChange={(e) => setWaterFlowAngle(parseInt(e.target.value))}
+                      className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer hover:[&::-webkit-slider-thumb]:bg-zinc-300"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
 
             <p className="text-[10px] text-zinc-600 mt-2">
               마우스를 떼면 데코레이션이 생성됩니다

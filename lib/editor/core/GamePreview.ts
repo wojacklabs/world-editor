@@ -82,6 +82,11 @@ export class GamePreview {
     // Create unified water plane
     this.createUnifiedWater();
 
+    // Refresh water reflections render list for game mode
+    if (this.biomeDecorator) {
+      this.biomeDecorator.refreshWaterReflections();
+    }
+
     // Setup first-person camera
     this.setupCamera();
 

@@ -30,6 +30,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     debugRenderMode,
     setModified,
     randomizeAssetSeed,
+    waterType,
+    waterFlowAngle,
     pendingAsset,
     clearPendingAsset,
   } = useEditorStore();
@@ -147,6 +149,20 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       engineRef.current.setDebugRenderMode(debugRenderMode);
     }
   }, [debugRenderMode]);
+
+  // Update water type
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.setWaterType(waterType);
+    }
+  }, [waterType]);
+
+  // Update water flow angle
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.setWaterFlowAngle(waterFlowAngle);
+    }
+  }, [waterFlowAngle]);
 
   // Props tool: Create preview when entering props mode or when type/seed changes
   useEffect(() => {

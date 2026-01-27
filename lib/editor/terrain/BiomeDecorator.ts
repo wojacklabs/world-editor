@@ -199,6 +199,11 @@ export class BiomeDecorator {
     );
 
     console.log(`[BiomeDecorator] Water created at level ${this.waterLevel}, size: ${waterWidth}x${waterDepth}`);
+
+    // Refresh reflection render list after scene meshes settle
+    setTimeout(() => {
+      this.waterSystem?.updateReflectionRenderList();
+    }, 100);
   }
 
   /**
@@ -220,6 +225,33 @@ export class BiomeDecorator {
    */
   getWaterSystem(): WaterSystem | null {
     return this.waterSystem;
+  }
+
+  /**
+   * Switch water type (river/lake) and set flow direction angle
+   */
+  setWaterType(type: "river" | "lake", angleRadians: number): void {
+    if (this.waterSystem) {
+      this.waterSystem.setWaterType(type, angleRadians);
+    }
+  }
+
+  /**
+   * Set wave direction angle (radians) for river flow
+   */
+  setWaveAngle(angleRadians: number): void {
+    if (this.waterSystem) {
+      this.waterSystem.setWaveAngle(angleRadians);
+    }
+  }
+
+  /**
+   * Notify water system to update reflection render list
+   */
+  refreshWaterReflections(): void {
+    if (this.waterSystem) {
+      this.waterSystem.updateReflectionRenderList();
+    }
   }
 
   /**
