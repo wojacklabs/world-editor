@@ -51,7 +51,7 @@ export class TerrainMesh {
   constructor(scene: Scene, heightmap: Heightmap) {
     this.scene = scene;
     this.heightmap = heightmap;
-    this.splatMap = new SplatMap(heightmap.getResolution());
+    this.splatMap = new SplatMap(heightmap.getResolution() * 2);
     this.loadDisplacementTexture();
   }
 

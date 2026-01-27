@@ -27,7 +27,8 @@ function loadTextureWithKTX2Fallback(
   const texture = new Texture(texturePath, scene);
   texture.wrapU = Texture.WRAP_ADDRESSMODE;
   texture.wrapV = Texture.WRAP_ADDRESSMODE;
-  
+  texture.anisotropicFilteringLevel = 16;
+
   return texture;
 }
 
@@ -281,6 +282,88 @@ vec2 getDistortedUV(vec2 pos) {
     
     // Apply distortion
     return baseUV + noise1 + noise2;
+}
+
+// =============================================================================
+// HEX TILING SYSTEM
+// Eliminates grid-like texture repetition by sampling from two overlapping
+// grids with per-cell random UV rotation and smooth blending.
+// Reference: "Procedural Stochastic Textures by Tiling and Blending" (2018)
+// =============================================================================
+
+struct HexUVData {
+    vec2 uv1;      // Rotated UV from grid A
+    vec2 uv2;      // Rotated UV from grid B
+    float blend;   // 0.0 = uv2, 1.0 = uv1
+    float rot1;    // Grid A rotation angle (for normal map correction)
+    float rot2;    // Grid B rotation angle
+};
+
+float hexCellRand(vec2 cell) {
+    return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+HexUVData computeHexUV(vec2 uv) {
+    HexUVData h;
+
+    // Two overlapping grids offset by half cell create diamond/hex boundary
+    // Grid A: cell centers at (n+0.5, m+0.5)
+    // Grid B: cell centers at (n, m) — integers
+    vec2 centerA = floor(uv) + 0.5;
+    vec2 centerB = floor(uv + 0.5);
+
+    // Squared distance to each cell center
+    vec2 dA = uv - centerA;
+    vec2 dB = uv - centerB;
+    float distA = dot(dA, dA);
+    float distB = dot(dB, dB);
+
+    // Per-cell random rotation (full 360°)
+    h.rot1 = hexCellRand(centerA) * 6.28318;
+    h.rot2 = hexCellRand(centerB) * 6.28318;
+
+    // Rotate UVs
+    float c1 = cos(h.rot1), s1 = sin(h.rot1);
+    float c2 = cos(h.rot2), s2 = sin(h.rot2);
+    h.uv1 = vec2(uv.x * c1 - uv.y * s1, uv.x * s1 + uv.y * c1);
+    h.uv2 = vec2(uv.x * c2 - uv.y * s2, uv.x * s2 + uv.y * c2);
+
+    // Smooth blend: closer to grid A center → more weight on uv1
+    h.blend = smoothstep(-0.12, 0.12, distB - distA);
+
+    return h;
+}
+
+// Hex-tiled rock texture sampling (direct uniform access — no sampler2D params for WebGPU)
+vec3 hexRockDiffuse(HexUVData h) {
+    return mix(texture2D(uRockDiffuse, h.uv2).rgb, texture2D(uRockDiffuse, h.uv1).rgb, h.blend);
+}
+
+vec3 hexRockARM(HexUVData h) {
+    return mix(texture2D(uRockARM, h.uv2).rgb, texture2D(uRockARM, h.uv1).rgb, h.blend);
+}
+
+float hexRockDisp(HexUVData h) {
+    return mix(texture2D(uRockDisp, h.uv2).r, texture2D(uRockDisp, h.uv1).r, h.blend);
+}
+
+// Hex-tiled rock normal with tangent-space rotation correction
+vec3 hexRockNormal(HexUVData h) {
+    vec3 n1raw = texture2D(uRockNormal, h.uv1).rgb;
+    vec3 n2raw = texture2D(uRockNormal, h.uv2).rgb;
+
+    vec2 n1xy = (n1raw.rg * 2.0 - 1.0) * uNormalStrength;
+    vec2 n2xy = (n2raw.rg * 2.0 - 1.0) * uNormalStrength;
+
+    // Counter-rotate XY to undo UV rotation (rotate by -angle)
+    float c1 = cos(h.rot1), s1 = sin(h.rot1);
+    float c2 = cos(h.rot2), s2 = sin(h.rot2);
+    vec2 n1r = vec2(n1xy.x * c1 + n1xy.y * s1, -n1xy.x * s1 + n1xy.y * c1);
+    vec2 n2r = vec2(n2xy.x * c2 + n2xy.y * s2, -n2xy.x * s2 + n2xy.y * c2);
+
+    vec3 n1 = vec3(n1r, n1raw.b);
+    vec3 n2 = vec3(n2r, n2raw.b);
+    return normalize(mix(n2, n1, h.blend));
 }
 
 // Triplanar UV coordinates for steep surfaces
@@ -609,7 +692,10 @@ void main() {
 
     // Calculate distorted UV for flat surfaces
     vec2 texUV = getDistortedUV(worldPos);
-    
+
+    // Compute hex tiling UVs for rock (eliminates grid repetition)
+    HexUVData hexUV = computeHexUV(texUV);
+
     // Calculate triplanar UVs for steep surfaces (cliffs)
     vec3 geometryNormal = normalize(vNormal);
     TriplanarUVs triUVs = calculateTriplanarUVs(vPosition, geometryNormal, uTextureScale);
@@ -623,8 +709,8 @@ void main() {
     vec3 dirtColor = dirtPattern(texUV, worldPos, uDirtColor);
     vec3 sandColor = sandPattern(worldPos, uSandColor);
     
-    // Rock color: blend between planar and triplanar based on slope
-    vec3 rockColorPlanar = rockPattern(texUV, worldPos, uRockColor);
+    // Rock color: blend between hex-tiled planar and triplanar based on slope
+    vec3 rockColorPlanar = hexRockDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
     // Inline triplanar rock diffuse sampling (avoid function calls for WebGPU compatibility)
     vec3 rockColorTriplanar =
         texture2D(uRockDiffuse, triUVs.uvX).rgb * triUVs.weights.x +
@@ -636,7 +722,7 @@ void main() {
     vec3 rockColor = mix(rockColorPlanar, rockColorTriplanar, triplanarBlend);
 
     // Get texture data for rock (blend planar/triplanar for ARM as well)
-    vec3 rockARMPlanar = getRockARM(texUV);
+    vec3 rockARMPlanar = hexRockARM(hexUV);
     // Inline triplanar rock ARM sampling
     vec3 rockARMTriplanar =
         texture2D(uRockARM, triUVs.uvX).rgb * triUVs.weights.x +
@@ -651,7 +737,7 @@ void main() {
     float dirtHeight = getDirtHeight(texUV);
 
     // Rock height: blend planar/triplanar
-    float rockHeightPlanar = getRockHeight(texUV);
+    float rockHeightPlanar = hexRockDisp(hexUV);
     // Inline triplanar rock displacement sampling
     float rockHeightTriplanar =
         texture2D(uRockDisp, triUVs.uvX).r * triUVs.weights.x +
@@ -682,7 +768,7 @@ void main() {
     // Lighting - apply normal maps for textured materials
     
     // Get tangent-space normals from textures (planar)
-    vec3 rockNormalPlanar = getRockNormal(texUV);
+    vec3 rockNormalPlanar = hexRockNormal(hexUV);
     vec3 dirtNormalTex = getDirtNormal(texUV);
 
     // Inline triplanar normal sampling for rock on steep surfaces (WebGPU compatibility)
@@ -805,7 +891,7 @@ void main() {
 
     // 3. Height fog (concentrate fog at lower altitudes)
     float heightFactor = exp(-max(0.0, vPosition.y - uFogHeightFalloff) * uFogHeightDensity);
-    float heightFog = heightFactor * 0.3;  // Max 30% additional fog from height
+    float heightFog = heightFactor * 0.15;
 
     // 4. Final fog factor
     float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
@@ -959,7 +1045,7 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
   // Texture tiling scale (higher = smaller texture, more repeats)
   material.setFloat("uTextureScale", 1.0);  // 1.0 = texture repeats every 1 world unit (matches original texture size)
   material.setFloat("uNormalStrength", 1.5);  // Normal map intensity (1.0 = standard, higher = more depth)
-  material.setFloat("uDispStrength", 0.5);  // Vertex displacement strength for rock areas
+  material.setFloat("uDispStrength", 0.2);  // Vertex displacement strength for rock areas
 
   // Fog settings
   material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));

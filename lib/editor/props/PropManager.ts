@@ -149,7 +149,7 @@ void main() {
 
     // Rim lighting
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
-    rimFactor = pow(rimFactor, 3.0) * 0.25;
+    rimFactor = pow(rimFactor, 3.0) * 0.1;
 
     // Ambient occlusion approximation
     float ao = 0.5 + 0.5 * normal.y;
@@ -332,7 +332,7 @@ void main() {
 
     // Rim lighting
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
-    rimFactor = pow(rimFactor, 3.0) * 0.2;
+    rimFactor = pow(rimFactor, 3.0) * 0.08;
 
     // Subsurface scattering approximation
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
@@ -508,7 +508,7 @@ export class PropManager {
               lodMap.set(lod, []);
             }
 
-            const seed = variationIdx * 1000 + 42;
+            const seed = variationIdx * 1001 + 8;
             const subdivision = LOD_SUBDIVISIONS[assetType][lod];
 
             const params: AssetParams = {
@@ -562,7 +562,7 @@ export class PropManager {
         const variations: Mesh[] = [];
 
         for (let i = 0; i < VARIATIONS_PER_TYPE; i++) {
-          const seed = i * 1000 + 42;
+          const seed = i * 1001 + 8;
           const subdivision = LOD_SUBDIVISIONS[assetType][lod];
 
           const params: AssetParams = {
@@ -1256,12 +1256,13 @@ export class PropManager {
 
   /**
    * Convert any seed to a variation seed that matches pre-generated variation meshes.
-   * Variation meshes are generated with seeds: 42, 1042, 2042, 3042, 4042, 5042, 6042, 7042
+   * Variation meshes are generated with seeds: 8, 1009, 2010, 3011, 4012, 5013, 6014, 7015
+   * Formula: i * 1001 + 8 ensures seed % 8 = i (since 1001 % 8 = 1)
    * This ensures preview matches the installed mesh.
    */
   private toVariationSeed(seed: number): number {
     const variationIndex = this.getVariationIndex(seed);
-    return variationIndex * 1000 + 42;
+    return variationIndex * 1001 + 8;
   }
 
   // Create or update the preview with given params
@@ -1309,7 +1310,7 @@ export class PropManager {
 
     // Pick random variation index and convert to variation seed
     const randomVariationIndex = Math.floor(Math.random() * VARIATIONS_PER_TYPE);
-    const newSeed = randomVariationIndex * 1000 + 42;
+    const newSeed = randomVariationIndex * 1001 + 8;
     this.createPreview(this.previewParams.type, this.previewParams.size, newSeed);
     return newSeed;
   }

@@ -183,7 +183,7 @@ void main() {
 
     // Rim lighting
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
-    rimFactor = pow(rimFactor, 3.0) * 0.2;
+    rimFactor = pow(rimFactor, 3.0) * 0.08;
 
     // Subsurface scattering approximation (light through leaves)
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
@@ -343,7 +343,7 @@ void main() {
 
     // Rim lighting (가장자리 강조로 형태감 향상)
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
-    rimFactor = pow(rimFactor, 3.0) * 0.25;
+    rimFactor = pow(rimFactor, 3.0) * 0.1;
 
     // Ambient occlusion 근사 (오목한 부분 어둡게)
     float ao = 0.5 + 0.5 * smoothNormal.y;
