@@ -1787,6 +1787,25 @@ export class FoliageSystem {
   }
 
   /**
+   * Reset all chunk visibility to visible (used when exiting game mode)
+   * In editor mode, all chunks should always be visible since updateVisibility is not called.
+   */
+  resetAllChunkVisibility(): void {
+    for (const [, chunk] of this.chunks) {
+      if (!chunk.visible) {
+        chunk.visible = true;
+        for (const mesh of chunk.mesh.values()) {
+          mesh.setEnabled(true);
+        }
+      }
+    }
+    // Invalidate visibility cache
+    this.lastVisibilityCamX = -Infinity;
+    this.lastVisibilityCamZ = -Infinity;
+    this.lastVisibilityCamY = -Infinity;
+  }
+
+  /**
    * Regenerate foliage for changed area
    */
   regenerateArea(centerX: number, centerZ: number, radius: number): void {

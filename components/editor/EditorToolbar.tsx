@@ -10,7 +10,6 @@ interface EditorToolbarProps {
   onSave: () => void;
   onExportGLB: () => void;
   onExportHeightmap: () => void;
-  onExportWorldProject?: () => void;
   onToggleGameMode: () => void;
   onOpenAIChat?: () => void;
   onOpenLibrary?: () => void;
@@ -23,7 +22,6 @@ export default function EditorToolbar({
   onSave,
   onExportGLB,
   onExportHeightmap,
-  onExportWorldProject,
   onToggleGameMode,
   onOpenAIChat,
   onOpenLibrary,
@@ -81,15 +79,6 @@ export default function EditorToolbar({
       >
         PNG
       </button>
-      <button
-        onClick={onExportWorldProject}
-        disabled={isGameMode}
-        className={`${buttonDefault} ${isGameMode ? buttonDisabled : ""}`}
-        title="Export World Project JSON"
-      >
-        World
-      </button>
-
       <div className="w-px h-5 bg-zinc-800 mx-1" />
 
       {/* Assets */}

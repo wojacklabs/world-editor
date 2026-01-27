@@ -10,6 +10,7 @@ import type {
   PendingAsset,
   DebugVisibility,
   DebugRenderMode,
+  WaterType,
 } from "../types/EditorTypes";
 import { DEFAULT_EDITOR_STATE, DEFAULT_ASSET_SETTINGS } from "../types/EditorTypes";
 
@@ -43,6 +44,10 @@ interface EditorStore extends EditorState {
   toggleDebugVisibility: (key: keyof DebugVisibility) => void;
   setDebugVisibility: (visibility: Partial<DebugVisibility>) => void;
   setDebugRenderMode: (mode: DebugRenderMode) => void;
+
+  // Water type
+  setWaterType: (type: WaterType) => void;
+  setWaterFlowAngle: (angle: number) => void;
 
   // Placement mode
   setPendingAsset: (asset: PendingAsset | null) => void;
@@ -132,6 +137,9 @@ export const useEditorStore = create<EditorStore>((set) => ({
     })),
 
   setDebugRenderMode: (mode) => set({ debugRenderMode: mode }),
+
+  setWaterType: (type) => set({ waterType: type }),
+  setWaterFlowAngle: (angle) => set({ waterFlowAngle: Math.max(0, Math.min(360, angle)) }),
 
   setPendingAsset: (asset) => set({ pendingAsset: asset }),
   clearPendingAsset: () => set({ pendingAsset: null }),

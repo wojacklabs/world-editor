@@ -23,11 +23,14 @@ import {
   Vector3,
   Vector4,
   Color3,
+  Color4,
   Texture,
   RawTexture,
   ShaderMaterial,
   Effect,
   Constants,
+  MirrorTexture,
+  Plane,
 } from "@babylonjs/core";
 import { Heightmap } from "./Heightmap";
 
@@ -37,12 +40,10 @@ import { Heightmap } from "./Heightmap";
 const waterVertexShader = `
 precision highp float;
 
-// Attributes
 attribute vec3 position;
 attribute vec3 normal;
 attribute vec2 uv;
 
-// Uniforms
 uniform mat4 world;
 uniform mat4 view;
 uniform mat4 projection;
@@ -50,81 +51,78 @@ uniform mat4 viewProjection;
 uniform float uTime;
 uniform float uWaterLevel;
 
-// Gerstner wave parameters (4 waves)
 uniform vec4 uWave0;
 uniform vec4 uWave1;
 uniform vec4 uWave2;
 uniform vec4 uWave3;
 
-// Varyings
+// Camera position (avoid inverse(view) per vertex)
+uniform vec3 uCameraPosition;
+
+// Wave direction rotation (radians)
+uniform float uWaveAngle;
+
+// Heightmap for depth-based wave attenuation
+uniform sampler2D uHeightmap;
+uniform float uTerrainScale;
+uniform float uHeightScale;
+uniform float uMinHeight;
+
 varying vec3 vWorldPos;
 varying vec3 vNormal;
 varying vec2 vUV;
 varying vec4 vScreenPos;
 varying vec3 vViewVector;
 varying float vWaveHeight;
+varying vec2 vOrigXZ;
+varying float vDepth;
 
-// Gerstner wave function
-vec3 gerstnerWave(vec4 wave, vec3 p, inout vec3 tangent, inout vec3 binormal) {
+vec3 gerstnerWave(vec4 wave, vec3 p) {
     float steepness = wave.z;
     float wavelength = wave.w;
-
     if (wavelength < 0.01) return vec3(0.0);
-
     float k = 2.0 * 3.14159265 / wavelength;
     float c = sqrt(9.8 / k);
-    vec2 d = normalize(wave.xy);
+    // Rotate wave direction by uWaveAngle
+    float ca = cos(uWaveAngle), sa = sin(uWaveAngle);
+    vec2 rawD = normalize(wave.xy);
+    vec2 d = vec2(rawD.x * ca - rawD.y * sa, rawD.x * sa + rawD.y * ca);
     float f = k * (dot(d, p.xz) - c * uTime);
     float a = steepness / k;
-
-    tangent += vec3(
-        -d.x * d.x * steepness * sin(f),
-        d.x * steepness * cos(f),
-        -d.x * d.y * steepness * sin(f)
-    );
-    binormal += vec3(
-        -d.x * d.y * steepness * sin(f),
-        d.y * steepness * cos(f),
-        -d.y * d.y * steepness * sin(f)
-    );
-
-    return vec3(
-        d.x * a * cos(f),
-        a * sin(f),
-        d.y * a * cos(f)
-    );
+    return vec3(d.x * a * cos(f), a * sin(f), d.y * a * cos(f));
 }
 
 void main() {
     vec3 worldPos = (world * vec4(position, 1.0)).xyz;
+    vOrigXZ = worldPos.xz;
 
-    // Initialize tangent and binormal for normal calculation
-    vec3 tangent = vec3(1.0, 0.0, 0.0);
-    vec3 binormal = vec3(0.0, 0.0, 1.0);
+    // Sample terrain height for depth-based wave attenuation
+    vec2 hmUV = clamp(worldPos.xz / uTerrainScale, 0.0, 1.0);
+    float terrainH = texture2D(uHeightmap, hmUV).r * uHeightScale + uMinHeight;
+    float localDepth = max(uWaterLevel - terrainH, 0.0);
+    vDepth = localDepth;
 
-    // Apply Gerstner waves
+    // Attenuate waves in shallow water (prevents clipping through terrain)
+    float depthDamping = smoothstep(0.0, 1.5, localDepth);
+
     vec3 displacement = vec3(0.0);
-    displacement += gerstnerWave(uWave0, worldPos, tangent, binormal);
-    displacement += gerstnerWave(uWave1, worldPos, tangent, binormal);
-    displacement += gerstnerWave(uWave2, worldPos, tangent, binormal);
-    displacement += gerstnerWave(uWave3, worldPos, tangent, binormal);
+    displacement += gerstnerWave(uWave0, worldPos);
+    displacement += gerstnerWave(uWave1, worldPos);
+    displacement += gerstnerWave(uWave2, worldPos);
+    displacement += gerstnerWave(uWave3, worldPos);
+    displacement *= depthDamping;
 
     worldPos += displacement;
     vWaveHeight = displacement.y;
 
-    // Calculate wave normal from tangent and binormal
-    vec3 waveNormal = normalize(cross(binormal, tangent));
-
     vWorldPos = worldPos;
-    vNormal = waveNormal;
+    vNormal = vec3(0.0, 1.0, 0.0);
     vUV = uv;
 
     vec4 clipPos = viewProjection * vec4(worldPos, 1.0);
     vScreenPos = clipPos;
 
-    // View vector for Fresnel
-    vec3 cameraPos = (inverse(view) * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-    vViewVector = normalize(cameraPos - worldPos);
+    vViewVector = normalize(uCameraPosition - worldPos);
 
     gl_Position = clipPos;
 }
@@ -136,22 +134,26 @@ void main() {
 const waterFragmentShader = `
 precision highp float;
 
-// Varyings
 varying vec3 vWorldPos;
 varying vec3 vNormal;
 varying vec2 vUV;
 varying vec4 vScreenPos;
 varying vec3 vViewVector;
 varying float vWaveHeight;
+varying vec2 vOrigXZ;
+varying float vDepth;
 
-// Uniforms
 uniform float uTime;
 uniform float uWaterLevel;
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
 uniform vec3 uCameraPosition;
 
-// Water appearance
+uniform vec4 uWave0;
+uniform vec4 uWave1;
+uniform vec4 uWave2;
+uniform vec4 uWave3;
+
 uniform vec3 uShallowColor;
 uniform vec3 uDeepColor;
 uniform vec3 uFresnelColor;
@@ -159,154 +161,138 @@ uniform float uFresnelPower;
 uniform float uMaxDepth;
 uniform float uShoreBlendDistance;
 
-// Textures
-uniform sampler2D uNormalMap;
-uniform sampler2D uFoamTexture;
-uniform sampler2D uHeightmap;
-
-// Heightmap-based depth
-uniform float uTerrainScale;
-uniform float uHeightScale;
-
-// Normal map settings
-uniform float uNormalStrength;
-uniform vec2 uNormalScale;
-uniform vec2 uNormalSpeed;
-
-// Foam settings
 uniform float uFoamIntensity;
 uniform float uShoreFoamWidth;
 
-// Calculate terrain height from heightmap at world position
-float getTerrainHeight(vec3 worldPos) {
-    // Convert world position to heightmap UV (0-1 range)
-    vec2 heightmapUV = worldPos.xz / uTerrainScale;
-    heightmapUV = clamp(heightmapUV, 0.0, 1.0);
+// Wave direction rotation (radians)
+uniform float uWaveAngle;
 
-    // Sample heightmap (red channel contains height)
-    float normalizedHeight = texture2D(uHeightmap, heightmapUV).r;
+uniform sampler2D uReflectionSampler;
+uniform float uReflectionStrength;
+uniform float uReflectionEnabled;
 
-    // Convert to world height
-    return normalizedHeight * uHeightScale;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+
+// ---- Analytical Gerstner wave normals ----
+
+void gerstnerWaveNormal(vec4 wave, vec2 xz, float time, inout vec3 tangent, inout vec3 binormal) {
+    float steepness = wave.z;
+    float wavelength = wave.w;
+    if (wavelength < 0.01) return;
+    float k = 6.28318 / wavelength;
+    float c = sqrt(9.8 / k);
+    // Rotate wave direction by uWaveAngle
+    float ca = cos(uWaveAngle), sa = sin(uWaveAngle);
+    vec2 rawD = normalize(wave.xy);
+    vec2 d = vec2(rawD.x * ca - rawD.y * sa, rawD.x * sa + rawD.y * ca);
+    float f = k * (dot(d, xz) - c * time);
+    float sinF = sin(f);
+    float cosF = cos(f);
+    tangent += vec3(-d.x*d.x*steepness*sinF, d.x*steepness*cosF, -d.x*d.y*steepness*sinF);
+    binormal += vec3(-d.x*d.y*steepness*sinF, d.y*steepness*cosF, -d.y*d.y*steepness*sinF);
 }
 
-// Calculate water depth using heightmap
-float getHeightmapBasedDepth(vec3 worldPos) {
-    float terrainHeight = getTerrainHeight(worldPos);
-    float depth = uWaterLevel - terrainHeight;
-    return max(depth, 0.0);
+vec3 computeWaveNormal(vec2 origXZ, float time, float damping) {
+    vec3 tangent = vec3(1.0, 0.0, 0.0);
+    vec3 binormal = vec3(0.0, 0.0, 1.0);
+
+    // Main waves (attenuated by depth damping)
+    vec4 w0 = uWave0; w0.z *= damping;
+    vec4 w1 = uWave1; w1.z *= damping;
+    vec4 w2 = uWave2; w2.z *= damping;
+    vec4 w3 = uWave3; w3.z *= damping;
+    gerstnerWaveNormal(w0, origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(w1, origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(w2, origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(w3, origXZ, time, tangent, binormal);
+
+    // Detail waves (fragment-only, also attenuated)
+    gerstnerWaveNormal(vec4( 0.8,  0.6, 0.05*damping, 1.0),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4(-0.6,  0.8, 0.04*damping, 0.7),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4( 0.9, -0.4, 0.03*damping, 0.4),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4(-0.3, -0.9, 0.02*damping, 0.25), origXZ, time, tangent, binormal);
+
+    return normalize(cross(binormal, tangent));
 }
 
 void main() {
-    // Screen UV for effects
-    vec2 screenUV = (vScreenPos.xy / vScreenPos.w) * 0.5 + 0.5;
-
-    // Calculate water depth using heightmap (no scene depth pass needed)
-    float waterDepth = getHeightmapBasedDepth(vWorldPos);
-
-    // Normalized depth (0 = shore, 1 = max depth)
+    // Depth from vertex shader (heightmap-based, already attenuated)
+    float waterDepth = vDepth;
     float depthFactor = clamp(waterDepth / uMaxDepth, 0.0, 1.0);
 
-    // Sample normal maps at different scales and speeds
-    vec2 uv1 = vWorldPos.xz * uNormalScale.x + uTime * uNormalSpeed.x * vec2(1.0, 0.5);
-    vec2 uv2 = vWorldPos.xz * uNormalScale.y + uTime * uNormalSpeed.y * vec2(-0.5, 1.0);
+    // Depth-based wave normal damping (matches vertex displacement damping)
+    float depthDamping = smoothstep(0.0, 1.5, waterDepth);
 
-    vec3 normal1 = texture2D(uNormalMap, uv1).rgb * 2.0 - 1.0;
-    vec3 normal2 = texture2D(uNormalMap, uv2).rgb * 2.0 - 1.0;
+    // Analytical wave normal with depth attenuation
+    vec3 waveNormal = computeWaveNormal(vOrigXZ, uTime, depthDamping);
 
-    // Blend normals
-    vec3 detailNormal = normalize(vec3(
-        normal1.xy + normal2.xy,
-        normal1.z * normal2.z
-    ));
+    vec3 finalNormal = waveNormal;
 
-    // Reduce normal strength in shallow water
-    float shallowNormalReduce = mix(0.3, 1.0, depthFactor);
-    vec3 finalNormal = normalize(vNormal + detailNormal * uNormalStrength * shallowNormalReduce);
+    // Fresnel: F0=0.35 (reflection-dominant — base color is dark undertone only)
+    float rawFresnel = pow(1.0 - max(dot(vViewVector, finalNormal), 0.0), uFresnelPower);
+    float fresnel = clamp(mix(0.35, 1.0, rawFresnel), 0.0, 1.0);
 
-    // Fresnel effect
-    float fresnel = pow(1.0 - max(dot(vViewVector, finalNormal), 0.0), uFresnelPower);
-    fresnel = clamp(fresnel, 0.0, 1.0);
-
-    // Water color based on depth
+    // Water color: flat dark undertone (all visual detail comes from reflections)
     vec3 waterColor = mix(uShallowColor, uDeepColor, depthFactor);
 
-    // Add fresnel tint
-    waterColor = mix(waterColor, uFresnelColor, fresnel * 0.4);
-
-    // Sky reflection approximation
+    // Reflection
     vec3 reflectDir = reflect(-vViewVector, finalNormal);
-    float skyFactor = max(reflectDir.y, 0.0);
-    vec3 skyColor = mix(vec3(0.5, 0.6, 0.7), vec3(0.7, 0.85, 1.0), skyFactor);
+    float skyUp = max(reflectDir.y, 0.0);
+    float skyHoriz = 1.0 - abs(reflectDir.y);
+    vec3 skyZenith = vec3(0.35, 0.55, 0.9);
+    vec3 skyHorizon = vec3(0.75, 0.85, 0.95);
+    vec3 skyBase = vec3(0.55, 0.65, 0.75);
+    vec3 skyColor = mix(skyBase, skyHorizon, skyHoriz * 0.7);
+    skyColor = mix(skyColor, skyZenith, skyUp * skyUp);
 
-    // Blend reflection with water color based on fresnel
-    vec3 color = mix(waterColor, skyColor, fresnel * 0.6);
+    vec3 reflectionColor;
+    if (uReflectionEnabled > 0.5) {
+        vec2 reflectUV = vScreenPos.xy / vScreenPos.w * 0.5 + 0.5;
+        vec2 distortion = finalNormal.xz * 0.12;
+        reflectUV += distortion;
+        reflectUV = clamp(reflectUV, 0.001, 0.999);
+        reflectionColor = texture2D(uReflectionSampler, reflectUV).rgb;
+        float reflBrightness = dot(reflectionColor, vec3(0.299, 0.587, 0.114));
+        reflectionColor = mix(skyColor, reflectionColor, smoothstep(0.01, 0.1, reflBrightness));
+    } else {
+        reflectionColor = skyColor;
+    }
 
-    // Specular highlight (sun reflection)
+    // Reflection-dominant compositing: fresnel drives reflection vs transmission
+    float reflectionAmount = fresnel;
+    vec3 color = mix(waterColor, reflectionColor, reflectionAmount);
+
+    // GGX microfacet specular (physically-based water surface)
     vec3 halfVector = normalize(vViewVector + uSunDirection);
-    float specular = pow(max(dot(finalNormal, halfVector), 0.0), 256.0);
-    specular *= smoothstep(0.0, 0.1, dot(finalNormal, uSunDirection));
-    color += uSunColor * specular * 1.2;
+    float NdotH = max(dot(finalNormal, halfVector), 0.0);
+    float roughness = 0.07;
+    float ggxAlpha = roughness * roughness;
+    float ggxAlpha2 = ggxAlpha * ggxAlpha;
+    float denom = NdotH * NdotH * (ggxAlpha2 - 1.0) + 1.0;
+    float D = ggxAlpha2 / (3.14159 * denom * denom);
+    float specular = D * max(dot(finalNormal, uSunDirection), 0.0);
+    color += uSunColor * specular * 0.5;
 
-    // Shore foam based on depth - enhanced with animated shoreline
-    float shoreDistance = waterDepth;
+    // Improved subsurface scattering — wave crest translucency
+    float sssWaveHeight = max(vWaveHeight, 0.0);
+    float sssDot = pow(max(dot(vViewVector, -uSunDirection), 0.0), 3.0);
+    float sssThickness = sssWaveHeight * (1.0 - depthFactor);
+    vec3 sssColor = mix(vec3(0.05, 0.3, 0.35), vec3(0.15, 0.6, 0.5), sssThickness);
+    color += sssColor * sssDot * sssThickness * 0.6;
 
-    // Animated shoreline - waves reaching the shore
-    float shoreWaveOffset = sin(uTime * 0.8 + vWorldPos.x * 0.3) * 0.15 +
-                            sin(uTime * 1.2 + vWorldPos.z * 0.2) * 0.1;
-    float animatedShoreWidth = uShoreFoamWidth * (1.0 + shoreWaveOffset);
-
-    // Multi-layer shore foam for more natural look
-    float shoreFoamMask1 = 1.0 - smoothstep(0.0, animatedShoreWidth * 0.3, shoreDistance);
-    float shoreFoamMask2 = 1.0 - smoothstep(0.0, animatedShoreWidth * 0.7, shoreDistance);
-    float shoreFoamMask3 = 1.0 - smoothstep(0.0, animatedShoreWidth, shoreDistance);
-
-    // Combine layers with different intensities
-    float shoreFoamMask = shoreFoamMask1 * 0.6 + shoreFoamMask2 * 0.3 + shoreFoamMask3 * 0.2;
-
-    // Wave crest foam
-    float crestFoam = smoothstep(0.03, 0.12, vWaveHeight);
-
-    // Sample foam texture with multiple layers for detail
-    vec2 foamUV1 = vWorldPos.xz * 0.15 + uTime * 0.03;
-    vec2 foamUV2 = vWorldPos.xz * 0.08 - uTime * 0.02;
-    vec2 foamUV3 = vWorldPos.xz * 0.25 + vec2(uTime * 0.05, -uTime * 0.03);
-    float foamNoise = texture2D(uFoamTexture, foamUV1).r;
-    foamNoise *= texture2D(uFoamTexture, foamUV2).r * 2.0;
-    float foamDetail = texture2D(uFoamTexture, foamUV3).r;
-
-    // Shore foam pattern - more active near water edge
-    float shorePattern = foamNoise * 0.7 + foamDetail * 0.3;
-
-    // Combine foam effects
-    float totalFoam = (shoreFoamMask * 0.9 + crestFoam * 0.3) * shorePattern * uFoamIntensity;
-
-    // Add subtle foam trails in shallow water
-    float shallowTrails = (1.0 - depthFactor) * foamDetail * 0.15;
-    totalFoam += shallowTrails;
-    totalFoam = clamp(totalFoam, 0.0, 1.0);
-
-    // Apply foam with slight color variation
-    vec3 foamColor = mix(vec3(0.92, 0.96, 0.98), vec3(0.98, 1.0, 1.0), foamNoise);
-    color = mix(color, foamColor, totalFoam);
-
-    // Subsurface scattering approximation
-    float sss = pow(max(dot(vViewVector, -uSunDirection), 0.0), 4.0);
-    sss *= (1.0 - depthFactor) * 0.5;
-    color += vec3(0.1, 0.5, 0.4) * sss * 0.25;
-
-    // Transparency based on depth
-    // Shallow = more transparent (see bottom), Deep = more opaque
-    float baseAlpha = mix(0.4, 0.95, depthFactor);
-
-    // Shore blend - fade out at very shallow areas for soft edge
+    // Fresnel-driven opacity: reflective angles → opaque, transmission → transparent
+    float baseAlpha = mix(0.3, 0.92, depthFactor);
     float shoreBlend = smoothstep(0.0, uShoreBlendDistance, waterDepth);
-
-    // Final alpha
     float alpha = baseAlpha * shoreBlend;
-    alpha = mix(alpha, 1.0, fresnel * 0.3); // More opaque at grazing angles
-    alpha = mix(alpha, 1.0, totalFoam * 0.5); // Foam is more opaque
+    alpha = mix(alpha, 1.0, fresnel);
     alpha = clamp(alpha, 0.0, 0.98);
+
+    // Distance fog (matches terrain/foliage exponential squared fog)
+    float distanceToCamera = length(vWorldPos - uCameraPosition);
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    float fogFactor = clamp(distanceFog, 0.0, 1.0);
+    color = mix(color, uFogColor, fogFactor);
 
     gl_FragColor = vec4(color, alpha);
 }
@@ -341,44 +327,63 @@ export interface WaterConfig {
   fresnelPower: number;
   maxDepth: number;
   shoreBlendDistance: number;
-  normalStrength: number;
-  normalScale: Vector2;
-  normalSpeed: Vector2;
 
   // Foam
   foamIntensity: number;
   shoreFoamWidth: number;
 
-  // Refraction
-  refractionStrength: number;
+  // Reflection
+  reflectionEnabled: boolean;
+  reflectionStrength: number;
+  reflectionResolution: number;
+  reflectionBlur: number;
 }
 
 /**
  * Default configuration for realistic ocean water
  */
 export const DEFAULT_WATER_CONFIG: WaterConfig = {
-  shallowColor: new Color3(0.18, 0.55, 0.58),  // Slightly brighter for better visibility
-  deepColor: new Color3(0.02, 0.12, 0.22),
+  shallowColor: new Color3(0.04, 0.12, 0.15),  // Dark teal undertone (reflections dominate)
+  deepColor: new Color3(0.01, 0.04, 0.08),    // Near-black deep water
   fresnelColor: new Color3(0.45, 0.65, 0.75),  // More vibrant reflection color
 
   waves: [
-    { direction: new Vector2(1.0, 0.3), steepness: 0.02, wavelength: 25.0 },  // Gentle waves to avoid terrain clipping
-    { direction: new Vector2(0.3, 1.0), steepness: 0.015, wavelength: 15.0 },
-    { direction: new Vector2(-0.5, 0.7), steepness: 0.01, wavelength: 8.0 },
-    { direction: new Vector2(0.7, -0.4), steepness: 0.005, wavelength: 4.0 },
+    { direction: new Vector2(1.0, 0.3), steepness: 0.25, wavelength: 8.0 },
+    { direction: new Vector2(0.3, 1.0), steepness: 0.18, wavelength: 5.0 },
+    { direction: new Vector2(-0.5, 0.7), steepness: 0.12, wavelength: 3.0 },
+    { direction: new Vector2(0.7, -0.4), steepness: 0.06, wavelength: 1.5 },
   ],
 
-  fresnelPower: 3.5,  // Slightly less aggressive fresnel
-  maxDepth: 6.0,      // Better depth sensitivity
-  shoreBlendDistance: 0.4,  // Wider soft edge
-  normalStrength: 0.25,     // Gentler ripples
-  normalScale: new Vector2(0.05, 0.08),
-  normalSpeed: new Vector2(0.01, 0.012),  // Slower, more natural movement
+  fresnelPower: 2.0,
+  maxDepth: 6.0,
+  shoreBlendDistance: 0.6,
 
-  foamIntensity: 1.4,       // More visible foam
-  shoreFoamWidth: 1.2,      // Wider shore foam zone
+  foamIntensity: 1.4,
+  shoreFoamWidth: 1.2,
 
-  refractionStrength: 0.015,  // Subtle refraction
+  reflectionEnabled: true,
+  reflectionStrength: 0.90,
+  reflectionResolution: 256,
+  reflectionBlur: 4,
+};
+
+/**
+ * River water config (alias for default — flowing Gerstner waves)
+ */
+export const RIVER_WATER_CONFIG = DEFAULT_WATER_CONFIG;
+
+/**
+ * Lake water config — calm surface with gentle wind-driven ripples
+ * Steepness ~1/15 of river, shorter wavelengths for subtle surface variation
+ */
+export const LAKE_WATER_CONFIG: WaterConfig = {
+  ...DEFAULT_WATER_CONFIG,
+  waves: [
+    { direction: new Vector2(1.0, 0.3), steepness: 0.015, wavelength: 2.5 },
+    { direction: new Vector2(-0.4, 1.0), steepness: 0.012, wavelength: 1.8 },
+    { direction: new Vector2(0.7, -0.5), steepness: 0.008, wavelength: 1.2 },
+    { direction: new Vector2(-0.3, -0.8), steepness: 0.005, wavelength: 0.8 },
+  ],
 };
 
 /**
@@ -396,13 +401,13 @@ export class WaterSystem {
 
   private waterMesh: Mesh | null = null;
   private waterMaterial: ShaderMaterial | null = null;
-  private normalTexture: Texture | null = null;
-  private foamTexture: Texture | null = null;
   private heightmapTexture: Texture | null = null;
+  private dummyTexture: RawTexture | null = null;
 
   private config: WaterConfig;
   private waterLevel: number = 0;
   private startTime: number;
+  private mirrorTexture: MirrorTexture | null = null;
   private renderObserver: ReturnType<typeof this.scene.onBeforeRenderObservable.add> | null = null;
 
   constructor(scene: Scene, heightmap: Heightmap, config?: Partial<WaterConfig>) {
@@ -420,18 +425,18 @@ export class WaterSystem {
    * Load required textures
    */
   private loadTextures(): void {
-    // Normal map for water ripples
-    this.normalTexture = new Texture("/textures/waterbump.png", this.scene);
-    this.normalTexture.wrapU = Texture.WRAP_ADDRESSMODE;
-    this.normalTexture.wrapV = Texture.WRAP_ADDRESSMODE;
-
-    // Foam texture
-    this.foamTexture = new Texture("/textures/waterbump.png", this.scene);
-    this.foamTexture.wrapU = Texture.WRAP_ADDRESSMODE;
-    this.foamTexture.wrapV = Texture.WRAP_ADDRESSMODE;
-
-    // Create heightmap texture for depth fallback
+    // Heightmap texture for depth calculation (vertex + fragment)
     this.createHeightmapTexture();
+
+    // 1x1 dummy texture for WebGPU sampler binding (all declared samplers must be bound)
+    this.dummyTexture = new RawTexture(
+      new Uint8Array([0, 0, 0, 255]),
+      1, 1,
+      Constants.TEXTUREFORMAT_RGBA,
+      this.scene,
+      false, false,
+      Texture.NEAREST_SAMPLINGMODE
+    );
   }
 
   /**
@@ -487,6 +492,10 @@ export class WaterSystem {
 
     if (this.waterMaterial && this.heightmapTexture) {
       this.waterMaterial.setTexture("uHeightmap", this.heightmapTexture);
+      // Update height range and min height (may have changed from terrain editing)
+      const heightRange = this.heightmap.getMaxHeight() - this.heightmap.getMinHeight() || 1;
+      this.waterMaterial.setFloat("uHeightScale", heightRange);
+      this.waterMaterial.setFloat("uMinHeight", this.heightmap.getMinHeight());
     }
   }
 
@@ -529,6 +538,11 @@ export class WaterSystem {
       this.waterMesh.material = this.waterMaterial;
     }
 
+    // Setup mirror reflection if enabled
+    if (this.config.reflectionEnabled) {
+      this.createMirrorTexture();
+    }
+
     // Register update loop (store observer for cleanup)
     this.renderObserver = this.scene.onBeforeRenderObservable.add(() => this.update());
 
@@ -557,11 +571,13 @@ export class WaterSystem {
           "uSunDirection", "uSunColor", "uCameraPosition",
           "uShallowColor", "uDeepColor", "uFresnelColor",
           "uFresnelPower", "uMaxDepth", "uShoreBlendDistance",
-          "uNormalStrength", "uNormalScale", "uNormalSpeed",
           "uFoamIntensity", "uShoreFoamWidth",
-          "uTerrainScale", "uHeightScale",
+          "uTerrainScale", "uHeightScale", "uMinHeight",
+          "uReflectionStrength", "uReflectionEnabled",
+          "uFogColor", "uFogDensity",
+          "uWaveAngle",
         ],
-        samplers: ["uNormalMap", "uFoamTexture", "uHeightmap"],
+        samplers: ["uHeightmap", "uReflectionSampler"],
         needAlphaBlending: true,
       }
     );
@@ -571,20 +587,19 @@ export class WaterSystem {
     this.waterMaterial.backFaceCulling = false;
 
     // Set textures
-    if (this.normalTexture) {
-      this.waterMaterial.setTexture("uNormalMap", this.normalTexture);
-    }
-    if (this.foamTexture) {
-      this.waterMaterial.setTexture("uFoamTexture", this.foamTexture);
-    }
     if (this.heightmapTexture) {
       this.waterMaterial.setTexture("uHeightmap", this.heightmapTexture);
     }
+    // Always bind reflection sampler (WebGPU requires all declared samplers bound)
+    if (this.dummyTexture) {
+      this.waterMaterial.setTexture("uReflectionSampler", this.dummyTexture);
+    }
 
-    // Set heightmap uniforms
+    // Set heightmap uniforms (used in both vertex and fragment shaders)
     this.waterMaterial.setFloat("uTerrainScale", this.heightmap.getScale());
     const heightRange = this.heightmap.getMaxHeight() - this.heightmap.getMinHeight() || 1;
     this.waterMaterial.setFloat("uHeightScale", heightRange);
+    this.waterMaterial.setFloat("uMinHeight", this.heightmap.getMinHeight());
 
     // Set initial uniforms
     this.updateUniforms();
@@ -618,9 +633,6 @@ export class WaterSystem {
     this.waterMaterial.setFloat("uFresnelPower", cfg.fresnelPower);
     this.waterMaterial.setFloat("uMaxDepth", cfg.maxDepth);
     this.waterMaterial.setFloat("uShoreBlendDistance", cfg.shoreBlendDistance);
-    this.waterMaterial.setFloat("uNormalStrength", cfg.normalStrength);
-    this.waterMaterial.setVector2("uNormalScale", cfg.normalScale);
-    this.waterMaterial.setVector2("uNormalSpeed", cfg.normalSpeed);
 
     // Foam
     this.waterMaterial.setFloat("uFoamIntensity", cfg.foamIntensity);
@@ -632,6 +644,20 @@ export class WaterSystem {
 
     if (camera) {
       this.waterMaterial.setVector3("uCameraPosition", camera.position);
+    }
+
+    // Fog (matches terrain/foliage defaults)
+    this.waterMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+    this.waterMaterial.setFloat("uFogDensity", 0.008);
+
+    // Wave direction angle (default 0 = no rotation)
+    this.waterMaterial.setFloat("uWaveAngle", 0);
+
+    // Reflection
+    this.waterMaterial.setFloat("uReflectionStrength", cfg.reflectionStrength);
+    this.waterMaterial.setFloat("uReflectionEnabled", cfg.reflectionEnabled ? 1.0 : 0.0);
+    if (this.mirrorTexture && cfg.reflectionEnabled) {
+      this.waterMaterial.setTexture("uReflectionSampler", this.mirrorTexture);
     }
   }
 
@@ -649,6 +675,11 @@ export class WaterSystem {
     const camera = this.scene.activeCamera;
     if (camera) {
       this.waterMaterial.setVector3("uCameraPosition", camera.position);
+    }
+
+    // Update reflection mirror plane
+    if (this.mirrorTexture && this.config.reflectionEnabled) {
+      this.mirrorTexture.mirrorPlane = new Plane(0, -1, 0, this.waterLevel);
     }
   }
 
@@ -678,6 +709,126 @@ export class WaterSystem {
   }
 
   /**
+   * Create MirrorTexture for planar reflections
+   */
+  private createMirrorTexture(): void {
+    if (!this.config.reflectionEnabled) return;
+
+    if (this.mirrorTexture) {
+      this.mirrorTexture.dispose();
+      this.mirrorTexture = null;
+    }
+
+    const resolution = this.config.reflectionResolution;
+
+    this.mirrorTexture = new MirrorTexture(
+      "waterReflection",
+      resolution,
+      this.scene,
+      false
+    );
+
+    this.mirrorTexture.mirrorPlane = new Plane(0, -1, 0, this.waterLevel);
+
+    if (this.config.reflectionBlur > 0) {
+      this.mirrorTexture.adaptiveBlurKernel = this.config.reflectionBlur;
+    }
+
+    this.mirrorTexture.refreshRate = 2;
+    this.mirrorTexture.clearColor = new Color4(0.55, 0.7, 0.9, 1.0);
+
+    this.updateReflectionRenderList();
+
+    if (this.waterMaterial) {
+      this.waterMaterial.setTexture("uReflectionSampler", this.mirrorTexture);
+      this.waterMaterial.setFloat("uReflectionEnabled", 1.0);
+      this.waterMaterial.setFloat("uReflectionStrength", this.config.reflectionStrength);
+    }
+  }
+
+  /**
+   * Update which meshes appear in the reflection
+   */
+  updateReflectionRenderList(): void {
+    if (!this.mirrorTexture) return;
+
+    this.mirrorTexture.renderList = [];
+
+    for (const mesh of this.scene.meshes) {
+      if (mesh.name === "water_plane" || mesh.name === "unified_water") continue;
+      if (!mesh.isVisible || !mesh.isEnabled()) continue;
+
+      if (
+        mesh.name.startsWith("terrain_lod") ||
+        mesh.name.startsWith("rock_") ||
+        mesh.name.startsWith("foliage_") ||
+        mesh.name.startsWith("inst_") ||
+        mesh.name.includes("_var") ||
+        mesh.name.includes("_lod")
+      ) {
+        this.mirrorTexture.renderList.push(mesh);
+      }
+    }
+  }
+
+  /**
+   * Enable or disable reflections at runtime
+   */
+  setReflectionEnabled(enabled: boolean): void {
+    this.config.reflectionEnabled = enabled;
+    if (enabled) {
+      if (!this.mirrorTexture) {
+        this.createMirrorTexture();
+      }
+    } else {
+      if (this.mirrorTexture) {
+        this.mirrorTexture.dispose();
+        this.mirrorTexture = null;
+      }
+      if (this.waterMaterial) {
+        this.waterMaterial.setFloat("uReflectionEnabled", 0.0);
+        // Rebind dummy texture so WebGPU sampler stays valid
+        if (this.dummyTexture) {
+          this.waterMaterial.setTexture("uReflectionSampler", this.dummyTexture);
+        }
+      }
+    }
+  }
+
+  /**
+   * Set wave direction angle (radians)
+   * Rotates all wave directions uniformly — used for river flow direction
+   */
+  setWaveAngle(angleRadians: number): void {
+    if (this.waterMaterial) {
+      this.waterMaterial.setFloat("uWaveAngle", angleRadians);
+    }
+  }
+
+  /**
+   * Switch water type between river (flowing) and lake (calm)
+   * Applies the appropriate wave config and sets the direction angle
+   */
+  setWaterType(type: "river" | "lake", angleRadians: number): void {
+    if (type === "lake") {
+      this.config = { ...this.config, waves: LAKE_WATER_CONFIG.waves };
+    } else {
+      this.config = { ...this.config, waves: RIVER_WATER_CONFIG.waves };
+    }
+    this.updateUniforms();
+    this.setWaveAngle(angleRadians);
+  }
+
+  /**
+   * Sync fog settings with terrain/foliage (used by GamePreview for game mode fog)
+   */
+  syncFogSettings(fogColor: Color3, fogDensity: number): void {
+    if (!this.waterMaterial) return;
+    this.waterMaterial.setColor3("uFogColor", fogColor);
+    this.waterMaterial.setFloat("uFogDensity", fogDensity);
+  }
+
+  /**
    * Get water mesh for adding to render lists
    */
   getMesh(): Mesh | null {
@@ -701,6 +852,10 @@ export class WaterSystem {
       this.renderObserver = null;
     }
 
+    if (this.mirrorTexture) {
+      this.mirrorTexture.dispose();
+      this.mirrorTexture = null;
+    }
     if (this.waterMesh) {
       this.waterMesh.dispose();
       this.waterMesh = null;
@@ -716,17 +871,13 @@ export class WaterSystem {
    */
   disposeAll(): void {
     this.dispose();
-    if (this.normalTexture) {
-      this.normalTexture.dispose();
-      this.normalTexture = null;
-    }
-    if (this.foamTexture) {
-      this.foamTexture.dispose();
-      this.foamTexture = null;
-    }
     if (this.heightmapTexture) {
       this.heightmapTexture.dispose();
       this.heightmapTexture = null;
+    }
+    if (this.dummyTexture) {
+      this.dummyTexture.dispose();
+      this.dummyTexture = null;
     }
   }
 }
