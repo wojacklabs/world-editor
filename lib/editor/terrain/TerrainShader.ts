@@ -27,7 +27,8 @@ function loadTextureWithKTX2Fallback(
   const texture = new Texture(texturePath, scene);
   texture.wrapU = Texture.WRAP_ADDRESSMODE;
   texture.wrapV = Texture.WRAP_ADDRESSMODE;
-  
+  texture.anisotropicFilteringLevel = 16;
+
   return texture;
 }
 
@@ -48,6 +49,7 @@ uniform vec3 cameraPosition;
 // Displacement uniforms
 uniform sampler2D uSplatMap;
 uniform sampler2D uRockDisp;
+uniform sampler2D uGrassDisp;
 uniform float uTextureScale;
 uniform float uDispStrength;
 uniform float uTerrainSize;
@@ -63,19 +65,23 @@ varying float vCameraDistance;
 varying mat3 vTBN;
 
 void main() {
-    // Sample splat map to get rock weight (blue channel)
+    // Sample splat map to get material weights
     vec4 splat = texture2D(uSplatMap, uv);
     float rockWeight = splat.b;
-    
+    float grassWeight = splat.r;
+
     // Calculate texture UV for displacement sampling (same as fragment shader)
     vec2 texUV = position.xz * uTextureScale;
-    
-    // Sample displacement map
-    float dispValue = texture2D(uRockDisp, texUV).r;
-    
-    // Apply displacement only for rock areas
+
+    // Sample displacement maps
+    float rockDispValue = texture2D(uRockDisp, texUV).r;
+    float grassDispValue = texture2D(uGrassDisp, texUV).r;
+
+    // Apply displacement for rock and grass areas
     // dispValue is 0-1, center at 0.5 for balanced displacement
-    float displacement = (dispValue - 0.5) * uDispStrength * rockWeight;
+    // Grass displacement at 50% strength (smoother terrain)
+    float displacement = (rockDispValue - 0.5) * uDispStrength * rockWeight +
+                         (grassDispValue - 0.5) * uDispStrength * 0.5 * grassWeight;
     
     vec3 displacedPosition = position + vec3(0.0, displacement, 0.0);
     
@@ -131,6 +137,10 @@ uniform sampler2D uRockARM;  // AO (R), Roughness (G), Metallic (B)
 uniform sampler2D uDirtDiffuse;
 uniform sampler2D uDirtNormal;
 uniform sampler2D uDirtDisp;
+uniform sampler2D uGrassDiffuse;
+uniform sampler2D uGrassNormal;
+uniform sampler2D uGrassARM;  // AO (R), Roughness (G), Metallic (B)
+uniform sampler2D uGrassDisp;
 uniform float uTextureScale;
 uniform float uNormalStrength;
 
@@ -281,6 +291,119 @@ vec2 getDistortedUV(vec2 pos) {
     
     // Apply distortion
     return baseUV + noise1 + noise2;
+}
+
+// =============================================================================
+// HEX TILING SYSTEM
+// Eliminates grid-like texture repetition by sampling from two overlapping
+// grids with per-cell random UV rotation and smooth blending.
+// Reference: "Procedural Stochastic Textures by Tiling and Blending" (2018)
+// =============================================================================
+
+struct HexUVData {
+    vec2 uv1;      // Rotated UV from grid A
+    vec2 uv2;      // Rotated UV from grid B
+    float blend;   // 0.0 = uv2, 1.0 = uv1
+    float rot1;    // Grid A rotation angle (for normal map correction)
+    float rot2;    // Grid B rotation angle
+};
+
+float hexCellRand(vec2 cell) {
+    return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+HexUVData computeHexUV(vec2 uv) {
+    HexUVData h;
+
+    // Two overlapping grids offset by half cell create diamond/hex boundary
+    // Grid A: cell centers at (n+0.5, m+0.5)
+    // Grid B: cell centers at (n, m) — integers
+    vec2 centerA = floor(uv) + 0.5;
+    vec2 centerB = floor(uv + 0.5);
+
+    // Squared distance to each cell center
+    vec2 dA = uv - centerA;
+    vec2 dB = uv - centerB;
+    float distA = dot(dA, dA);
+    float distB = dot(dB, dB);
+
+    // Per-cell random rotation (full 360°)
+    h.rot1 = hexCellRand(centerA) * 6.28318;
+    h.rot2 = hexCellRand(centerB) * 6.28318;
+
+    // Rotate UVs
+    float c1 = cos(h.rot1), s1 = sin(h.rot1);
+    float c2 = cos(h.rot2), s2 = sin(h.rot2);
+    h.uv1 = vec2(uv.x * c1 - uv.y * s1, uv.x * s1 + uv.y * c1);
+    h.uv2 = vec2(uv.x * c2 - uv.y * s2, uv.x * s2 + uv.y * c2);
+
+    // Smooth blend: closer to grid A center → more weight on uv1
+    h.blend = smoothstep(-0.12, 0.12, distB - distA);
+
+    return h;
+}
+
+// Hex-tiled rock texture sampling (direct uniform access — no sampler2D params for WebGPU)
+vec3 hexRockDiffuse(HexUVData h) {
+    return mix(texture2D(uRockDiffuse, h.uv2).rgb, texture2D(uRockDiffuse, h.uv1).rgb, h.blend);
+}
+
+vec3 hexRockARM(HexUVData h) {
+    return mix(texture2D(uRockARM, h.uv2).rgb, texture2D(uRockARM, h.uv1).rgb, h.blend);
+}
+
+float hexRockDisp(HexUVData h) {
+    return mix(texture2D(uRockDisp, h.uv2).r, texture2D(uRockDisp, h.uv1).r, h.blend);
+}
+
+// Hex-tiled rock normal with tangent-space rotation correction
+vec3 hexRockNormal(HexUVData h) {
+    vec3 n1raw = texture2D(uRockNormal, h.uv1).rgb;
+    vec3 n2raw = texture2D(uRockNormal, h.uv2).rgb;
+
+    vec2 n1xy = (n1raw.rg * 2.0 - 1.0) * uNormalStrength;
+    vec2 n2xy = (n2raw.rg * 2.0 - 1.0) * uNormalStrength;
+
+    // Counter-rotate XY to undo UV rotation (rotate by -angle)
+    float c1 = cos(h.rot1), s1 = sin(h.rot1);
+    float c2 = cos(h.rot2), s2 = sin(h.rot2);
+    vec2 n1r = vec2(n1xy.x * c1 + n1xy.y * s1, -n1xy.x * s1 + n1xy.y * c1);
+    vec2 n2r = vec2(n2xy.x * c2 + n2xy.y * s2, -n2xy.x * s2 + n2xy.y * c2);
+
+    vec3 n1 = vec3(n1r, n1raw.b);
+    vec3 n2 = vec3(n2r, n2raw.b);
+    return normalize(mix(n2, n1, h.blend));
+}
+
+// Hex-tiled grass texture sampling (direct uniform access — no sampler2D params for WebGPU)
+vec3 hexGrassDiffuse(HexUVData h) {
+    return mix(texture2D(uGrassDiffuse, h.uv2).rgb, texture2D(uGrassDiffuse, h.uv1).rgb, h.blend);
+}
+
+vec3 hexGrassARM(HexUVData h) {
+    return mix(texture2D(uGrassARM, h.uv2).rgb, texture2D(uGrassARM, h.uv1).rgb, h.blend);
+}
+
+vec3 hexGrassNormal(HexUVData h) {
+    vec3 n1raw = texture2D(uGrassNormal, h.uv1).rgb;
+    vec3 n2raw = texture2D(uGrassNormal, h.uv2).rgb;
+
+    vec2 n1xy = (n1raw.rg * 2.0 - 1.0) * uNormalStrength;
+    vec2 n2xy = (n2raw.rg * 2.0 - 1.0) * uNormalStrength;
+
+    // Counter-rotate XY to undo UV rotation (rotate by -angle)
+    float c1 = cos(h.rot1), s1 = sin(h.rot1);
+    float c2 = cos(h.rot2), s2 = sin(h.rot2);
+    vec2 n1r = vec2(n1xy.x * c1 + n1xy.y * s1, -n1xy.x * s1 + n1xy.y * c1);
+    vec2 n2r = vec2(n2xy.x * c2 + n2xy.y * s2, -n2xy.x * s2 + n2xy.y * c2);
+
+    vec3 n1 = vec3(n1r, n1raw.b);
+    vec3 n2 = vec3(n2r, n2raw.b);
+    return normalize(mix(n2, n1, h.blend));
+}
+
+float hexGrassDisp(HexUVData h) {
+    return mix(texture2D(uGrassDisp, h.uv2).r, texture2D(uGrassDisp, h.uv1).r, h.blend);
 }
 
 // Triplanar UV coordinates for steep surfaces
@@ -609,7 +732,10 @@ void main() {
 
     // Calculate distorted UV for flat surfaces
     vec2 texUV = getDistortedUV(worldPos);
-    
+
+    // Compute hex tiling UVs for rock (eliminates grid repetition)
+    HexUVData hexUV = computeHexUV(texUV);
+
     // Calculate triplanar UVs for steep surfaces (cliffs)
     vec3 geometryNormal = normalize(vNormal);
     TriplanarUVs triUVs = calculateTriplanarUVs(vPosition, geometryNormal, uTextureScale);
@@ -619,12 +745,16 @@ void main() {
     float triplanarBlend = smoothstep(0.5, 0.7, vSlope);
 
     // Generate detailed textures for each material
-    vec3 grassColor = grassPattern(worldPos, uGrassColor);
+    vec3 grassColor = hexGrassDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
+    vec3 grassARM = hexGrassARM(hexUV);
+    float grassAO = grassARM.r;
+    float grassRoughness = grassARM.g;
+    float grassHeight = hexGrassDisp(hexUV);
     vec3 dirtColor = dirtPattern(texUV, worldPos, uDirtColor);
     vec3 sandColor = sandPattern(worldPos, uSandColor);
     
-    // Rock color: blend between planar and triplanar based on slope
-    vec3 rockColorPlanar = rockPattern(texUV, worldPos, uRockColor);
+    // Rock color: blend between hex-tiled planar and triplanar based on slope
+    vec3 rockColorPlanar = hexRockDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
     // Inline triplanar rock diffuse sampling (avoid function calls for WebGPU compatibility)
     vec3 rockColorTriplanar =
         texture2D(uRockDiffuse, triUVs.uvX).rgb * triUVs.weights.x +
@@ -636,7 +766,7 @@ void main() {
     vec3 rockColor = mix(rockColorPlanar, rockColorTriplanar, triplanarBlend);
 
     // Get texture data for rock (blend planar/triplanar for ARM as well)
-    vec3 rockARMPlanar = getRockARM(texUV);
+    vec3 rockARMPlanar = hexRockARM(hexUV);
     // Inline triplanar rock ARM sampling
     vec3 rockARMTriplanar =
         texture2D(uRockARM, triUVs.uvX).rgb * triUVs.weights.x +
@@ -651,7 +781,7 @@ void main() {
     float dirtHeight = getDirtHeight(texUV);
 
     // Rock height: blend planar/triplanar
-    float rockHeightPlanar = getRockHeight(texUV);
+    float rockHeightPlanar = hexRockDisp(hexUV);
     // Inline triplanar rock displacement sampling
     float rockHeightTriplanar =
         texture2D(uRockDisp, triUVs.uvX).r * triUVs.weights.x +
@@ -682,8 +812,9 @@ void main() {
     // Lighting - apply normal maps for textured materials
     
     // Get tangent-space normals from textures (planar)
-    vec3 rockNormalPlanar = getRockNormal(texUV);
+    vec3 rockNormalPlanar = hexRockNormal(hexUV);
     vec3 dirtNormalTex = getDirtNormal(texUV);
+    vec3 grassNormalTex = hexGrassNormal(hexUV);
 
     // Inline triplanar normal sampling for rock on steep surfaces (WebGPU compatibility)
     vec3 triNormalX = texture2D(uRockNormal, triUVs.uvX).rgb * 2.0 - 1.0;
@@ -705,20 +836,22 @@ void main() {
     // Transform planar normals from tangent space to world space using TBN matrix
     vec3 rockPerturbedPlanar = vTBN * rockNormalPlanar;
     vec3 dirtPerturbedNormal = vTBN * dirtNormalTex;
-    
+    vec3 grassPerturbedNormal = vTBN * grassNormalTex;
+
     // Blend planar/triplanar rock normal based on slope
     vec3 rockPerturbedNormal = mix(rockPerturbedPlanar, rockNormalTriplanar, triplanarBlend);
-    
-    // Blend normals based on material weights (no auto-slope rock)
-    float rockWeight = normalizedSplat.b;
-    rockWeight = clamp(rockWeight, 0.0, 1.0);
+
+    // Blend normals based on material weights
+    float rockWeight = clamp(normalizedSplat.b, 0.0, 1.0);
     float dirtWeight = normalizedSplat.g;
-    
+    float grassWeight = normalizedSplat.r;
+
     // Combine perturbed normals
     vec3 perturbedNormal = normalize(
-        geometryNormal * (1.0 - rockWeight - dirtWeight) +
+        geometryNormal * (1.0 - rockWeight - dirtWeight - grassWeight) +
         rockPerturbedNormal * rockWeight +
-        dirtPerturbedNormal * dirtWeight
+        dirtPerturbedNormal * dirtWeight +
+        grassPerturbedNormal * grassWeight
     );
     
     // Apply macro normal variation for world-scale undulations
@@ -758,18 +891,28 @@ void main() {
 
     // Specular - roughness controls shininess (lower roughness = shinier)
     vec3 halfVector = normalize(uSunDirection + vViewDirection);
-    float smoothness = 1.0 - rockRoughness;  // Convert roughness to smoothness
-    float specPower = mix(16.0, 128.0, smoothness);  // Rougher = wider highlight
-    float specIntensity = mix(0.02, 0.15, smoothness);  // Rougher = dimmer highlight
-    float specular = pow(max(dot(normal, halfVector), 0.0), specPower) * specIntensity;
-    // Apply specular only for rock areas
-    specular *= rockWeight;
+    float NdotH = max(dot(normal, halfVector), 0.0);
+
+    // Rock specular (from rock ARM roughness)
+    float rockSmoothness = 1.0 - rockRoughness;
+    float rockSpecPower = mix(16.0, 128.0, rockSmoothness);
+    float rockSpecIntensity = mix(0.02, 0.15, rockSmoothness);
+    float rockSpecular = pow(NdotH, rockSpecPower) * rockSpecIntensity;
+
+    // Grass specular (from grass ARM roughness)
+    float grassSmoothness = 1.0 - grassRoughness;
+    float grassSpecPower = mix(16.0, 128.0, grassSmoothness);
+    float grassSpecIntensity = mix(0.02, 0.15, grassSmoothness);
+    float grassSpecular = pow(NdotH, grassSpecPower) * grassSpecIntensity;
+
+    // Blend specular by material weight
+    float specular = rockSpecular * rockWeight + grassSpecular * grassWeight;
 
     // Ambient occlusion - combine geometric AO with texture-based AO
     float geometricAO = 0.8 + 0.2 * smoothstep(-5.0, 10.0, vHeight);
     geometricAO *= (1.0 - vSlope * 0.25);
-    // Blend in texture AO for rock areas (texture AO provides crevice detail)
-    float ao = mix(geometricAO, geometricAO * rockAO, rockWeight);
+    // Blend in texture AO for rock/grass areas (texture AO provides crevice detail)
+    float ao = geometricAO * mix(1.0, rockAO, rockWeight) * mix(1.0, grassAO, grassWeight);
 
     // Debug modes 15-18 (lighting related)
     if (uDebugMode >= 15 && uDebugMode <= 18) {
@@ -805,7 +948,7 @@ void main() {
 
     // 3. Height fog (concentrate fog at lower altitudes)
     float heightFactor = exp(-max(0.0, vPosition.y - uFogHeightFalloff) * uFogHeightDensity);
-    float heightFog = heightFactor * 0.3;  // Max 30% additional fog from height
+    float heightFog = heightFactor * 0.15 * smoothstep(0.0, 30.0, distanceToCamera);
 
     // 4. Final fog factor
     float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
@@ -925,6 +1068,10 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
         "uDirtDiffuse",
         "uDirtNormal",
         "uDirtDisp",
+        "uGrassDiffuse",
+        "uGrassNormal",
+        "uGrassARM",
+        "uGrassDisp",
       ],
     }
   );
@@ -956,10 +1103,16 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
   material.setTexture("uDirtNormal", loadTextureWithKTX2Fallback("/textures/dirt_normal", scene, "jpg"));
   material.setTexture("uDirtDisp", loadTextureWithKTX2Fallback("/textures/dirt_disp", scene, "jpg"));
 
+  // Load grass textures (coastal grass)
+  material.setTexture("uGrassDiffuse", loadTextureWithKTX2Fallback("/textures/grass_diff", scene, "jpg"));
+  material.setTexture("uGrassNormal", loadTextureWithKTX2Fallback("/textures/grass_nor", scene, "jpg"));
+  material.setTexture("uGrassARM", loadTextureWithKTX2Fallback("/textures/grass_arm", scene, "jpg"));
+  material.setTexture("uGrassDisp", loadTextureWithKTX2Fallback("/textures/grass_disp", scene, "jpg"));
+
   // Texture tiling scale (higher = smaller texture, more repeats)
   material.setFloat("uTextureScale", 1.0);  // 1.0 = texture repeats every 1 world unit (matches original texture size)
   material.setFloat("uNormalStrength", 1.5);  // Normal map intensity (1.0 = standard, higher = more depth)
-  material.setFloat("uDispStrength", 0.5);  // Vertex displacement strength for rock areas
+  material.setFloat("uDispStrength", 0.2);  // Vertex displacement strength for rock areas
 
   // Fog settings
   material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));

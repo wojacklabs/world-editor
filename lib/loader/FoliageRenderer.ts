@@ -472,7 +472,7 @@ export class FoliageRenderer {
 
     // Set grass vertex color
     for (const blade of blades) {
-      setMeshVertexColor(blade, 0.45, 0.75, 0.3);
+      setMeshVertexColor(blade, 0.35, 0.45, 0.22);  // Olive green (matching grass biome texture)
     }
 
     const merged = Mesh.MergeMeshes(blades, true, true, undefined, false, true);

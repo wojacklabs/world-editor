@@ -1342,12 +1342,10 @@ export class EditorEngine {
     this.terrainMesh = new TerrainMesh(this.scene, this.heightmap);
     this.terrainMesh.create();
 
-    // Load splat map data
+    // Load splat map data (resample if saved resolution differs from current splatmap)
     const splatMap = this.terrainMesh.getSplatMap();
-    const splatData = splatMap.getData();
-    splatData.set(splatmapData);
-    const waterMask = splatMap.getWaterMask();
-    waterMask.set(waterMaskData);
+    const srcSplatRes = Math.round(Math.sqrt(splatmapData.length / 4));
+    splatMap.loadFromData(splatmapData, waterMaskData, srcSplatRes);
 
     // Update textures
     this.terrainMesh.updateSplatTexture();

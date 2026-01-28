@@ -12,6 +12,7 @@ import {
   Effect,
   VertexBuffer,
   Geometry,
+  Texture,
 } from "@babylonjs/core";
 import { Heightmap } from "../terrain/Heightmap";
 import { SplatMap } from "../terrain/SplatMap";
@@ -229,6 +230,8 @@ uniform vec3 uSunColor;
 uniform float uAmbient;
 uniform vec3 uDiffuseColor;
 uniform vec3 uSpecularColor;
+uniform sampler2D rockTexture;
+uniform float textureScale;
 
 // Fog uniforms (matching terrain/grass)
 uniform vec3 uFogColor;
@@ -239,6 +242,18 @@ uniform float uFogHeightDensity;
 void main() {
     vec3 normal = normalize(vNormal);
 
+    // Triplanar texture sampling (world-space projection)
+    vec3 blending = abs(normal);
+    blending = blending / (blending.x + blending.y + blending.z);
+
+    vec3 texX = texture2D(rockTexture, vWorldPosition.yz * textureScale).rgb;
+    vec3 texY = texture2D(rockTexture, vWorldPosition.xz * textureScale).rgb;
+    vec3 texZ = texture2D(rockTexture, vWorldPosition.xy * textureScale).rgb;
+    vec3 texColor = texX * blending.x + texY * blending.y + texZ * blending.z;
+
+    // Blend texture with diffuse color (70% texture, 30% base)
+    vec3 albedo = mix(uDiffuseColor, texColor, 0.7);
+
     // Diffuse lighting
     float NdotL = max(dot(normal, uSunDirection), 0.0);
     float diffuse = NdotL * 0.6 + 0.4;
@@ -248,18 +263,18 @@ void main() {
     vec3 halfVec = normalize(uSunDirection + viewDir);
     float specular = pow(max(dot(normal, halfVec), 0.0), 32.0) * 0.15;
 
-    vec3 color = uDiffuseColor * (uAmbient + diffuse * uSunColor);
+    vec3 color = albedo * (uAmbient + diffuse * uSunColor);
     color += uSpecularColor * specular * uSunColor;
 
-    // ========== Fog System (matching terrain/grass) ==========
+    // ========== Fog System (matching terrain) ==========
     float distanceToCamera = length(vWorldPosition - uCameraPosition);
 
     // Distance fog (exponential squared)
     float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
 
-    // Height fog (concentrate fog at lower altitudes)
+    // Height fog (distance-dependent, max 15%)
     float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
-    float heightFog = heightFactor * 0.3;
+    float heightFog = heightFactor * 0.15 * smoothstep(0.0, 30.0, distanceToCamera);
 
     // Final fog factor
     float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
@@ -375,40 +390,86 @@ uniform vec3 uCameraPosition;
 // Fog uniforms
 uniform vec3 uFogColor;
 uniform float uFogDensity;
-uniform float uFogHeightFalloff;
-uniform float uFogHeightDensity;
+
+// Noise functions (matching propThinWindFragmentShader)
+float hash3D(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+float noise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash3D(i);
+    float n100 = hash3D(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash3D(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash3D(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash3D(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash3D(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash3D(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash3D(i + vec3(1.0, 1.0, 1.0));
+    vec4 n_z0 = vec4(n000, n100, n010, n110);
+    vec4 n_z1 = vec4(n001, n101, n011, n111);
+    vec4 n_zz = mix(n_z0, n_z1, f.z);
+    vec2 n_y = mix(n_zz.xy, n_zz.zw, f.y);
+    return mix(n_y.x, n_y.y, f.x);
+}
+
+float fbm(vec3 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    for (int i = 0; i < 3; i++) {
+        value += amplitude * noise3D(p);
+        p *= 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
+}
 
 void main() {
     vec3 normal = normalize(vNormal);
-    float NdotL = max(dot(normal, uSunDirection), 0.0);
-    float diffuse = NdotL * 0.6 + 0.4;
+    vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
 
-    // Darken base, lighten tips
-    float heightGradient = mix(0.7, 1.1, vHeight);
+    // Use vertex color (matching propThinWindFragmentShader)
+    vec3 meshColor = vColor.rgb;
 
-    vec3 color = vColor.rgb * heightGradient * (uAmbient + diffuse * uSunColor);
+    // Color variation via FBM noise (matching propThinWindFragmentShader)
+    float colorNoise = fbm(vWorldPosition * 2.0);
+    vec3 color = mix(meshColor, meshColor * 0.8, colorNoise * 0.3);
 
-    // ========== Fog System (matching TerrainShader) ==========
+    // Height-based color: tips lighter (matching propThinWindFragmentShader)
+    float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;
+    color = mix(color * 0.85, color * 1.1, vHeight * isLeaf);
+
+    // Half-Lambert diffuse (matching propThinWindFragmentShader)
+    float NdotL = dot(normal, uSunDirection);
+    float halfLambert = NdotL * 0.5 + 0.5;
+    halfLambert = halfLambert * halfLambert;
+
+    // Rim lighting (matching propThinWindFragmentShader)
+    float rimFactor = 1.0 - max(dot(normal, viewDir), 0.0);
+    rimFactor = pow(rimFactor, 3.0) * 0.08;
+
+    // Subsurface scattering approximation (matching propThinWindFragmentShader)
+    float sss = max(0.0, dot(-viewDir, uSunDirection)) * vHeight * 0.15;
+
+    // Final lighting (matching propThinWindFragmentShader)
+    float diffuse = halfLambert * 0.6 + 0.4;
+    vec3 ambient = vec3(uAmbient);
+    vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
+
+    color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
+
+    // Fog (simple distance fog, matching props shader)
     float distanceToCamera = length(vWorldPosition - uCameraPosition);
+    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Distance fog (exponential squared)
-    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-
-    // Height fog (concentrate fog at lower altitudes)
-    float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
-    float heightFog = heightFactor * 0.3;
-
-    // Final fog factor
-    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
-
-    // Apply fog
-    color = mix(color, uFogColor, fogFactor);
-
-    // Tone mapping and gamma (terrain과 동일)
+    // Tone mapping and gamma (matching terrain/props shaders)
     color = color / (color + vec3(1.0)) * 1.1;
     color = pow(color, vec3(0.95));
 
-    // Simple alpha test for grass edges
+    // Alpha test for grass edges
     if (vColor.a < 0.1) discard;
 
     gl_FragColor = vec4(color, 1.0);
@@ -857,7 +918,7 @@ export class FoliageSystem {
 
     // Set bright green vertex color for each blade before merging
     for (const blade of blades) {
-      setMeshVertexColor(blade, 0.45, 0.75, 0.3);  // Bright grass green
+      setMeshVertexColor(blade, 0.35, 0.45, 0.22);  // Olive green (matching grass biome texture)
     }
 
     const merged = Mesh.MergeMeshes(blades, true, true, undefined, false, true);
@@ -896,22 +957,22 @@ export class FoliageSystem {
       // Bottom left
       positions.push(-bladeWidth * cos, 0, -bladeWidth * sin);
       normals.push(sin, 0, -cos);
-      colors.push(0.25, 0.4, 0.15, 1.0);  // darker at base
+      colors.push(0.22, 0.30, 0.14, 1.0);  // darker olive at base
 
       // Bottom right
       positions.push(bladeWidth * cos, 0, bladeWidth * sin);
       normals.push(sin, 0, -cos);
-      colors.push(0.25, 0.4, 0.15, 1.0);
+      colors.push(0.22, 0.30, 0.14, 1.0);
 
       // Top right
       positions.push(bladeWidth * cos * 0.3, bladeHeight, bladeWidth * sin * 0.3);
       normals.push(sin, 0.2, -cos);
-      colors.push(0.4, 0.6, 0.25, 1.0);  // lighter at tip
+      colors.push(0.35, 0.45, 0.22, 1.0);  // olive green at tip
 
       // Top left
       positions.push(-bladeWidth * cos * 0.3, bladeHeight, -bladeWidth * sin * 0.3);
       normals.push(sin, 0.2, -cos);
-      colors.push(0.4, 0.6, 0.25, 1.0);
+      colors.push(0.35, 0.45, 0.22, 1.0);
 
       // Two triangles only (no back faces - backFaceCulling=false handles it)
       indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
@@ -955,7 +1016,9 @@ export class FoliageSystem {
           "uFogDensity",
           "uFogHeightFalloff",
           "uFogHeightDensity",
+          "textureScale",
         ],
+        samplers: ["rockTexture"],
       }
     );
 
@@ -967,7 +1030,15 @@ export class FoliageSystem {
     this.rockMaterial.setColor3("uDiffuseColor", new Color3(0.5, 0.48, 0.45));
     this.rockMaterial.setColor3("uSpecularColor", new Color3(0.1, 0.1, 0.1));
 
-    // Fog uniforms (matching terrain/grass defaults)
+    // Rock diffuse texture for triplanar mapping
+    const rockTex = new Texture("/textures/rock_diff.jpg", this.scene);
+    rockTex.wrapU = Texture.WRAP_ADDRESSMODE;
+    rockTex.wrapV = Texture.WRAP_ADDRESSMODE;
+    rockTex.anisotropicFilteringLevel = 8;
+    this.rockMaterial.setTexture("rockTexture", rockTex);
+    this.rockMaterial.setFloat("textureScale", 1.0);
+
+    // Fog uniforms (matching terrain defaults)
     this.rockMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
     this.rockMaterial.setFloat("uFogDensity", 0.008);
     this.rockMaterial.setFloat("uFogHeightFalloff", 5.0);
@@ -1003,8 +1074,6 @@ export class FoliageSystem {
           "uAmbient",
           "uFogColor",
           "uFogDensity",
-          "uFogHeightFalloff",
-          "uFogHeightDensity",
         ],
         needAlphaBlending: false,
       }
@@ -1021,8 +1090,6 @@ export class FoliageSystem {
     // Default fog values (will be synced with scene fog when game mode is enabled)
     this.grassMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
     this.grassMaterial.setFloat("uFogDensity", 0.008);
-    this.grassMaterial.setFloat("uFogHeightFalloff", 5.0);
-    this.grassMaterial.setFloat("uFogHeightDensity", 0.1);
 
     // LOD far distance
     this.grassMaterial.setFloat("uLodFar", this.lodDistances.far);
@@ -1127,8 +1194,6 @@ export class FoliageSystem {
     if (this.grassMaterial) {
       this.grassMaterial.setColor3("uFogColor", fogColor);
       this.grassMaterial.setFloat("uFogDensity", fogDensity);
-      this.grassMaterial.setFloat("uFogHeightFalloff", fogHeightFalloff);
-      this.grassMaterial.setFloat("uFogHeightDensity", fogHeightDensity);
     }
 
     // Rock material also uses custom shader now

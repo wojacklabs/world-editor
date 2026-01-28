@@ -225,10 +225,11 @@ export class SplatMap {
 
           const idx = (z * this.resolution + x) * 4;
 
-          // Increase target channel
-          this.data[idx + channel] = Math.min(1, this.data[idx + channel] + paintStrength);
-
-          // Normalize all channels
+          // Lerp each channel toward target (1.0 for painted, 0.0 for others)
+          for (let c = 0; c < 4; c++) {
+            const target = c === channel ? 1.0 : 0.0;
+            this.data[idx + c] += (target - this.data[idx + c]) * paintStrength;
+          }
           this.normalize(idx);
           modified = true;
         }
@@ -307,6 +308,54 @@ export class SplatMap {
       this.waterMask.fill(0);
       this.wetnessMask.fill(0);
       this.roadMask.fill(0);
+    }
+  }
+
+  /**
+   * Load splatmap and water mask data, resampling with bilinear interpolation
+   * if the source resolution differs from the current resolution.
+   */
+  loadFromData(srcSplatData: Float32Array, srcWaterMask: Float32Array, srcResolution: number): void {
+    if (srcResolution === this.resolution) {
+      this.data.set(srcSplatData);
+      this.waterMask.set(srcWaterMask);
+      return;
+    }
+
+    const dst = this.resolution;
+    const src = srcResolution;
+    const scale = (src - 1) / (dst - 1);
+
+    for (let z = 0; z < dst; z++) {
+      for (let x = 0; x < dst; x++) {
+        const srcX = x * scale;
+        const srcZ = z * scale;
+        const x0 = Math.floor(srcX);
+        const z0 = Math.floor(srcZ);
+        const x1 = Math.min(x0 + 1, src - 1);
+        const z1 = Math.min(z0 + 1, src - 1);
+        const fx = srcX - x0;
+        const fz = srcZ - z0;
+
+        const dstIdx = (z * dst + x) * 4;
+
+        // Bilinear interpolation for 4-channel splatmap
+        for (let c = 0; c < 4; c++) {
+          const v00 = srcSplatData[(z0 * src + x0) * 4 + c];
+          const v10 = srcSplatData[(z0 * src + x1) * 4 + c];
+          const v01 = srcSplatData[(z1 * src + x0) * 4 + c];
+          const v11 = srcSplatData[(z1 * src + x1) * 4 + c];
+          this.data[dstIdx + c] = (v00 * (1 - fx) + v10 * fx) * (1 - fz) + (v01 * (1 - fx) + v11 * fx) * fz;
+        }
+
+        // Bilinear interpolation for water mask
+        const mIdx = z * dst + x;
+        const w00 = srcWaterMask[z0 * src + x0];
+        const w10 = srcWaterMask[z0 * src + x1];
+        const w01 = srcWaterMask[z1 * src + x0];
+        const w11 = srcWaterMask[z1 * src + x1];
+        this.waterMask[mIdx] = (w00 * (1 - fx) + w10 * fx) * (1 - fz) + (w01 * (1 - fx) + w11 * fx) * fz;
+      }
     }
   }
 
