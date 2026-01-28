@@ -90,6 +90,8 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform sampler2D rockTexture;
+uniform float textureScale;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -138,14 +140,25 @@ float fbm(vec3 p) {
 void main() {
     vec3 normal = normalize(vNormal);
 
-    // Color variation (per-pixel)
-    float colorNoise = fbm(vPosition * 2.0);
-    vec3 color = mix(baseColor, detailColor, colorNoise * 0.5);
+    // Triplanar texture sampling (world-space projection)
+    vec3 blending = abs(normal);
+    blending = blending / (blending.x + blending.y + blending.z);
 
-    // Half-Lambert diffuse
-    float NdotL = dot(normal, sunDirection);
-    float halfLambert = NdotL * 0.5 + 0.5;
-    halfLambert = halfLambert * halfLambert;
+    vec3 texX = texture2D(rockTexture, vPosition.yz * textureScale).rgb;
+    vec3 texY = texture2D(rockTexture, vPosition.xz * textureScale).rgb;
+    vec3 texZ = texture2D(rockTexture, vPosition.xy * textureScale).rgb;
+    vec3 texColor = texX * blending.x + texY * blending.y + texZ * blending.z;
+
+    // Procedural color variation
+    float colorNoise = fbm(vPosition * 2.0);
+    vec3 procColor = mix(baseColor, detailColor, colorNoise * 0.5);
+
+    // Blend: 70% texture, 30% procedural
+    vec3 color = mix(procColor, texColor, 0.7);
+
+    // Diffuse lighting (standard Lambert, matching terrain)
+    float NdotL = max(dot(normal, sunDirection), 0.0);
+    float diffuse = NdotL * 0.6 + 0.4;
 
     // Rim lighting
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
@@ -155,7 +168,6 @@ void main() {
     float ao = 0.5 + 0.5 * normal.y;
 
     // Final lighting
-    float diffuse = halfLambert * 0.6 + 0.4;
     vec3 ambient = vec3(ambientIntensity) * ao;
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.85, 1.0);
 
@@ -164,6 +176,10 @@ void main() {
     // Fog
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+    // Tone mapping (matching terrain shader)
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
 
     gl_FragColor = vec4(color, 1.0);
 }
@@ -265,6 +281,8 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform sampler2D dirtTexture;
+uniform float dirtTextureScale;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -325,6 +343,17 @@ void main() {
     float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;
     color = mix(color * 0.85, color * 1.1, tipFactor * isLeaf);
 
+    // Triplanar dirt texture for bark (R > G = brown = bark)
+    // Always sample outside control flow for WebGPU/WGSL compatibility
+    vec3 barkBlend = abs(normal);
+    barkBlend = barkBlend / (barkBlend.x + barkBlend.y + barkBlend.z);
+    vec3 dirtTexX = texture2D(dirtTexture, vPosition.yz * dirtTextureScale).rgb;
+    vec3 dirtTexY = texture2D(dirtTexture, vPosition.xz * dirtTextureScale).rgb;
+    vec3 dirtTexZ = texture2D(dirtTexture, vPosition.xy * dirtTextureScale).rgb;
+    vec3 dirtSample = dirtTexX * barkBlend.x + dirtTexY * barkBlend.y + dirtTexZ * barkBlend.z;
+    float isBark = step(vColor.g, vColor.r);  // 1.0 if R > G (bark), 0.0 otherwise
+    color = mix(color, mix(color, dirtSample, 0.4), isBark);
+
     // Half-Lambert diffuse
     float NdotL = dot(normal, sunDirection);
     float halfLambert = NdotL * 0.5 + 0.5;
@@ -347,6 +376,10 @@ void main() {
     // Fog
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+    // Tone mapping and gamma (matching terrain/foliage shaders)
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
 
     gl_FragColor = vec4(color, 1.0);
 }
@@ -633,7 +666,9 @@ export class PropManager {
             "ambientIntensity",
             "fogColor",
             "fogDensity",
+            "dirtTextureScale",
           ],
+          samplers: ["dirtTexture"],
         }
       );
 
@@ -667,8 +702,16 @@ export class PropManager {
       material.setFloat("uMinWindHeight", minWindHeight);
       material.setFloat("uMaxWindHeight", maxWindHeight);
       material.setFloat("uTime", 0);
+
+      // Load dirt texture for bark triplanar mapping
+      const dirtTex = new BABYLON.Texture("/textures/dirt_diffuse.jpg", this.scene);
+      dirtTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
+      dirtTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+      dirtTex.anisotropicFilteringLevel = 8;
+      material.setTexture("dirtTexture", dirtTex);
+      material.setFloat("dirtTextureScale", 0.5);
     } else {
-      // Rock uses thin instance static shader
+      // Rock uses thin instance static shader with triplanar texture
       // NOTE: Do NOT include world0-world3 in attributes - Babylon.js adds them
       // automatically when using thinInstanceSetBuffer("matrix", ...)
       material = new ShaderMaterial(
@@ -689,9 +732,19 @@ export class PropManager {
             "ambientIntensity",
             "fogColor",
             "fogDensity",
+            "textureScale",
           ],
+          samplers: ["rockTexture"],
         }
       );
+
+      // Load rock diffuse texture for triplanar mapping
+      const rockTex = new BABYLON.Texture("/textures/rock_diff.jpg", this.scene);
+      rockTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
+      rockTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+      rockTex.anisotropicFilteringLevel = 8;
+      material.setTexture("rockTexture", rockTex);
+      material.setFloat("textureScale", 1.0);
     }
 
     // Common uniforms
@@ -730,21 +783,21 @@ export class PropManager {
    * Get base instance group key (without LOD)
    */
   private getGroupKey(assetType: AssetType, variationIndex: number): InstanceGroupKey {
-    return `${assetType}_${variationIndex}`;
+    return `${assetType}|${variationIndex}`;
   }
 
   /**
    * Get instance group key with LOD level
    */
   private getGroupKeyWithLOD(assetType: AssetType, variationIndex: number, lod: MeshLOD): InstanceGroupKey {
-    return `${assetType}_${variationIndex}_${lod}`;
+    return `${assetType}|${variationIndex}|${lod}`;
   }
 
   /**
    * Parse group key with LOD
    */
   private parseGroupKeyWithLOD(groupKey: InstanceGroupKey): { assetType: AssetType; variationIndex: number; lod: MeshLOD } | null {
-    const parts = groupKey.split("_");
+    const parts = groupKey.split("|");
     if (parts.length < 3) return null;
     return {
       assetType: parts[0] as AssetType,
@@ -1036,7 +1089,7 @@ export class PropManager {
       const newY = this.heightmap.getInterpolatedHeight(instance.position.x, instance.position.z);
       if (instance.position.y !== newY) {
         instance.position.y = newY;
-        const groupKey = `${instance.assetType}_${instance.variationIndex}`;
+        const groupKey = `${instance.assetType}|${instance.variationIndex}`;
         this.markGroupDirty(groupKey);
       }
     }
@@ -1047,7 +1100,7 @@ export class PropManager {
    */
   private rebuildInstanceGroupWithLOD(baseGroupKey: InstanceGroupKey): void {
     const propIds = this.propsByGroup.get(baseGroupKey);
-    const [assetType, variationIndexStr] = baseGroupKey.split("_") as [AssetType, string];
+    const [assetType, variationIndexStr] = baseGroupKey.split("|") as [AssetType, string];
     const variationIndex = parseInt(variationIndexStr, 10);
 
     // Get variation meshes for all LOD levels

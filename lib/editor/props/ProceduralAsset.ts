@@ -116,6 +116,8 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform sampler2D dirtTexture;
+uniform float dirtTextureScale;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -175,6 +177,17 @@ void main() {
     float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y);
     float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;  // Green = leaf, brown = trunk
     color = mix(color * 0.85, color * 1.1, tipFactor * isLeaf);
+
+    // Triplanar dirt texture for bark (R > G = brown = bark)
+    // Always sample outside control flow for WebGPU/WGSL compatibility
+    vec3 barkBlend = abs(normal);
+    barkBlend = barkBlend / (barkBlend.x + barkBlend.y + barkBlend.z);
+    vec3 dirtTexX = texture2D(dirtTexture, vPosition.yz * dirtTextureScale).rgb;
+    vec3 dirtTexY = texture2D(dirtTexture, vPosition.xz * dirtTextureScale).rgb;
+    vec3 dirtTexZ = texture2D(dirtTexture, vPosition.xy * dirtTextureScale).rgb;
+    vec3 dirtSample = dirtTexX * barkBlend.x + dirtTexY * barkBlend.y + dirtTexZ * barkBlend.z;
+    float isBark = step(vColor.g, vColor.r);  // 1.0 if R > G (bark), 0.0 otherwise
+    color = mix(color, mix(color, dirtSample, 0.4), isBark);
 
     // Half-Lambert diffuse
     float NdotL = dot(normal, sunDirection);
@@ -246,6 +259,8 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform sampler2D rockTexture;
+uniform float textureScale;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -328,28 +343,37 @@ void main() {
     noisePerturbation *= (1.0 - edgeFactor * 0.5);
     normal = normalize(normal + noisePerturbation);
 
-    // Color variation (per-pixel)
+    // Triplanar texture sampling (world-space projection)
+    vec3 blending = abs(normal);
+    blending = blending / (blending.x + blending.y + blending.z);
+
+    vec3 texX = texture2D(rockTexture, vPosition.yz * textureScale).rgb;
+    vec3 texY = texture2D(rockTexture, vPosition.xz * textureScale).rgb;
+    vec3 texZ = texture2D(rockTexture, vPosition.xy * textureScale).rgb;
+    vec3 texColor = texX * blending.x + texY * blending.y + texZ * blending.z;
+
+    // Procedural color variation
     float colorNoise = fbm(vPosition * 2.0);
-    vec3 color = mix(baseColor, detailColor, colorNoise * 0.5);
+    vec3 procColor = mix(baseColor, detailColor, colorNoise * 0.5);
 
-    // Half-Lambert diffuse (더 부드러운 명암 전환)
-    float NdotL = dot(normal, sunDirection);
-    float halfLambert = NdotL * 0.5 + 0.5;
-    halfLambert = halfLambert * halfLambert;
+    // Blend: 70% texture, 30% procedural
+    vec3 color = mix(procColor, texColor, 0.7);
 
-    // === Edge Softening (엣지에서 조명 부드럽게) ===
-    // 엣지 부근에서 diffuse를 살짝 밝게 (급격한 명암 전환 방지)
-    halfLambert = mix(halfLambert, halfLambert * 0.7 + 0.3, edgeFactor * 0.4);
+    // Diffuse lighting (standard Lambert, matching terrain)
+    float NdotL = max(dot(normal, sunDirection), 0.0);
+    float diffuse = NdotL * 0.6 + 0.4;
 
-    // Rim lighting (가장자리 강조로 형태감 향상)
+    // Edge softening (smooth lighting at edges)
+    diffuse = mix(diffuse, diffuse * 0.7 + 0.3, edgeFactor * 0.4);
+
+    // Rim lighting
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
     rimFactor = pow(rimFactor, 3.0) * 0.1;
 
-    // Ambient occlusion 근사 (오목한 부분 어둡게)
+    // Ambient occlusion
     float ao = 0.5 + 0.5 * smoothNormal.y;
 
-    // 최종 조명 계산
-    float diffuse = halfLambert * 0.6 + 0.4;
+    // Final lighting
     vec3 ambient = vec3(ambientIntensity) * ao;
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.85, 1.0);
 
@@ -358,6 +382,10 @@ void main() {
     // Fog
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+    // Tone mapping (matching terrain shader)
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
 
     gl_FragColor = vec4(color, 1.0);
 }
@@ -395,8 +423,8 @@ export const DEFAULT_ASSET_PARAMS: Record<AssetType, AssetParams> = {
     sizeVariation: 0.4,
     noiseScale: 2.0,
     noiseAmplitude: 0.15,
-    colorBase: new Color3(0.25, 0.45, 0.15),
-    colorDetail: new Color3(0.35, 0.55, 0.20),
+    colorBase: new Color3(0.30, 0.42, 0.18),
+    colorDetail: new Color3(0.42, 0.52, 0.25),
   },
   bush: {
     type: "bush",
@@ -405,8 +433,8 @@ export const DEFAULT_ASSET_PARAMS: Record<AssetType, AssetParams> = {
     sizeVariation: 0.3,
     noiseScale: 4.0,
     noiseAmplitude: 0.25,
-    colorBase: new Color3(0.20, 0.40, 0.12),
-    colorDetail: new Color3(0.30, 0.50, 0.18),
+    colorBase: new Color3(0.28, 0.40, 0.16),
+    colorDetail: new Color3(0.38, 0.48, 0.22),
   },
   grass_clump: {
     type: "grass_clump",
@@ -415,8 +443,8 @@ export const DEFAULT_ASSET_PARAMS: Record<AssetType, AssetParams> = {
     sizeVariation: 0.2,
     noiseScale: 5.0,
     noiseAmplitude: 0.1,
-    colorBase: new Color3(0.15, 0.35, 0.08),
-    colorDetail: new Color3(0.35, 0.55, 0.15),
+    colorBase: new Color3(0.25, 0.38, 0.14),
+    colorDetail: new Color3(0.40, 0.50, 0.22),
   },
 };
 
@@ -607,10 +635,10 @@ function setBarkVertexColors(mesh: Mesh, seed: number, isBranch: boolean = false
   const colors = new Float32Array(vertexCount * 4);
 
   // 나무껍질 색상 팔레트
-  const darkBark = { r: 0.30, g: 0.22, b: 0.15 };      // 어두운 나무껍질
-  const midBark = { r: 0.50, g: 0.38, b: 0.26 };       // 중간 톤
-  const lightBark = { r: 0.62, g: 0.50, b: 0.35 };     // 밝은 나무껍질
-  const mossBark = { r: 0.32, g: 0.35, b: 0.22 };      // 이끼 낀 부분
+  const darkBark = { r: 0.38, g: 0.30, b: 0.20 };      // 어두운 나무껍질
+  const midBark = { r: 0.52, g: 0.42, b: 0.28 };       // 중간 톤 (terrain dirt)
+  const lightBark = { r: 0.62, g: 0.52, b: 0.36 };     // 밝은 나무껍질
+  const mossBark = { r: 0.35, g: 0.40, b: 0.25 };      // 이끼 낀 부분
 
   // 바운딩 박스 계산
   let minY = Infinity, maxY = -Infinity;
@@ -785,10 +813,10 @@ function setLeafVertexColors(mesh: Mesh, seed: number, isTop: boolean = false): 
   const colors = new Float32Array(vertexCount * 4);
 
   // 나뭇잎 색상 팔레트
-  const sunLeaf = { r: 0.45, g: 0.65, b: 0.25 };       // 햇빛 받는 연두색
-  const shadeLeaf = { r: 0.18, g: 0.38, b: 0.12 };     // 그늘진 진녹색
-  const yellowLeaf = { r: 0.55, g: 0.62, b: 0.20 };    // 살짝 노란 연두
-  const freshLeaf = { r: 0.35, g: 0.55, b: 0.20 };     // 싱싱한 녹색
+  const sunLeaf = { r: 0.40, g: 0.52, b: 0.24 };       // 햇빛 받는 올리브
+  const shadeLeaf = { r: 0.18, g: 0.30, b: 0.12 };     // 그늘진 진녹색
+  const yellowLeaf = { r: 0.45, g: 0.50, b: 0.20 };    // 살짝 노란 올리브
+  const freshLeaf = { r: 0.32, g: 0.45, b: 0.20 };     // 싱싱한 올리브
 
   // 바운딩 박스 계산
   let minY = Infinity, maxY = -Infinity;
@@ -1584,7 +1612,7 @@ export class ProceduralAsset {
 
     // Set bright green vertex color for each blade before merging
     for (const blade of blades) {
-      setMeshVertexColor(blade, 0.45, 0.75, 0.3);  // Bright grass green
+      setMeshVertexColor(blade, 0.35, 0.45, 0.22);  // Olive green (matching grass biome texture)
     }
 
     const merged = Mesh.MergeMeshes(blades, true, true, undefined, false, true);
@@ -1629,7 +1657,9 @@ export class ProceduralAsset {
             "ambientIntensity",
             "fogColor",
             "fogDensity",
+            "dirtTextureScale",
           ],
+          samplers: ["dirtTexture"],
         }
       );
 
@@ -1664,8 +1694,16 @@ export class ProceduralAsset {
       this.material.setFloat("uMaxWindHeight", maxWindHeight);
       this.material.setFloat("uTime", 0);
 
+      // Load dirt texture for bark triplanar mapping
+      const dirtTex = new BABYLON.Texture("/textures/dirt_diffuse.jpg", this.scene);
+      dirtTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
+      dirtTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+      dirtTex.anisotropicFilteringLevel = 8;
+      this.material.setTexture("dirtTexture", dirtTex);
+      this.material.setFloat("dirtTextureScale", 0.5);
+
     } else {
-      // Rock uses the static shader
+      // Rock uses the static shader with triplanar texture
       this.material = new ShaderMaterial(
         "assetMaterial_" + this.params.seed,
         this.scene,
@@ -1685,9 +1723,19 @@ export class ProceduralAsset {
             "ambientIntensity",
             "fogColor",
             "fogDensity",
+            "textureScale",
           ],
+          samplers: ["rockTexture"],
         }
       );
+
+      // Load rock diffuse texture for triplanar mapping
+      const rockTex = new BABYLON.Texture("/textures/rock_diff.jpg", this.scene);
+      rockTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
+      rockTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
+      rockTex.anisotropicFilteringLevel = 8;
+      this.material.setTexture("rockTexture", rockTex);
+      this.material.setFloat("textureScale", 1.0);
     }
 
     // Common uniforms
