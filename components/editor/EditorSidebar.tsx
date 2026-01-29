@@ -2,6 +2,7 @@
 
 import { useEditorStore } from "@/lib/editor/store/editorStore";
 import type { ToolType, HeightmapTool, MaterialType, BiomeType, ProceduralAssetType, WaterType } from "@/lib/editor/types/EditorTypes";
+import WeatherPanel from "./WeatherPanel";
 
 const BIOME_COLORS: Record<BiomeType, string> = {
   grass: "#4a7c23",
@@ -41,6 +42,7 @@ export default function EditorSidebar() {
     { id: "heightmap", label: "Terrain", key: "2" },
     { id: "biome", label: "Biome", key: "3" },
     { id: "props", label: "Props", key: "4" },
+    { id: "environment", label: "Env", key: "5" },
   ];
 
   const heightmapTools: { id: HeightmapTool; label: string; key: string }[] = [
@@ -335,6 +337,9 @@ export default function EditorSidebar() {
             </div>
           </section>
         )}
+
+        {/* Environment Tool */}
+        {activeTool === "environment" && <WeatherPanel />}
       </div>
 
       {/* Footer */}

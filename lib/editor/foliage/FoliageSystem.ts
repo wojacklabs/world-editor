@@ -1236,6 +1236,29 @@ export class FoliageSystem {
   }
 
   /**
+   * Sync sun direction and color for lighting
+   * Call this when time of day or weather changes
+   */
+  syncSunDirection(sunDirection: Vector3, sunColor: Color3): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setVector3("uSunDirection", sunDirection);
+      this.grassMaterial.setColor3("uSunColor", sunColor);
+    }
+    if (this.rockMaterial) {
+      this.rockMaterial.setVector3("uSunDirection", sunDirection);
+      this.rockMaterial.setColor3("uSunColor", sunColor);
+    }
+    if (this.impostorGrassMaterial) {
+      this.impostorGrassMaterial.setVector3("uSunDirection", sunDirection);
+      this.impostorGrassMaterial.setColor3("uSunColor", sunColor);
+    }
+    if (this.impostorRockMaterial) {
+      this.impostorRockMaterial.setVector3("uSunDirection", sunDirection);
+      this.impostorRockMaterial.setColor3("uSunColor", sunColor);
+    }
+  }
+
+  /**
    * Update time uniform for wind animation
    */
   updateTime(time: number): void {

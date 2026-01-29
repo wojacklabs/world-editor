@@ -47,7 +47,7 @@ export default function EditorPage() {
   const [terrainSize, setTerrainSize] = useState(64);
   const [activeTileId, setActiveTileId] = useState<string | null>(null);
   const [tileDirty, setTileDirty] = useState(false);
-  const { setModified, resetState } = useEditorStore();
+  const { setModified, resetState, weather, updateWeather } = useEditorStore();
 
   // Placed assets management
   const [placedAssets, setPlacedAssets] = useState<PlacedAsset[]>([]);
@@ -107,6 +107,14 @@ export default function EditorPage() {
         waterLevel: 0,
         dispStrength: dispStrength,
       },
+      weather: {
+        timeOfDay: weather.timeOfDay,
+        weatherPreset: weather.weatherPreset,
+        cloudCoverage: weather.cloudCoverage,
+        windSpeed: weather.windSpeed,
+        windDirection: weather.windDirection,
+        fogDensity: weather.fogDensity,
+      },
     };
 
     const json = JSON.stringify(project, null, 2);
@@ -124,7 +132,7 @@ export default function EditorPage() {
     URL.revokeObjectURL(url);
     setModified(false);
     setIsSaveDialogOpen(false);
-  }, [engine, setModified, placedAssets, projectName, dispStrength]);
+  }, [engine, setModified, placedAssets, projectName, dispStrength, weather]);
 
   const handleExportGLB = useCallback(async () => {
     if (!engine) return;

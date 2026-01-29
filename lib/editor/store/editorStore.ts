@@ -11,8 +11,10 @@ import type {
   DebugVisibility,
   DebugRenderMode,
   WaterType,
+  WeatherState,
+  WeatherPreset,
 } from "../types/EditorTypes";
-import { DEFAULT_EDITOR_STATE, DEFAULT_ASSET_SETTINGS } from "../types/EditorTypes";
+import { DEFAULT_EDITOR_STATE, DEFAULT_ASSET_SETTINGS, DEFAULT_WEATHER_STATE } from "../types/EditorTypes";
 
 interface EditorStore extends EditorState {
   // Tool actions
@@ -52,6 +54,16 @@ interface EditorStore extends EditorState {
   // Placement mode
   setPendingAsset: (asset: PendingAsset | null) => void;
   clearPendingAsset: () => void;
+
+  // Weather actions
+  setTimeOfDay: (time: number) => void;
+  setWeatherPreset: (preset: WeatherPreset) => void;
+  setCloudCoverage: (coverage: number) => void;
+  setPrecipitationIntensity: (intensity: number) => void;
+  setWindSpeed: (speed: number) => void;
+  setWindDirection: (direction: number) => void;
+  setFogDensity: (density: number) => void;
+  updateWeather: (weather: Partial<WeatherState>) => void;
 
   // Project state
   setModified: (modified: boolean) => void;
@@ -143,6 +155,47 @@ export const useEditorStore = create<EditorStore>((set) => ({
 
   setPendingAsset: (asset) => set({ pendingAsset: asset }),
   clearPendingAsset: () => set({ pendingAsset: null }),
+
+  // Weather actions
+  setTimeOfDay: (time) =>
+    set((state) => ({
+      weather: { ...state.weather, timeOfDay: Math.max(0, Math.min(24, time)) },
+    })),
+
+  setWeatherPreset: (preset) =>
+    set((state) => ({
+      weather: { ...state.weather, weatherPreset: preset },
+    })),
+
+  setCloudCoverage: (coverage) =>
+    set((state) => ({
+      weather: { ...state.weather, cloudCoverage: Math.max(0, Math.min(1, coverage)) },
+    })),
+
+  setPrecipitationIntensity: (intensity) =>
+    set((state) => ({
+      weather: { ...state.weather, precipitationIntensity: Math.max(0, Math.min(1, intensity)) },
+    })),
+
+  setWindSpeed: (speed) =>
+    set((state) => ({
+      weather: { ...state.weather, windSpeed: Math.max(0, Math.min(1, speed)) },
+    })),
+
+  setWindDirection: (direction) =>
+    set((state) => ({
+      weather: { ...state.weather, windDirection: Math.max(0, Math.min(360, direction)) },
+    })),
+
+  setFogDensity: (density) =>
+    set((state) => ({
+      weather: { ...state.weather, fogDensity: Math.max(0, Math.min(0.1, density)) },
+    })),
+
+  updateWeather: (weather) =>
+    set((state) => ({
+      weather: { ...state.weather, ...weather },
+    })),
 
   setModified: (modified) => set({ isModified: modified }),
 

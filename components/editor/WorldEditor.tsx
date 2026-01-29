@@ -34,6 +34,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     waterFlowAngle,
     pendingAsset,
     clearPendingAsset,
+    weather,
   } = useEditorStore();
 
   // Initialize engine
@@ -163,6 +164,13 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       engineRef.current.setWaterFlowAngle(waterFlowAngle);
     }
   }, [waterFlowAngle]);
+
+  // Update weather system
+  useEffect(() => {
+    if (engineRef.current) {
+      engineRef.current.updateWeatherState(weather);
+    }
+  }, [weather]);
 
   // Props tool: Create preview when entering props mode or when type/seed changes
   useEffect(() => {
