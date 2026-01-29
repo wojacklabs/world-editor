@@ -18,6 +18,7 @@ import type {
   LoadResult,
   WorldMetadata,
   TileConnections,
+  WeatherData,
 } from "./types";
 
 export class WorldLoader {
@@ -323,6 +324,19 @@ export class WorldLoader {
       };
     }
 
+    // Parse weather data
+    const weather: WeatherData | null = data.weather
+      ? {
+          timeOfDay: data.weather.timeOfDay ?? 12,
+          weatherPreset: data.weather.weatherPreset ?? "clear",
+          cloudCoverage: data.weather.cloudCoverage ?? 0.3,
+          precipitationIntensity: data.weather.precipitationIntensity ?? 0,
+          windSpeed: data.weather.windSpeed ?? 0.2,
+          windDirection: data.weather.windDirection ?? 45,
+          fogDensity: data.weather.fogDensity ?? 0.008,
+        }
+      : null;
+
     return {
       version: data.version,
       name: data.name,
@@ -337,6 +351,7 @@ export class WorldLoader {
         waterLevel: data.settings.waterLevel,
         waterDepth: data.settings.waterDepth ?? 2.0,
       },
+      weather,
     };
   }
 

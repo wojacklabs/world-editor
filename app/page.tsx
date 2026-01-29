@@ -111,6 +111,7 @@ export default function EditorPage() {
         timeOfDay: weather.timeOfDay,
         weatherPreset: weather.weatherPreset,
         cloudCoverage: weather.cloudCoverage,
+        precipitationIntensity: weather.precipitationIntensity,
         windSpeed: weather.windSpeed,
         windDirection: weather.windDirection,
         fogDensity: weather.fogDensity,
@@ -142,7 +143,8 @@ export default function EditorPage() {
 
     let bakedMesh = null;
     try {
-      const { GLTF2Export } = await import("@babylonjs/serializers/glTF");
+      const serializers = await import("@babylonjs/serializers");
+      const { GLTF2Export } = serializers;
 
       // Create baked mesh with displacement applied to vertices
       bakedMesh = terrainMesh.createBakedMeshForExport();

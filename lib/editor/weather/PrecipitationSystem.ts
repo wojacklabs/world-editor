@@ -135,53 +135,31 @@ vec2 rotateUV(vec2 uv, float angle) {
     );
 }
 
-// 6-pointed star/snowflake pattern
-float snowflakePattern(vec2 uv) {
+// Simple soft particle for snow - small and subtle
+float snowParticle(vec2 uv) {
     float dist = length(uv);
-
-    // Base soft circle
-    float circle = smoothstep(0.5, 0.15, dist);
-
-    // 6-fold symmetry for crystal arms
-    float angle = atan(uv.y, uv.x);
-    float arm = abs(sin(angle * 3.0)); // 6 arms (sin repeats twice per 2π)
-
-    // Crystal arm shape - thinner toward edges
-    float armShape = smoothstep(0.5, 0.0, dist * (1.0 - arm * 0.4));
-
-    // Inner glow
-    float innerGlow = smoothstep(0.3, 0.0, dist) * 0.5;
-
-    // Combine: crystal arms with soft center
-    float snowflake = max(armShape * 0.7, circle * 0.5) + innerGlow;
-
-    // Add subtle sparkle points at arm tips
-    float sparkle = pow(arm, 8.0) * smoothstep(0.45, 0.35, dist) * 0.3;
-    snowflake += sparkle;
-
-    return clamp(snowflake, 0.0, 1.0);
+    // Simple soft circle with smooth falloff
+    float particle = smoothstep(0.5, 0.0, dist);
+    return particle;
 }
 
-// Improved rain streak
+// Subtle rain streak - blends with environment
 float rainStreak(vec2 uv, float thickness) {
-    // Tapered streak: thin at top, slightly thicker at bottom
-    float taper = mix(0.08, 0.12, uv.y + 0.5) * thickness;
+    // Very thin tapered streak
+    float taper = mix(0.04, 0.06, uv.y + 0.5) * thickness;
 
-    // Main streak body
-    float streak = smoothstep(taper, 0.0, abs(uv.x));
+    // Main streak body - softer edges
+    float streak = smoothstep(taper, taper * 0.3, abs(uv.x));
 
-    // Gradient: transparent at top, opaque at bottom (motion blur effect)
-    float gradient = smoothstep(-0.5, 0.3, uv.y);
+    // Gradient: very transparent at top, slightly visible at bottom
+    float gradient = smoothstep(-0.5, 0.4, uv.y);
     streak *= gradient;
 
-    // Fade out at very bottom
-    streak *= smoothstep(0.5, 0.4, uv.y);
+    // Fade out at bottom
+    streak *= smoothstep(0.5, 0.35, uv.y);
 
-    // Bright highlight line in center
-    float highlight = smoothstep(taper * 0.3, 0.0, abs(uv.x));
-    highlight *= gradient * 0.4;
-
-    return streak * 0.7 + highlight;
+    // No bright highlight - just subtle streak
+    return streak * 0.4;
 }
 
 void main() {
@@ -193,22 +171,19 @@ void main() {
         // === RAIN ===
         alpha = rainStreak(center, vThickness);
 
-        // Slight blue-white tint variation
-        color = mix(uColor.rgb, vec3(0.9, 0.95, 1.0), 0.2);
+        // Subtle gray-blue tint to blend with environment
+        color = mix(uColor.rgb, vec3(0.6, 0.65, 0.7), 0.3);
 
     } else {
         // === SNOW ===
-        // Apply rotation to UV
-        vec2 rotatedUV = rotateUV(center, vRotation);
+        // Simple small particle - no rotation needed for dots
+        float particleScale = 0.4 + vSizeScale * 0.3;
+        vec2 scaledUV = center / particleScale;
 
-        // Scale based on size variation
-        rotatedUV /= (0.7 + vSizeScale * 0.3);
+        alpha = snowParticle(scaledUV) * 0.6;
 
-        alpha = snowflakePattern(rotatedUV) * 0.85;
-
-        // Slight warm/cool variation
-        float warmth = fract(vRotation * 0.1);
-        color = mix(uColor.rgb, vec3(1.0, 0.98, 0.95), warmth * 0.1);
+        // Keep white color
+        color = uColor.rgb;
     }
 
     alpha *= vAlpha;
@@ -236,23 +211,23 @@ interface PrecipitationConfig {
 
 const RAIN_CONFIG: PrecipitationConfig = {
   type: "rain",
-  particleCount: 4000,
+  particleCount: 5000,
   boxSize: new Vector3(60, 40, 60),
-  fallSpeed: 20,
+  fallSpeed: 22,
   windInfluence: 1.0,
-  particleSize: 0.08,
-  color: new Color4(0.7, 0.75, 0.85, 0.6),
-  streakLength: 3.0,
+  particleSize: 0.06,
+  color: new Color4(0.5, 0.55, 0.6, 0.35),  // Darker, more transparent
+  streakLength: 4.0,
 };
 
 const SNOW_CONFIG: PrecipitationConfig = {
   type: "snow",
-  particleCount: 2500,
+  particleCount: 3500,
   boxSize: new Vector3(60, 30, 60),
-  fallSpeed: 3,
+  fallSpeed: 2.5,
   windInfluence: 1.5,
-  particleSize: 0.12,
-  color: new Color4(0.95, 0.95, 1.0, 0.8),
+  particleSize: 0.03,  // Much smaller particles
+  color: new Color4(0.95, 0.95, 1.0, 0.7),
   streakLength: 0,
 };
 

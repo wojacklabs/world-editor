@@ -23,6 +23,8 @@ export type {
   TileConnections,
   WorldSettings,
   WorldMetadata,
+  WeatherData,
+  WeatherPreset,
 } from "./types";
 
 // Types - Serialized (Storage)
@@ -51,3 +53,7 @@ export { DataCodec } from "./DataCodec";
 export { WorldLoader } from "./WorldLoader";
 export { TerrainRenderer } from "./TerrainRenderer";
 export { FoliageRenderer } from "./FoliageRenderer";
+export { SkyWeatherRenderer } from "./SkyWeatherRenderer";
+export type { SkyWeatherOptions } from "./SkyWeatherRenderer";
+export { WaterRenderer } from "./WaterRenderer";
+export type { WaterConfig } from "./WaterRenderer";
