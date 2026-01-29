@@ -14,12 +14,15 @@ import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
 import { FoliageSystem } from "../foliage/FoliageSystem";
 import { BiomeDecorator } from "../terrain/BiomeDecorator";
+import type { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
+
 export class GamePreview {
   private scene: Scene;
   private heightmap: Heightmap;
   private terrainMeshRef: TerrainMesh | null = null;
   private foliageSystem: FoliageSystem | null = null;
   private biomeDecorator: BiomeDecorator | null = null;
+  private skyWeatherSystem: SkyWeatherSystem | null = null;
   private camera: FreeCamera | null = null;
   private originalMesh: Mesh | null = null;
   private unifiedWater: Mesh | null = null;
@@ -53,13 +56,19 @@ export class GamePreview {
     heightmap: Heightmap,
     terrainMesh?: TerrainMesh | null,
     foliageSystem?: FoliageSystem | null,
-    biomeDecorator?: BiomeDecorator | null
+    biomeDecorator?: BiomeDecorator | null,
+    skyWeatherSystem?: SkyWeatherSystem | null
   ) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.terrainMeshRef = terrainMesh || null;
     this.foliageSystem = foliageSystem || null;
     this.biomeDecorator = biomeDecorator || null;
+    this.skyWeatherSystem = skyWeatherSystem || null;
+  }
+
+  setSkyWeatherSystem(system: SkyWeatherSystem | null): void {
+    this.skyWeatherSystem = system;
   }
 
   enable(terrainMesh: Mesh): void {
@@ -93,39 +102,45 @@ export class GamePreview {
     // Setup input
     this.setupInput();
 
+    // Get sky/fog values from weather system, or use defaults
+    const skyColor = this.skyWeatherSystem?.getSkyHorizonColor() || new Color3(0.55, 0.7, 0.9);
+    const fogDensity = this.skyWeatherSystem?.getFogDensity() || 0.015;
+
     // Change scene background for game feel - sky/horizon color
-    const skyColor = new Color3(0.55, 0.7, 0.9);  // Soft sky blue
     this.scene.clearColor = new Color4(skyColor.r, skyColor.g, skyColor.b, 1);
 
     // Atmospheric fog - blends objects into the sky at distance
-    // Using same color as sky creates natural depth effect
-    const fogDensity = 0.015;  // Higher density for visible fog effect
     this.scene.fogMode = Scene.FOGMODE_EXP2;
     this.scene.fogDensity = fogDensity;
     this.scene.fogColor = skyColor;
 
-    // Sync terrain shader fog with scene fog (same color = seamless blend)
-    // Apply to original mesh material
-    if (this.originalMesh && this.originalMesh.material) {
-      const material = this.originalMesh.material as ShaderMaterial;
-      if (material.setFloat && material.setColor3) {
-        material.setFloat("uFogDensity", fogDensity);
-        material.setColor3("uFogColor", skyColor);
+    // Notify weather system of game mode (it will handle shader sync)
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setGameMode(true);
+    } else {
+      // Fallback: manual sync if no weather system
+      // Sync terrain shader fog with scene fog (same color = seamless blend)
+      if (this.originalMesh && this.originalMesh.material) {
+        const material = this.originalMesh.material as ShaderMaterial;
+        if (material.setFloat && material.setColor3) {
+          material.setFloat("uFogDensity", fogDensity);
+          material.setColor3("uFogColor", skyColor);
+        }
       }
-    }
 
-    // Also apply to terrainMeshRef if available
-    if (this.terrainMeshRef) {
-      const material = this.terrainMeshRef.getMaterial() as ShaderMaterial | null;
-      if (material && material.setFloat && material.setColor3) {
-        material.setFloat("uFogDensity", fogDensity);
-        material.setColor3("uFogColor", skyColor);
+      // Also apply to terrainMeshRef if available
+      if (this.terrainMeshRef) {
+        const material = this.terrainMeshRef.getMaterial() as ShaderMaterial | null;
+        if (material && material.setFloat && material.setColor3) {
+          material.setFloat("uFogDensity", fogDensity);
+          material.setColor3("uFogColor", skyColor);
+        }
       }
-    }
 
-    // Sync foliage system fog with scene fog for consistent blending
-    if (this.foliageSystem) {
-      this.foliageSystem.syncFogSettings(skyColor, fogDensity);
+      // Sync foliage system fog with scene fog for consistent blending
+      if (this.foliageSystem) {
+        this.foliageSystem.syncFogSettings(skyColor, fogDensity);
+      }
     }
 
     // Register update loop
@@ -164,6 +179,11 @@ export class GamePreview {
     if (this.updateBound) {
       this.scene.unregisterBeforeRender(this.updateBound);
       this.updateBound = null;
+    }
+
+    // Notify weather system of editor mode
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setGameMode(false);
     }
 
     // Restore foliage LOD distances

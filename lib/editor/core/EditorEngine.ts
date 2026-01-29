@@ -26,7 +26,7 @@ import {
   Quaternion,
 } from "@babylonjs/core";
 import { GridMaterial } from "@babylonjs/materials";
-import type { BrushSettings, ToolType, HeightmapTool, MaterialType, WaterType } from "../types/EditorTypes";
+import type { BrushSettings, ToolType, HeightmapTool, MaterialType, WaterType, WeatherState, WeatherPreset } from "../types/EditorTypes";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
 import { createTerrainMaterial, createSplatTexture } from "../terrain/TerrainShader";
@@ -40,6 +40,7 @@ import { initializeKTX2Support } from "./KTX2Setup";
 import { StreamingManager } from "../streaming/StreamingManager";
 import { AssetContainerPool } from "../streaming/AssetContainerPool";
 import { getManualTileManager } from "../tiles/ManualTileManager";
+import { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
 
 export class EditorEngine {
   private canvas: HTMLCanvasElement;
@@ -85,6 +86,9 @@ export class EditorEngine {
   private gamePreview: GamePreview | null = null;
   private isGameMode = false;
   private savedClearColor: Color4 | null = null;
+
+  // Sky and weather system
+  private skyWeatherSystem: SkyWeatherSystem | null = null;
 
   // Callbacks
   private onModified: (() => void) | null = null;
@@ -177,6 +181,31 @@ export class EditorEngine {
       farRadius: 3,
     });
 
+    // Initialize sky and weather system
+    this.skyWeatherSystem = new SkyWeatherSystem(this.scene);
+    this.skyWeatherSystem.init();
+    // Connect terrain material for shader sync
+    if (this.terrainMesh) {
+      const material = this.terrainMesh.getMaterial() as ShaderMaterial | null;
+      if (material) {
+        this.skyWeatherSystem.setTerrainMaterial(material);
+      }
+    }
+    // Connect foliage system
+    if (this.foliageSystem) {
+      this.skyWeatherSystem.setFoliageSystem(this.foliageSystem);
+    }
+    // Connect water system (BiomeDecorator manages water)
+    if (this.biomeDecorator) {
+      const waterSystem = this.biomeDecorator.getWaterSystem();
+      if (waterSystem) {
+        const waterMaterial = waterSystem.getMaterial();
+        if (waterMaterial) {
+          this.skyWeatherSystem.setWaterMaterial(waterMaterial);
+        }
+      }
+    }
+    console.log("[EditorEngine] Sky weather system initialized");
 
     this.isInitialized = true;
   }
@@ -867,6 +896,85 @@ export class EditorEngine {
     return this.waterFlowAngle;
   }
 
+  // ==================== Weather System Methods ====================
+
+  /**
+   * Update time of day (0-24 hours)
+   */
+  setTimeOfDay(time: number): void {
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setTimeOfDay(time);
+    }
+  }
+
+  /**
+   * Set weather preset (clear, cloudy, rainy, stormy, snowy)
+   */
+  setWeatherPreset(preset: WeatherPreset): void {
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setWeatherPreset(preset);
+    }
+  }
+
+  /**
+   * Set cloud coverage (0-1)
+   */
+  setCloudCoverage(coverage: number): void {
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setCloudCoverage(coverage);
+    }
+  }
+
+  /**
+   * Set wind speed (0-1)
+   */
+  setWindSpeed(speed: number): void {
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setWindSpeed(speed);
+    }
+  }
+
+  /**
+   * Set wind direction (0-360 degrees)
+   */
+  setWindDirection(direction: number): void {
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setWindDirection(direction);
+    }
+  }
+
+  /**
+   * Set fog density (0-0.1)
+   */
+  setWeatherFogDensity(density: number): void {
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setFogDensity(density);
+    }
+  }
+
+  /**
+   * Update full weather state
+   */
+  updateWeatherState(state: Partial<WeatherState>): void {
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.updateState(state);
+    }
+  }
+
+  /**
+   * Get current weather state
+   */
+  getWeatherState(): WeatherState | null {
+    return this.skyWeatherSystem?.getState() || null;
+  }
+
+  /**
+   * Get sky weather system instance
+   */
+  getSkyWeatherSystem(): SkyWeatherSystem | null {
+    return this.skyWeatherSystem;
+  }
+
   /**
    * Create or update the water direction indicator (arrow triangle)
    * Only visible when waterType is "river"
@@ -1187,7 +1295,8 @@ export class EditorEngine {
       this.heightmap,
       this.terrainMesh,
       this.foliageSystem,
-      this.biomeDecorator
+      this.biomeDecorator,
+      this.skyWeatherSystem
     );
     this.gamePreview.enable(mesh);
 

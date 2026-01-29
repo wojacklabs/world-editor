@@ -1,11 +1,34 @@
 import type { Vector3 } from "@babylonjs/core";
 
 // Tool types
-export type ToolType = "select" | "heightmap" | "biome" | "props";
+export type ToolType = "select" | "heightmap" | "biome" | "props" | "environment";
 export type HeightmapTool = "raise" | "lower" | "flatten" | "smooth";
 export type MaterialType = "grass" | "dirt" | "rock" | "sand" | "water";
 export type BiomeType = "grass" | "dirt" | "rock" | "sand" | "water";
 export type WaterType = "river" | "lake";
+
+// Weather types
+export type WeatherPreset = "clear" | "cloudy" | "rainy" | "stormy" | "snowy";
+
+export interface WeatherState {
+  timeOfDay: number;              // 0-24 hours
+  weatherPreset: WeatherPreset;
+  cloudCoverage: number;          // 0-1
+  precipitationIntensity: number; // 0-1
+  windSpeed: number;              // 0-1
+  windDirection: number;          // 0-360 degrees
+  fogDensity: number;             // 0-1
+}
+
+export const DEFAULT_WEATHER_STATE: WeatherState = {
+  timeOfDay: 12,
+  weatherPreset: "clear",
+  cloudCoverage: 0.3,
+  precipitationIntensity: 0,
+  windSpeed: 0.2,
+  windDirection: 45,
+  fogDensity: 0.008,
+};
 
 // Procedural asset types
 export type ProceduralAssetType = "rock" | "tree" | "bush" | "grass_clump";
@@ -150,6 +173,8 @@ export interface EditorState {
   waterFlowAngle: number; // degrees 0-360, river flow direction
   // Placement mode
   pendingAsset: PendingAsset | null;
+  // Weather state
+  weather: WeatherState;
 }
 
 // Default values
@@ -191,6 +216,7 @@ export const DEFAULT_EDITOR_STATE: EditorState = {
   waterType: "lake",
   waterFlowAngle: 0,
   pendingAsset: null,
+  weather: DEFAULT_WEATHER_STATE,
 };
 
 export const PROP_DEFINITIONS: PropDefinition[] = [
