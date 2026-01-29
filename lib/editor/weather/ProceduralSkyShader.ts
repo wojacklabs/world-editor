@@ -154,91 +154,69 @@ vec2 getCloudUV(vec3 viewDir) {
     return uv * 0.8; // Scale factor for cloud density
 }
 
-// Multi-scale Worley with size variation
-// Returns density contribution for a single cloud layer with random size per cell
-float getVariedCloudLayer(vec2 uv, float baseScale, float sizeVariance, float seed) {
-    vec2 cellUV = uv / baseScale;
-    vec2 cellId = floor(cellUV);
-    vec2 cellFract = fract(cellUV);
+// Pure FBM-based cloud layer - no cell boundaries
+float getCloudLayer(vec2 uv, float scale, vec2 offset) {
+    vec2 p = uv * scale + offset;
 
-    float minDist = 10.0;
-    float cellSize = 1.0; // Size modifier for this cell's cloud
+    // Use FBM with domain warping for organic cloud shapes
+    vec2 warp1 = vec2(fbm(p + vec2(0.0, 0.0), 3), fbm(p + vec2(5.2, 1.3), 3));
+    vec2 warp2 = vec2(fbm(p + warp1 * 2.0 + vec2(1.7, 9.2), 3), fbm(p + warp1 * 2.0 + vec2(8.3, 2.8), 3));
 
-    // Check 3x3 neighborhood
-    for (int y = -1; y <= 1; y++) {
-        for (int x = -1; x <= 1; x++) {
-            vec2 neighbor = vec2(float(x), float(y));
-            vec2 neighborId = cellId + neighbor;
-
-            // Random position within cell (more offset = more spacing variation)
-            vec2 randomOffset = hash22(neighborId + seed);
-            // Add extra random displacement for irregular spacing
-            vec2 spacingJitter = (hash22(neighborId * 7.31 + seed) - 0.5) * 0.6;
-            vec2 pointPos = neighbor + randomOffset + spacingJitter - cellFract;
-
-            float dist = length(pointPos);
-
-            if (dist < minDist) {
-                minDist = dist;
-                // Each cell has a random size modifier
-                cellSize = 0.5 + hash2(neighborId + seed * 13.7) * sizeVariance;
-            }
-        }
-    }
-
-    // Scale distance by cell's size modifier (smaller cellSize = larger cloud)
-    float scaledDist = minDist / cellSize;
-
-    // Cloud shape with soft edges
-    float cloud = 1.0 - smoothstep(0.0, 0.55, scaledDist);
-
+    float cloud = fbm(p + warp2 * 1.5, 4);
     return cloud;
 }
 
-// Calculate cloud density at a point - with size/spacing variation and depth
+// Calculate cloud density at a point - pure FBM based, no tile boundaries
 float getCloudDensity(vec2 uv, float coverage, out float cloudHeight) {
-    // Animate with wind (larger multiplier for visible movement)
+    // Animate with wind
     vec2 animatedUV = uv + uWindOffset;
 
-    // Layer 1: Large clouds with high size variance
-    float layer1 = getVariedCloudLayer(animatedUV, 2.5, 1.5, 0.0);
+    // Radial fade to prevent abrupt cloud cutoffs at UV edges
+    float uvDist = length(uv);
+    float radialFade = 1.0 - smoothstep(2.5, 4.5, uvDist);
 
-    // Layer 2: Medium clouds, different offset for irregular distribution
-    vec2 offset2 = vec2(37.5, 91.2);
-    float layer2 = getVariedCloudLayer(animatedUV * 0.7 + offset2, 3.0, 1.2, 100.0);
+    // Layer 1: Large billowy clouds with domain warping
+    float layer1 = getCloudLayer(animatedUV, 0.8, vec2(0.0));
 
-    // Layer 3: Small cloud puffs scattered around
-    vec2 offset3 = vec2(-53.8, 27.1);
-    float layer3 = getVariedCloudLayer(animatedUV * 1.4 + offset3, 1.8, 2.0, 200.0);
+    // Layer 2: Medium clouds at different scale and offset
+    float layer2 = getCloudLayer(animatedUV, 1.2, vec2(50.0, 30.0));
 
-    // Combine layers with weights - creates varied cloud sizes
-    float baseDensity = layer1 * 0.6 + layer2 * 0.3 + layer3 * 0.25;
-    baseDensity = clamp(baseDensity, 0.0, 1.0);
+    // Layer 3: Smaller detail clouds
+    float layer3 = getCloudLayer(animatedUV, 2.0, vec2(-30.0, 70.0));
 
-    // FBM for fluffy edges and internal detail
-    float detail = fbm(animatedUV * 3.0, 4);
-    float fineDetail = fbm(animatedUV * 8.0 + vec2(50.0), 3);
+    // Combine layers with smooth blending
+    float baseDensity = layer1 * 0.5 + layer2 * 0.3 + layer3 * 0.2;
 
-    // Apply detail to create fluffy edges
-    float density = baseDensity * (0.6 + 0.4 * detail);
-    density += (fineDetail - 0.5) * 0.2 * baseDensity;
+    // Remap to create cloud-like distribution (more contrast)
+    baseDensity = smoothstep(0.3, 0.7, baseDensity);
+
+    // Add fine detail for fluffy edges
+    float fineDetail = fbm(animatedUV * 4.0 + vec2(100.0), 4);
+    float density = baseDensity * (0.7 + 0.3 * fineDetail);
+
+    // Very fine detail for wispy edges
+    float microDetail = fbm(animatedUV * 8.0 + vec2(200.0), 3);
+    density += (microDetail - 0.5) * 0.15 * baseDensity;
     density = clamp(density, 0.0, 1.0);
 
-    // Coverage threshold
-    float threshold = 0.25 + (1.0 - coverage) * 0.55;
-    density = smoothstep(threshold - 0.1, threshold + 0.15, density);
+    // Coverage threshold with very soft edges
+    float threshold = 0.2 + (1.0 - coverage) * 0.5;
+    density = smoothstep(threshold - 0.2, threshold + 0.25, density);
 
     // Calculate cloud "height" for 3D depth effect
     // Higher density = taller cloud, with variation from noise
     float heightNoise = fbm(animatedUV * 2.0 + vec2(200.0), 3);
     cloudHeight = density * (0.5 + 0.5 * heightNoise);
 
-    // Add wispy clouds / rain streaks (only visible during precipitation)
-    if (uPrecipitationIntensity > 0.1) {
+    // Add wispy clouds / rain streaks (only visible during active precipitation)
+    if (uPrecipitationIntensity > 0.3) {
         float wisps = fbm(animatedUV * 5.0 + uCloudTime * 0.1, 3);
         wisps = smoothstep(0.6, 0.8, wisps) * 0.2;
         density = max(density, wisps * coverage * 0.4 * uPrecipitationIntensity);
     }
+
+    // Apply radial fade to prevent abrupt cutoffs at edges
+    density *= radialFade;
 
     return clamp(density, 0.0, 1.0);
 }
@@ -278,8 +256,8 @@ vec3 getCloudColor(float density, float cloudHeight, vec3 viewDir, vec3 sunDir, 
     float edgeGlow = smoothstep(0.05, 0.3, density) * (1.0 - smoothstep(0.3, 0.8, density));
     cloudColor += vec3(0.08) * edgeGlow;
 
-    // Underside shading - darker at bottom of thick clouds (stronger during precipitation)
-    float undersideStrength = 0.05 + uPrecipitationIntensity * 0.15; // 0.05 clear, 0.2 during rain
+    // Underside shading - darker at bottom of thick clouds (only during precipitation)
+    float undersideStrength = uPrecipitationIntensity * 0.2; // 0 clear, 0.2 during rain
     float undersideDark = cloudHeight * undersideStrength;
     cloudColor *= (1.0 - undersideDark);
 
@@ -364,8 +342,8 @@ void main() {
         cloudDensity = getCloudDensity(cloudUV, uCloudCoverage, cloudHeight);
         cloudColor = getCloudColor(cloudDensity, cloudHeight, viewDir, sunDir, uSunColor);
 
-        // Gentle fade clouds near horizon to blend with haze (less aggressive)
-        float horizonCloudFade = smoothstep(0.02, 0.08, viewDir.y);
+        // Gentle fade clouds near horizon to blend with haze
+        float horizonCloudFade = smoothstep(0.01, 0.15, viewDir.y);
         cloudDensity *= horizonCloudFade;
 
         // Reduce cloud visibility at night but keep some

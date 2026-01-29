@@ -61,6 +61,7 @@ export interface DecodedWorldProject {
 
   materials: MaterialSlot[];
   settings: WorldSettings;
+  weather: WeatherData | null;
 }
 
 // ============================================
@@ -132,8 +133,26 @@ export interface SerializedWorldProject {
     waterDepth?: number;
   };
 
+  weather?: WeatherData;
+
   foliage?: Record<string, string>;
   props?: PropInstance[];
+}
+
+// ============================================
+// Weather Data
+// ============================================
+
+export type WeatherPreset = "clear" | "cloudy" | "rainy" | "stormy" | "snowy";
+
+export interface WeatherData {
+  timeOfDay: number;              // 0-24 hours
+  weatherPreset: WeatherPreset;
+  cloudCoverage: number;          // 0-1
+  precipitationIntensity: number; // 0-1
+  windSpeed: number;              // 0-1
+  windDirection: number;          // 0-360 degrees
+  fogDensity: number;             // 0-1
 }
 
 // ============================================

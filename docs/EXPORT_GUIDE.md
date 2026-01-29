@@ -319,3 +319,94 @@ for (const prop of project.props) {
 ### Dark areas on terrain
 - Don't add terrain to shadow casters (causes self-shadowing)
 - Increase ambient light intensity
+
+---
+
+## Using the Loader Package (Recommended)
+
+The `lib/loader` package provides ready-to-use renderers for Babylon.js:
+
+```typescript
+import {
+  WorldLoader,
+  TerrainRenderer,
+  FoliageRenderer,
+  SkyWeatherRenderer,
+  WaterRenderer,
+} from "@world-editor/loader";
+
+async function loadWorld(jsonUrl: string, scene: Scene) {
+  // Load world data
+  const response = await fetch(jsonUrl);
+  const json = await response.text();
+  const result = WorldLoader.loadWorld(json);
+
+  if (!result.success) {
+    console.error("Failed to load world:", result.errors);
+    return;
+  }
+
+  const world = result.data!;
+  const tile = world.mainTile!;
+
+  // Create terrain
+  const terrain = new TerrainRenderer(scene);
+  terrain.create({
+    heightmap: tile.heightmap,
+    resolution: tile.resolution,
+    splatmap: tile.splatmap,
+    waterMask: tile.waterMask,
+    size: tile.size,
+    seaLevel: tile.seaLevel,
+  });
+
+  // Create foliage (grass, trees, etc.)
+  const foliage = new FoliageRenderer(scene);
+  foliage.create(tile.foliage, {
+    heightmap: tile.heightmap,
+    resolution: tile.resolution,
+    size: tile.size,
+  });
+
+  // Create sky and weather
+  const sky = new SkyWeatherRenderer(scene);
+  if (world.weather) {
+    sky.setWeather(world.weather);
+  }
+  sky.startAnimation();
+
+  // Create water
+  const water = new WaterRenderer(scene);
+  water.create({
+    size: tile.size,
+    seaLevel: tile.seaLevel,
+  });
+  water.setSunDirection(sky.getSunDirection());
+  water.startAnimation();
+
+  return { terrain, foliage, sky, water };
+}
+```
+
+### Available Renderers
+
+| Renderer | Features |
+|----------|----------|
+| `TerrainRenderer` | LOD terrain, shader materials, splatmap |
+| `FoliageRenderer` | Grass, trees, rocks with instancing |
+| `SkyWeatherRenderer` | Procedural sky, clouds, rain/snow |
+| `WaterRenderer` | Animated water plane with waves |
+
+### Weather Presets
+
+```typescript
+// Available presets
+sky.setWeatherPreset("clear");   // Sunny day
+sky.setWeatherPreset("cloudy");  // Overcast
+sky.setWeatherPreset("rainy");   // Rain
+sky.setWeatherPreset("stormy");  // Heavy rain
+sky.setWeatherPreset("snowy");   // Snow
+
+// Or set time of day (0-24)
+sky.setTimeOfDay(18); // Sunset
+```

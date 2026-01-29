@@ -1092,7 +1092,7 @@ export class ProceduralAsset {
 
     // === 줄기 형태 파라미터 ===
     const trunkHeight = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 1.2;                    // 0.8 ~ 2.0
-    const trunkThickness = 0.06 + Math.abs(noise3D(0, seed, 0)) * 0.1;               // 0.06 ~ 0.16
+    const trunkThickness = 0.025 + Math.abs(noise3D(0, seed, 0)) * 0.04;             // 0.025 ~ 0.065
     const trunkTaper = 0.25 + Math.abs(noise3D(0, 0, seed)) * 0.45;                   // 0.25 ~ 0.7 (위쪽 비율)
     const trunkBendX = noise3D(seed * 2, 0, 0) * 0.3;                                 // 휘어짐
     const trunkBendZ = noise3D(0, 0, seed * 2) * 0.3;
