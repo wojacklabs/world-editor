@@ -81,9 +81,11 @@ export default function EditorPage() {
     if (!heightmap || !terrainMesh) return;
 
     const splatMap = terrainMesh.getSplatMap();
+    const foliageData = engine.exportFoliageData();
+    const proceduralProps = engine.exportProceduralProps();
 
     const project = {
-      version: "1.1.0",
+      version: "1.2.0",
       name: projectName,
       createdAt: new Date().toISOString(),
       modifiedAt: new Date().toISOString(),
@@ -92,6 +94,7 @@ export default function EditorPage() {
         resolution: heightmap.getResolution() - 1,
         heightmap: heightmap.toBase64(),
         splatmap: splatMap.toBase64(),
+        seaLevel: engine.getSeaLevel(),
       },
       materials: { slots: [] },
       props: placedAssets.map((a) => ({
@@ -102,6 +105,8 @@ export default function EditorPage() {
         rotation: a.rotation,
         scale: a.scale,
       })),
+      proceduralProps: proceduralProps,
+      foliage: foliageData,
       settings: {
         seamlessTiling: false,
         waterLevel: 0,

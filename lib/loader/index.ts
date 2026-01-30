@@ -37,13 +37,18 @@ export type {
   TilePlacement,
   MaterialSlot,
   PropInstance,
+  ProceduralPropInstance,
 } from "./types";
 
 // Types - Load Options
 export type { LoadOptions, LoadResult } from "./types";
 
 // Types - Terrain Rendering
-export type { TerrainRenderData, TerrainRendererOptions } from "./types";
+export type {
+  TerrainRenderData,
+  TerrainRendererOptions,
+  TerrainTextureUrls,
+} from "./types";
 
 // Types - Foliage Rendering
 export type { FoliageRendererOptions } from "./types";
@@ -57,3 +62,9 @@ export { SkyWeatherRenderer } from "./SkyWeatherRenderer";
 export type { SkyWeatherOptions } from "./SkyWeatherRenderer";
 export { WaterRenderer } from "./WaterRenderer";
 export type { WaterConfig } from "./WaterRenderer";
+export { ProceduralPropsRenderer } from "./ProceduralPropsRenderer";
+export type { ProceduralPropsRendererOptions } from "./ProceduralPropsRenderer";
+export { GLBPropsRenderer } from "./GLBPropsRenderer";
+export type { GLBPropsRendererOptions } from "./GLBPropsRenderer";
+export { ProceduralAssetGenerator } from "./ProceduralAssetGenerator";
+export type { GeneratorParams } from "./ProceduralAssetGenerator";
