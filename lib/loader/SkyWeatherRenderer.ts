@@ -34,7 +34,6 @@ import {
   Effect,
   Observer,
   VertexData,
-  VertexBuffer,
   Engine,
 } from "@babylonjs/core";
 import type { WeatherData, WeatherPreset } from "./types";

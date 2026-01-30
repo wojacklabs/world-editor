@@ -17,7 +17,6 @@ import type {
   LoadOptions,
   LoadResult,
   WorldMetadata,
-  TileConnections,
   WeatherData,
 } from "./types";
 
@@ -317,7 +316,7 @@ export class WorldLoader {
         heightmap: DataCodec.decodeHeightmap(data.terrain.heightmap),
         splatmap: DataCodec.decodeFloat32Array(data.terrain.splatmap),
         waterMask,
-        seaLevel: data.settings.waterLevel,
+        seaLevel: data.terrain.seaLevel ?? data.settings.waterLevel ?? 0,
         waterDepth: data.settings.waterDepth ?? 2.0,
         foliage,
         connections: {},
@@ -352,6 +351,8 @@ export class WorldLoader {
         waterDepth: data.settings.waterDepth ?? 2.0,
       },
       weather,
+      props: data.props ?? [],
+      proceduralProps: data.proceduralProps ?? [],
     };
   }
 

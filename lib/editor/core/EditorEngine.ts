@@ -1074,6 +1074,31 @@ export class EditorEngine {
     return { chunks: stats.chunks, instances: stats.totalInstances };
   }
 
+  /**
+   * Export foliage data for saving
+   * Returns type -> Base64 encoded matrices
+   */
+  exportFoliageData(): Record<string, string> | null {
+    if (!this.foliageSystem) return null;
+    return this.foliageSystem.exportTileData();
+  }
+
+  /**
+   * Export procedural props data for saving
+   */
+  exportProceduralProps(): any[] | null {
+    if (!this.propManager) return null;
+    return this.propManager.exportInstances();
+  }
+
+  /**
+   * Import procedural props data from save
+   */
+  importProceduralProps(data: any[]): void {
+    if (!this.propManager) return;
+    this.propManager.importInstances(data);
+  }
+
   updateBrushPreview(size: number): void {
     if (this.brushPreview) {
       this.brushPreview.scaling.setAll(size / 5);

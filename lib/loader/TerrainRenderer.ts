@@ -41,7 +41,7 @@ import {
   Color3,
   StandardMaterial,
 } from "@babylonjs/core";
-import type { TerrainRenderData, TerrainRendererOptions } from "./types";
+import type { TerrainRenderData, TerrainRendererOptions, TerrainTextureUrls } from "./types";
 
 // ============================================
 // Simplified Terrain Shader (inline)
@@ -111,12 +111,22 @@ uniform float uAmbientIntensity;
 uniform float uWaterLevel;
 uniform vec3 uCameraPosition;
 uniform float uDebugMode;
+uniform float uUseTextures;
+uniform float uTileScale;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
 
-// Material colors
-const vec3 grassColor = vec3(0.2, 0.5, 0.15);
-const vec3 dirtColor = vec3(0.4, 0.3, 0.2);
-const vec3 rockColor = vec3(0.5, 0.5, 0.5);
-const vec3 sandColor = vec3(0.76, 0.7, 0.5);
+// Texture samplers
+uniform sampler2D uGrassTexture;
+uniform sampler2D uDirtTexture;
+uniform sampler2D uRockTexture;
+uniform sampler2D uSandTexture;
+
+// Fallback colors (matching editor's TerrainShader)
+const vec3 grassColor = vec3(0.4, 0.6, 0.25);   // Bright green grass
+const vec3 dirtColor = vec3(0.52, 0.42, 0.28);  // Warm brown dirt
+const vec3 rockColor = vec3(0.48, 0.48, 0.5);   // Gray rock
+const vec3 sandColor = vec3(0.82, 0.72, 0.52);  // Warm sandy yellow
 const vec3 waterColor = vec3(0.1, 0.3, 0.5);
 
 void main() {
@@ -124,27 +134,41 @@ void main() {
 
     // Debug mode
     if (uDebugMode > 0.5 && uDebugMode < 1.5) {
-        // Splatmap visualization
         gl_FragColor = vec4(vSplatWeights.rgb, 1.0);
         return;
     }
     if (uDebugMode > 1.5 && uDebugMode < 2.5) {
-        // Normal visualization
         gl_FragColor = vec4(normal * 0.5 + 0.5, 1.0);
         return;
     }
     if (uDebugMode > 2.5) {
-        // Height visualization
         float h = clamp(vHeight / 20.0, 0.0, 1.0);
         gl_FragColor = vec4(h, h, h, 1.0);
         return;
     }
 
-    // Blend materials based on splatmap
-    vec3 baseColor = grassColor * vSplatWeights.r +
-                     dirtColor * vSplatWeights.g +
-                     rockColor * vSplatWeights.b +
-                     sandColor * vSplatWeights.a;
+    vec3 baseColor;
+    vec2 tiledUV = vUV * uTileScale;
+
+    if (uUseTextures > 0.5) {
+        // Sample textures
+        vec3 grassSample = texture2D(uGrassTexture, tiledUV).rgb;
+        vec3 dirtSample = texture2D(uDirtTexture, tiledUV).rgb;
+        vec3 rockSample = texture2D(uRockTexture, tiledUV).rgb;
+        vec3 sandSample = texture2D(uSandTexture, tiledUV).rgb;
+
+        // Blend based on splatmap
+        baseColor = grassSample * vSplatWeights.r +
+                    dirtSample * vSplatWeights.g +
+                    rockSample * vSplatWeights.b +
+                    sandSample * vSplatWeights.a;
+    } else {
+        // Use solid colors
+        baseColor = grassColor * vSplatWeights.r +
+                    dirtColor * vSplatWeights.g +
+                    rockColor * vSplatWeights.b +
+                    sandColor * vSplatWeights.a;
+    }
 
     // Water mask blending
     if (vWaterMask > 0.5) {
@@ -155,13 +179,24 @@ void main() {
     float NdotL = max(dot(normal, normalize(uSunDirection)), 0.0);
     float diffuse = NdotL * 0.8 + uAmbientIntensity;
 
-    // Simple fog
-    float dist = length(uCameraPosition - vPositionW);
-    float fog = 1.0 - clamp(dist / 500.0, 0.0, 0.5);
+    vec3 color = baseColor * diffuse;
 
-    vec3 finalColor = baseColor * diffuse * fog;
+    // Fog (matching editor's TerrainShader)
+    float distanceToCamera = length(uCameraPosition - vPositionW);
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
 
-    gl_FragColor = vec4(finalColor, 1.0);
+    // Height fog
+    float fogHeight = 10.0;
+    float heightFog = clamp((fogHeight - vPositionW.y) / fogHeight, 0.0, 0.3);
+
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+    color = mix(color, uFogColor, fogFactor);
+
+    // Tone mapping
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
+
+    gl_FragColor = vec4(color, 1.0);
 }
 `;
 
@@ -178,9 +213,13 @@ export class TerrainRenderer {
 
   private splatTexture: RawTexture | null = null;
   private waterMaskTexture: RawTexture | null = null;
+  private biomeTextures: Map<string, Texture> = new Map();
+  private tileScale: number = 16;
 
   private data: TerrainRenderData | null = null;
-  private options: Required<TerrainRendererOptions>;
+  private options: Omit<Required<TerrainRendererOptions>, "textures"> & {
+    textures?: TerrainTextureUrls;
+  };
 
   private lodEnabled: boolean = true;
   private currentLOD: number = 0;
@@ -197,13 +236,65 @@ export class TerrainRenderer {
       useShader: options.useShader ?? true,
       wireframe: options.wireframe ?? false,
       dispStrength: options.dispStrength ?? 0.3,
+      textures: options.textures,
     };
 
     this.wireframe = this.options.wireframe;
     this.dispStrength = this.options.dispStrength;
     this.lodEnabled = this.options.lodEnabled;
+    this.tileScale = options.textures?.tileScale ?? 16;
 
     this.registerShader();
+
+    // Load biome textures if provided
+    if (options.textures) {
+      this.loadBiomeTextures(options.textures);
+    }
+  }
+
+  /**
+   * Load biome textures from URLs
+   */
+  loadBiomeTextures(urls: TerrainTextureUrls): void {
+    if (urls.grass) {
+      const tex = new Texture(urls.grass, this.scene);
+      tex.wrapU = Texture.WRAP_ADDRESSMODE;
+      tex.wrapV = Texture.WRAP_ADDRESSMODE;
+      this.biomeTextures.set("uGrassTexture", tex);
+    }
+    if (urls.dirt) {
+      const tex = new Texture(urls.dirt, this.scene);
+      tex.wrapU = Texture.WRAP_ADDRESSMODE;
+      tex.wrapV = Texture.WRAP_ADDRESSMODE;
+      this.biomeTextures.set("uDirtTexture", tex);
+    }
+    if (urls.rock) {
+      const tex = new Texture(urls.rock, this.scene);
+      tex.wrapU = Texture.WRAP_ADDRESSMODE;
+      tex.wrapV = Texture.WRAP_ADDRESSMODE;
+      this.biomeTextures.set("uRockTexture", tex);
+    }
+    if (urls.sand) {
+      const tex = new Texture(urls.sand, this.scene);
+      tex.wrapU = Texture.WRAP_ADDRESSMODE;
+      tex.wrapV = Texture.WRAP_ADDRESSMODE;
+      this.biomeTextures.set("uSandTexture", tex);
+    }
+
+    if (urls.tileScale) {
+      this.tileScale = urls.tileScale;
+    }
+
+    // Update shader if material already exists
+    if (this.material) {
+      this.material.setFloat("uUseTextures", this.biomeTextures.size > 0 ? 1.0 : 0.0);
+      this.material.setFloat("uTileScale", this.tileScale);
+      for (const [name, texture] of this.biomeTextures) {
+        this.material.setTexture(name, texture);
+      }
+    }
+
+    console.log(`[TerrainRenderer] Loaded ${this.biomeTextures.size} biome textures`);
   }
 
   // ============================================
@@ -388,6 +479,16 @@ export class TerrainRenderer {
   }
 
   /**
+   * Set fog parameters for terrain shader
+   */
+  setFog(color: Color3, density: number): void {
+    if (this.material) {
+      this.material.setColor3("uFogColor", color);
+      this.material.setFloat("uFogDensity", density);
+    }
+  }
+
+  /**
    * Dispose all resources
    */
   dispose(): void {
@@ -479,8 +580,19 @@ export class TerrainRenderer {
           "uAmbientIntensity",
           "uCameraPosition",
           "uDebugMode",
+          "uUseTextures",
+          "uTileScale",
+          "uFogColor",
+          "uFogDensity",
         ],
-        samplers: ["uSplatMap", "uWaterMask"],
+        samplers: [
+          "uSplatMap",
+          "uWaterMask",
+          "uGrassTexture",
+          "uDirtTexture",
+          "uRockTexture",
+          "uSandTexture",
+        ],
       }
     );
 
@@ -491,12 +603,35 @@ export class TerrainRenderer {
     this.material.setVector3("uSunDirection", new Vector3(0.5, 1, 0.3).normalize());
     this.material.setFloat("uAmbientIntensity", 0.3);
     this.material.setFloat("uDebugMode", this.debugMode);
+    this.material.setFloat("uUseTextures", this.biomeTextures.size > 0 ? 1.0 : 0.0);
+    this.material.setFloat("uTileScale", this.tileScale);
+
+    // Fog settings (matching editor's TerrainShader)
+    this.material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+    this.material.setFloat("uFogDensity", this.scene.fogDensity ?? 0.008);
 
     if (this.splatTexture) {
       this.material.setTexture("uSplatMap", this.splatTexture);
     }
     if (this.waterMaskTexture) {
       this.material.setTexture("uWaterMask", this.waterMaskTexture);
+    }
+
+    // Create a default 1x1 white texture for unbound samplers
+    const defaultPixels = new Uint8Array([255, 255, 255, 255]);
+    const defaultTexture = new RawTexture(
+      defaultPixels, 1, 1, Engine.TEXTUREFORMAT_RGBA, this.scene, false, false
+    );
+
+    // Bind default texture to all samplers first
+    this.material.setTexture("uGrassTexture", defaultTexture);
+    this.material.setTexture("uDirtTexture", defaultTexture);
+    this.material.setTexture("uRockTexture", defaultTexture);
+    this.material.setTexture("uSandTexture", defaultTexture);
+
+    // Override with loaded biome textures
+    for (const [name, texture] of this.biomeTextures) {
+      this.material.setTexture(name, texture);
     }
 
     this.material.wireframe = this.wireframe;
@@ -552,12 +687,16 @@ export class TerrainRenderer {
       this.scene
     );
 
+    // Offset mesh to match editor coordinates (0,0)~(size,size) instead of centered
+    mesh.position.x = size / 2;
+    mesh.position.z = size / 2;
+
     this.updateMeshVertices(mesh, resolution);
 
     return mesh;
   }
 
-  private updateMeshVertices(mesh: Mesh, targetRes: number): void {
+  private updateMeshVertices(mesh: Mesh, _targetRes: number): void {
     if (!this.data) return;
 
     const positions = mesh.getVerticesData(VertexBuffer.PositionKind);

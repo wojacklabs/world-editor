@@ -27,9 +27,175 @@ import {
   VertexData,
   VertexBuffer,
   StandardMaterial,
+  ShaderMaterial,
+  Effect,
   Color3,
 } from "@babylonjs/core";
 import type { FoliageRendererOptions } from "./types";
+
+// ============================================
+// Register Grass Shader (matching editor/FoliageSystem)
+// ============================================
+
+Effect.ShadersStore["loaderGrassVertexShader"] = `
+precision highp float;
+
+attribute vec3 position;
+attribute vec3 normal;
+attribute vec4 color;
+
+attribute vec4 world0;
+attribute vec4 world1;
+attribute vec4 world2;
+attribute vec4 world3;
+
+uniform mat4 viewProjection;
+uniform float uTime;
+uniform float uWindStrength;
+uniform vec3 uCameraPosition;
+uniform float uLodFar;
+
+varying vec3 vNormal;
+varying vec4 vColor;
+varying float vHeight;
+varying vec3 vWorldPosition;
+
+void main() {
+    mat4 worldMatrix = mat4(world0, world1, world2, world3);
+    vec4 worldPos = worldMatrix * vec4(position, 1.0);
+
+    // Camera height extends LOD distance
+    float cameraHeight = max(0.0, uCameraPosition.y - 10.0);
+    float heightBonus = cameraHeight * 1.5;
+    float effectiveLodFar = uLodFar + heightBonus;
+
+    // Distance-based LOD scale
+    float distanceToCamera = length(worldPos.xz - uCameraPosition.xz);
+    float distanceRatio = distanceToCamera / effectiveLodFar;
+    float lodScale = 1.0 - smoothstep(0.7, 1.0, distanceRatio);
+
+    // Grass base position
+    vec3 grassBase = vec3(worldPos.x, worldPos.y - position.y, worldPos.z);
+
+    // Wind animation
+    float windScale = 1.0 - smoothstep(0.2, 0.5, distanceRatio);
+    float heightWindAtten = 1.0 / (1.0 + cameraHeight * 0.03);
+    float windFactor = position.y * uWindStrength * windScale * heightWindAtten;
+    float windX = sin(uTime * 2.0 + worldPos.x * 0.5 + worldPos.z * 0.3) * windFactor;
+    float windZ = cos(uTime * 1.5 + worldPos.x * 0.3 + worldPos.z * 0.5) * windFactor * 0.5;
+
+    // Apply scale and wind
+    vec3 finalPos = mix(grassBase, worldPos.xyz, lodScale);
+    finalPos.x += windX;
+    finalPos.z += windZ;
+
+    vWorldPosition = finalPos;
+    vHeight = position.y * lodScale;
+
+    gl_Position = viewProjection * vec4(finalPos, 1.0);
+    vNormal = normalize(mat3(worldMatrix) * normal);
+    vColor = color;
+}
+`;
+
+Effect.ShadersStore["loaderGrassFragmentShader"] = `
+precision highp float;
+
+varying vec3 vNormal;
+varying vec4 vColor;
+varying float vHeight;
+varying vec3 vWorldPosition;
+
+uniform vec3 uSunDirection;
+uniform vec3 uSunColor;
+uniform float uAmbient;
+uniform vec3 uCameraPosition;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+
+float hash3D(vec3 p) {
+    return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+float noise3D(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash3D(i);
+    float n100 = hash3D(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash3D(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash3D(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash3D(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash3D(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash3D(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash3D(i + vec3(1.0, 1.0, 1.0));
+    vec4 n_z0 = vec4(n000, n100, n010, n110);
+    vec4 n_z1 = vec4(n001, n101, n011, n111);
+    vec4 n_zz = mix(n_z0, n_z1, f.z);
+    vec2 n_y = mix(n_zz.xy, n_zz.zw, f.y);
+    return mix(n_y.x, n_y.y, f.x);
+}
+
+float fbm(vec3 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    for (int i = 0; i < 3; i++) {
+        value += amplitude * noise3D(p);
+        p *= 2.0;
+        amplitude *= 0.5;
+    }
+    return value;
+}
+
+void main() {
+    vec3 normal = normalize(vNormal);
+    vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
+
+    // Use vertex color
+    vec3 meshColor = vColor.rgb;
+
+    // Color variation via FBM noise
+    float colorNoise = fbm(vWorldPosition * 2.0);
+    vec3 color = mix(meshColor, meshColor * 0.8, colorNoise * 0.3);
+
+    // Height-based color: tips lighter
+    float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;
+    color = mix(color * 0.85, color * 1.1, vHeight * isLeaf);
+
+    // Half-Lambert diffuse
+    float NdotL = dot(normal, uSunDirection);
+    float halfLambert = NdotL * 0.5 + 0.5;
+    halfLambert = halfLambert * halfLambert;
+
+    // Rim lighting
+    float rimFactor = 1.0 - max(dot(normal, viewDir), 0.0);
+    rimFactor = pow(rimFactor, 3.0) * 0.08;
+
+    // Subsurface scattering approximation
+    float sss = max(0.0, dot(-viewDir, uSunDirection)) * vHeight * 0.15;
+
+    // Final lighting
+    float diffuse = halfLambert * 0.6 + 0.4;
+    vec3 ambient = vec3(uAmbient);
+    vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
+
+    color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
+
+    // Fog
+    float distanceToCamera = length(vWorldPosition - uCameraPosition);
+    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
+
+    // Tone mapping and gamma
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
+
+    // Alpha test for grass edges
+    if (vColor.a < 0.1) discard;
+
+    gl_FragColor = vec4(color, 1.0);
+}
+`;
 
 // ============================================
 // Noise Functions (from editor/FoliageSystem)
@@ -127,11 +293,15 @@ export class FoliageRenderer {
   private baseMeshes: Map<string, Mesh> = new Map();
 
   // Materials
-  private grassMaterial: StandardMaterial | null = null;
+  private grassMaterial: ShaderMaterial | null = null;
   private rockMaterial: StandardMaterial | null = null;
   private treeMaterial: StandardMaterial | null = null;
   private flowerMaterial: StandardMaterial | null = null;
   private bushMaterial: StandardMaterial | null = null;
+
+  // Time tracking for wind animation
+  private startTime: number = Date.now();
+  private beforeRenderObserver: ReturnType<typeof Scene.prototype.onBeforeRenderObservable.add> | null = null;
 
   // Statistics
   private totalInstances: number = 0;
@@ -222,7 +392,7 @@ export class FoliageRenderer {
     const { far } = this.options.lodDistances;
     const chunkSize = this.options.chunkSize;
 
-    for (const [key, chunk] of this.chunks) {
+    for (const [_key, chunk] of this.chunks) {
       const chunkCenterX = (chunk.x + 0.5) * chunkSize;
       const chunkCenterZ = (chunk.z + 0.5) * chunkSize;
 
@@ -278,9 +448,43 @@ export class FoliageRenderer {
   }
 
   /**
+   * Set sun direction for grass shader lighting
+   */
+  setSunDirection(direction: Vector3): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setVector3("uSunDirection", direction.normalize());
+    }
+  }
+
+  /**
+   * Set fog parameters for grass shader
+   */
+  setFog(color: Color3, density: number): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setColor3("uFogColor", color);
+      this.grassMaterial.setFloat("uFogDensity", density);
+    }
+  }
+
+  /**
+   * Set wind strength for grass animation
+   */
+  setWindStrength(strength: number): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.setFloat("uWindStrength", strength);
+    }
+  }
+
+  /**
    * Dispose all resources
    */
   dispose(): void {
+    // Remove render observer
+    if (this.beforeRenderObserver) {
+      this.scene.onBeforeRenderObservable.remove(this.beforeRenderObserver);
+      this.beforeRenderObserver = null;
+    }
+
     // Dispose all chunk meshes
     for (const chunk of this.chunks.values()) {
       for (const mesh of chunk.meshes.values()) {
@@ -314,30 +518,70 @@ export class FoliageRenderer {
   // ============================================
 
   private createMaterials(): void {
-    // Grass material (green)
-    this.grassMaterial = new StandardMaterial("foliageGrass", this.scene);
-    this.grassMaterial.diffuseColor = new Color3(0.2, 0.5, 0.15);
+    // Grass material - ShaderMaterial with wind animation and fog (matching editor)
+    this.grassMaterial = new ShaderMaterial(
+      "loaderGrass",
+      this.scene,
+      {
+        vertex: "loaderGrass",
+        fragment: "loaderGrass",
+      },
+      {
+        attributes: ["position", "normal", "color", "world0", "world1", "world2", "world3"],
+        uniforms: ["viewProjection", "uTime", "uWindStrength", "uCameraPosition", "uLodFar", "uSunDirection", "uSunColor", "uAmbient", "uFogColor", "uFogDensity"],
+        needAlphaBlending: false,
+        needAlphaTesting: true,
+      }
+    );
     this.grassMaterial.backFaceCulling = false;
 
-    // Rock material (gray)
+    // Set initial uniform values
+    this.grassMaterial.setFloat("uTime", 0);
+    this.grassMaterial.setFloat("uWindStrength", 0.15);
+    this.grassMaterial.setVector3("uCameraPosition", this.scene.activeCamera?.position ?? new Vector3(0, 10, 0));
+    this.grassMaterial.setFloat("uLodFar", this.options.lodDistances.far);
+    this.grassMaterial.setVector3("uSunDirection", new Vector3(-0.5, 0.8, -0.3).normalize());
+    this.grassMaterial.setColor3("uSunColor", new Color3(1.0, 0.95, 0.85));
+    this.grassMaterial.setFloat("uAmbient", 0.4);
+    this.grassMaterial.setColor3("uFogColor", new Color3(0.55, 0.7, 0.9));
+    this.grassMaterial.setFloat("uFogDensity", this.scene.fogDensity ?? 0.008);
+
+    // Setup time update for wind animation
+    this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => {
+      if (this.grassMaterial) {
+        const elapsed = (Date.now() - this.startTime) / 1000;
+        this.grassMaterial.setFloat("uTime", elapsed);
+
+        // Update camera position for LOD and fog
+        if (this.scene.activeCamera) {
+          this.grassMaterial.setVector3("uCameraPosition", this.scene.activeCamera.position);
+        }
+      }
+    });
+
+    // Rock material - use white diffuse so vertex colors show through
     this.rockMaterial = new StandardMaterial("foliageRock", this.scene);
-    this.rockMaterial.diffuseColor = new Color3(0.5, 0.5, 0.5);
+    this.rockMaterial.diffuseColor = new Color3(1, 1, 1);  // White to let vertex colors through
     this.rockMaterial.backFaceCulling = false;
+    this.rockMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
 
-    // Tree material (brown trunk, green leaves)
+    // Tree material - use white diffuse so vertex colors show through
     this.treeMaterial = new StandardMaterial("foliageTree", this.scene);
-    this.treeMaterial.diffuseColor = new Color3(0.15, 0.4, 0.1);
+    this.treeMaterial.diffuseColor = new Color3(1, 1, 1);  // White to let vertex colors through
     this.treeMaterial.backFaceCulling = false;
+    this.treeMaterial.specularColor = new Color3(0.05, 0.05, 0.05);
 
-    // Flower material (colorful)
+    // Flower material - use white diffuse so vertex colors show through
     this.flowerMaterial = new StandardMaterial("foliageFlower", this.scene);
-    this.flowerMaterial.diffuseColor = new Color3(0.9, 0.3, 0.4);
+    this.flowerMaterial.diffuseColor = new Color3(1, 1, 1);  // White to let vertex colors through
     this.flowerMaterial.backFaceCulling = false;
+    this.flowerMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
 
-    // Bush material (darker green)
+    // Bush material - use white diffuse so vertex colors show through
     this.bushMaterial = new StandardMaterial("foliageBush", this.scene);
-    this.bushMaterial.diffuseColor = new Color3(0.15, 0.35, 0.1);
+    this.bushMaterial.diffuseColor = new Color3(1, 1, 1);  // White to let vertex colors through
     this.bushMaterial.backFaceCulling = false;
+    this.bushMaterial.specularColor = new Color3(0.05, 0.05, 0.05);
   }
 
   private createBaseMeshes(): void {
@@ -828,16 +1072,18 @@ export class FoliageRenderer {
     const meshName = `foliage_${chunkX}_${chunkZ}_${typeName}`;
     const mesh = new Mesh(meshName, this.scene);
 
-    // Copy vertex data from base mesh
+    // Copy vertex data from base mesh (including colors for shader)
     const vertexData = new VertexData();
     const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
     const normals = baseMesh.getVerticesData(VertexBuffer.NormalKind);
     const uvs = baseMesh.getVerticesData(VertexBuffer.UVKind);
+    const colors = baseMesh.getVerticesData(VertexBuffer.ColorKind);
     const indices = baseMesh.getIndices();
 
     if (positions) vertexData.positions = new Float32Array(positions);
     if (normals) vertexData.normals = new Float32Array(normals);
     if (uvs) vertexData.uvs = new Float32Array(uvs);
+    if (colors) vertexData.colors = new Float32Array(colors);
     if (indices) vertexData.indices = new Uint32Array(indices);
 
     vertexData.applyToMesh(mesh);
@@ -876,8 +1122,11 @@ export class FoliageRenderer {
     if (typeName.startsWith("grass")) {
       return this.baseMeshes.get("grass");
     }
-    if (typeName.startsWith("rock")) {
+    if (typeName.startsWith("rock") || typeName.startsWith("sandRock")) {
       return this.baseMeshes.get("rock");
+    }
+    if (typeName.startsWith("pebble")) {
+      return this.baseMeshes.get("pebble");
     }
     if (typeName.startsWith("tree")) {
       return this.baseMeshes.get("tree");
@@ -887,6 +1136,9 @@ export class FoliageRenderer {
     }
     if (typeName.startsWith("bush")) {
       return this.baseMeshes.get("bush");
+    }
+    if (typeName.startsWith("sand")) {
+      return this.baseMeshes.get("rock"); // sandRock -> rock
     }
 
     return undefined;
