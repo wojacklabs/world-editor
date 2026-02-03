@@ -13,6 +13,7 @@ import { useEditorStore } from "@/lib/editor/store/editorStore";
 import { SavedAsset } from "@/lib/editor/assets/AssetLibrary";
 import { MeshData, createMeshFromData } from "@/lib/editor/assets/CustomMeshBuilder";
 import { getManualTileManager } from "@/lib/editor/tiles/ManualTileManager";
+import { createWorldRenderingConfig } from "@/lib/shared/foliage/FoliageQualityProfile";
 
 import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
 import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
@@ -85,7 +86,7 @@ export default function EditorPage() {
     const proceduralProps = engine.exportProceduralProps();
 
     const project = {
-      version: "1.2.0",
+      version: "2.0.0",
       name: projectName,
       createdAt: new Date().toISOString(),
       modifiedAt: new Date().toISOString(),
@@ -105,6 +106,7 @@ export default function EditorPage() {
         rotation: a.rotation,
         scale: a.scale,
       })),
+      rendering: createWorldRenderingConfig(),
       proceduralProps: proceduralProps,
       foliage: foliageData,
       settings: {
