@@ -68,6 +68,11 @@ uniform float uTerrainScale;
 uniform float uHeightScale;
 uniform float uMinHeight;
 
+// Interactive water (ripples from player/objects)
+uniform sampler2D uInteractiveHeight;
+uniform float uInteractiveEnabled;
+uniform float uInteractiveStrength;
+
 varying vec3 vWorldPos;
 varying vec3 vNormal;
 varying vec2 vUV;
@@ -111,6 +116,13 @@ void main() {
     displacement += gerstnerWave(uWave2, worldPos);
     displacement += gerstnerWave(uWave3, worldPos);
     displacement *= depthDamping;
+
+    // Add interactive water ripples (from player/objects)
+    if (uInteractiveEnabled > 0.5) {
+        vec2 interactiveUV = clamp(worldPos.xz / uTerrainScale, 0.0, 1.0);
+        float interactiveHeight = texture2D(uInteractiveHeight, interactiveUV).r;
+        displacement.y += interactiveHeight * uInteractiveStrength * depthDamping;
+    }
 
     worldPos += displacement;
     vWaveHeight = displacement.y;
@@ -576,8 +588,9 @@ export class WaterSystem {
           "uReflectionStrength", "uReflectionEnabled",
           "uFogColor", "uFogDensity",
           "uWaveAngle",
+          "uInteractiveEnabled", "uInteractiveStrength",
         ],
-        samplers: ["uHeightmap", "uReflectionSampler"],
+        samplers: ["uHeightmap", "uReflectionSampler", "uInteractiveHeight"],
         needAlphaBlending: true,
       }
     );
@@ -593,7 +606,13 @@ export class WaterSystem {
     // Always bind reflection sampler (WebGPU requires all declared samplers bound)
     if (this.dummyTexture) {
       this.waterMaterial.setTexture("uReflectionSampler", this.dummyTexture);
+      // Bind interactive height texture (disabled by default)
+      this.waterMaterial.setTexture("uInteractiveHeight", this.dummyTexture);
     }
+
+    // Interactive water defaults (disabled)
+    this.waterMaterial.setFloat("uInteractiveEnabled", 0.0);
+    this.waterMaterial.setFloat("uInteractiveStrength", 1.0);
 
     // Set heightmap uniforms (used in both vertex and fragment shaders)
     this.waterMaterial.setFloat("uTerrainScale", this.heightmap.getScale());
@@ -840,6 +859,36 @@ export class WaterSystem {
    */
   getMaterial(): ShaderMaterial | null {
     return this.waterMaterial;
+  }
+
+  /**
+   * Enable interactive water and bind height texture
+   * @param heightTexture - Height field texture from InteractiveWater.getHeightTexture()
+   * @param strength - Ripple strength multiplier (default 1.0)
+   */
+  setInteractiveWater(heightTexture: Texture | null, strength: number = 1.0): void {
+    if (!this.waterMaterial) return;
+
+    if (heightTexture) {
+      this.waterMaterial.setTexture("uInteractiveHeight", heightTexture);
+      this.waterMaterial.setFloat("uInteractiveEnabled", 1.0);
+      this.waterMaterial.setFloat("uInteractiveStrength", strength);
+    } else {
+      // Disable interactive water
+      if (this.dummyTexture) {
+        this.waterMaterial.setTexture("uInteractiveHeight", this.dummyTexture);
+      }
+      this.waterMaterial.setFloat("uInteractiveEnabled", 0.0);
+    }
+  }
+
+  /**
+   * Update interactive water strength
+   */
+  setInteractiveStrength(strength: number): void {
+    if (this.waterMaterial) {
+      this.waterMaterial.setFloat("uInteractiveStrength", strength);
+    }
   }
 
   /**

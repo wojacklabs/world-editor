@@ -13,18 +13,21 @@ import { KhronosTextureContainer2 } from "@babylonjs/core/Misc/khronosTextureCon
  */
 export function initializeKTX2Support(): void {
   // Configure KTX2 decoder URL
-  // Uses Babylon.js CDN for decoder files (WASM-based)
+  // Uses Babylon.js preview CDN for decoder files (compatible with Babylon.js 8.x)
+  const cdnBase = "https://preview.babylonjs.com/ktx2Decoder";
+
   KhronosTextureContainer2.URLConfig = {
-    jsDecoderModule: "https://cdn.babylonjs.com/ktx2Decoder/0.1.0/ktx2Decoder.js",
-    wasmUASTCToASTC: "https://cdn.babylonjs.com/ktx2Decoder/0.1.0/uastc_astc.wasm",
-    wasmUASTCToBC7: "https://cdn.babylonjs.com/ktx2Decoder/0.1.0/uastc_bc7.wasm",
-    wasmUASTCToRGBA_UNORM: "https://cdn.babylonjs.com/ktx2Decoder/0.1.0/uastc_rgba32_unorm.wasm",
-    wasmUASTCToRGBA_SRGB: "https://cdn.babylonjs.com/ktx2Decoder/0.1.0/uastc_rgba32_srgb.wasm",
+    jsDecoderModule: `${cdnBase}/ktx2Decoder.js`,
+    wasmUASTCToASTC: `${cdnBase}/uastc_astc.wasm`,
+    wasmUASTCToBC7: `${cdnBase}/uastc_bc7.wasm`,
+    wasmUASTCToRGBA_UNORM: `${cdnBase}/uastc_rgba32_unorm.wasm`,
+    wasmUASTCToRGBA_SRGB: `${cdnBase}/uastc_rgba32_srgb.wasm`,
     wasmUASTCToR8_UNORM: null,
     wasmUASTCToRG8_UNORM: null,
-    wasmZSTDDecoder: "https://cdn.babylonjs.com/ktx2Decoder/0.1.0/zstddec.wasm",
-    jsMSCTranscoder: null,
-    wasmMSCTranscoder: null,
+    wasmZSTDDecoder: `${cdnBase}/zstddec.wasm`,
+    // ETC1S/Basis Universal transcoder for ETC1S encoded textures
+    jsMSCTranscoder: `${cdnBase}/msc_basis_transcoder.js`,
+    wasmMSCTranscoder: `${cdnBase}/msc_basis_transcoder.wasm`,
   };
 
   console.log("[KTX2Setup] KTX2 texture support initialized");
@@ -44,8 +47,9 @@ export function initializeKTX2SupportSelfHosted(basePath: string = "/ktx2"): voi
     wasmUASTCToR8_UNORM: null,
     wasmUASTCToRG8_UNORM: null,
     wasmZSTDDecoder: `${basePath}/zstddec.wasm`,
-    jsMSCTranscoder: null,
-    wasmMSCTranscoder: null,
+    // ETC1S/Basis Universal transcoder for ETC1S encoded textures
+    jsMSCTranscoder: `${basePath}/msc_basis_transcoder.js`,
+    wasmMSCTranscoder: `${basePath}/msc_basis_transcoder.wasm`,
   };
 
   console.log("[KTX2Setup] KTX2 texture support initialized (self-hosted)");

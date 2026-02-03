@@ -11,19 +11,25 @@ import {
 } from "@babylonjs/core";
 
 /**
- * Load texture with KTX2 support and JPG/PNG fallback
- * Tries KTX2 first for GPU compression benefits, falls back to original format
+ * Load texture with fallback support
+ *
+ * Currently using JPG format due to KTX2 CDN availability issues.
+ * To enable KTX2:
+ * 1. Self-host KTX2 decoder files in public/ktx2/
+ * 2. Update KTX2Setup.ts to use self-hosted path
+ * 3. Change extension below from "jpg" to "ktx2"
+ *
+ * @param basePath - Path without extension (e.g., "/textures/grass_diff")
+ * @param scene - Babylon.js scene
+ * @param extension - File extension (default: "jpg")
  */
 function loadTextureWithKTX2Fallback(
   basePath: string,
   scene: Scene,
   extension: string = "jpg"
 ): Texture {
-  // For now, use original textures directly
-  // KTX2 files should be generated offline using toktx tool
-  // When KTX2 files exist, change extension to .ktx2
   const texturePath = `${basePath}.${extension}`;
-  
+
   const texture = new Texture(texturePath, scene);
   texture.wrapU = Texture.WRAP_ADDRESSMODE;
   texture.wrapV = Texture.WRAP_ADDRESSMODE;
