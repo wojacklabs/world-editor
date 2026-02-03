@@ -14,6 +14,7 @@ import type {
   SerializedWorldProject,
   DecodedTileData,
   DecodedWorldProject,
+  DecodedRenderingConfig,
   LoadOptions,
   LoadResult,
   WorldMetadata,
@@ -248,6 +249,62 @@ export class WorldLoader {
     data: SerializedWorldProject,
     options: LoadOptions
   ): DecodedWorldProject {
+    if (data.version !== "2.0.0") {
+      throw new Error(
+        `Unsupported world version: ${data.version}. Expected 2.0.0`
+      );
+    }
+
+    if (!data.rendering) {
+      throw new Error("Missing required field: rendering");
+    }
+
+    if (!data.rendering.leafAtlas) {
+      throw new Error("Missing required field: rendering.leafAtlas");
+    }
+
+    if (!data.rendering.foliageProfileVersion) {
+      throw new Error(
+        "Missing required field: rendering.foliageProfileVersion"
+      );
+    }
+
+    if (!data.rendering.proceduralProfileVersion) {
+      throw new Error(
+        "Missing required field: rendering.proceduralProfileVersion"
+      );
+    }
+
+    if (!data.rendering.textureUrls) {
+      throw new Error("Missing required field: rendering.textureUrls");
+    }
+
+    const requiredTextureUrls = [
+      "grass",
+      "dirt",
+      "rock",
+      "sand",
+      "leafAtlas",
+    ] as const;
+    for (const key of requiredTextureUrls) {
+      if (!data.rendering.textureUrls[key]) {
+        throw new Error(`Missing required field: rendering.textureUrls.${key}`);
+      }
+    }
+
+    const rendering: DecodedRenderingConfig = {
+      leafAtlas: data.rendering.leafAtlas,
+      foliageProfileVersion: data.rendering.foliageProfileVersion,
+      proceduralProfileVersion: data.rendering.proceduralProfileVersion,
+      textureUrls: {
+        grass: data.rendering.textureUrls.grass,
+        dirt: data.rendering.textureUrls.dirt,
+        rock: data.rendering.textureUrls.rock,
+        sand: data.rendering.textureUrls.sand,
+        leafAtlas: data.rendering.textureUrls.leafAtlas,
+      },
+    };
+
     const tiles = new Map<string, DecodedTileData>();
 
     // Tile filter
@@ -341,6 +398,7 @@ export class WorldLoader {
       name: data.name,
       createdAt: data.createdAt,
       modifiedAt: data.modifiedAt,
+      rendering,
       mainTile,
       tiles,
       worldGrid: data.worldGrid ? { ...data.worldGrid } : null,
@@ -378,7 +436,33 @@ export class WorldLoader {
     const errors: string[] = [];
 
     if (!data.version) errors.push("Missing required field: version");
+    if (data.version && data.version !== "2.0.0") {
+      errors.push(`Unsupported version: ${data.version} (expected 2.0.0)`);
+    }
     if (!data.name) errors.push("Missing required field: name");
+    if (!data.rendering) {
+      errors.push("Missing required field: rendering");
+    } else {
+      if (!data.rendering.leafAtlas) {
+        errors.push("Missing required field: rendering.leafAtlas");
+      }
+      if (!data.rendering.foliageProfileVersion) {
+        errors.push("Missing required field: rendering.foliageProfileVersion");
+      }
+      if (!data.rendering.proceduralProfileVersion) {
+        errors.push("Missing required field: rendering.proceduralProfileVersion");
+      }
+      if (!data.rendering.textureUrls) {
+        errors.push("Missing required field: rendering.textureUrls");
+      } else {
+        const requiredTextures = ["grass", "dirt", "rock", "sand", "leafAtlas"] as const;
+        for (const key of requiredTextures) {
+          if (!data.rendering.textureUrls[key]) {
+            errors.push(`Missing required field: rendering.textureUrls.${key}`);
+          }
+        }
+      }
+    }
 
     if (
       !data.terrain &&

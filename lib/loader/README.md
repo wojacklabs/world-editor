@@ -13,15 +13,22 @@ npm install @world-editor/loader
 lib/loader/ → your-project/src/world/loader/
 ```
 
+## v2.0.0 포맷 주의사항
+
+- Loader는 `version: "2.0.0"` 월드만 로드합니다.
+- Export JSON에는 `rendering` 섹션이 **필수**입니다.
+- `rendering.textureUrls`의 `grass`, `dirt`, `rock`, `sand`, `leafAtlas` 키가 모두 있어야 합니다.
+
 ## 필수 텍스처 파일
 
 다음 텍스처 파일들을 `public/textures/` 폴더에 복사해야 합니다:
 
 | 파일명 | 용도 |
 |--------|------|
-| `grass_diff.jpg` | 지형 잔디 biome |
-| `dirt_diffuse.jpg` | 지형 흙 biome + 나무 껍질 |
-| `rock_diff.jpg` | 지형 바위 biome + 바위 에셋 |
+| `grass_diff.(ktx2/jpg/png)` | 지형 잔디 biome |
+| `dirt_diffuse.(ktx2/jpg/png)` | 지형 흙 biome + 나무 껍질 |
+| `rock_diff.(ktx2/jpg/png)` | 지형 바위 biome + 바위 에셋 |
+| `leaf_atlas.(png/ktx2)` | tree/bush leaf card 알파 컷아웃 |
 | `rock_arm.jpg` | (선택) 바위 AO/Roughness/Metallic |
 | `rock_nor.jpg` | (선택) 바위 노멀맵 |
 | `waterbump.png` | 물 표면 범프맵 |
@@ -44,7 +51,7 @@ const json = await response.text();
 const result = WorldLoader.loadWorld(json);
 
 if (!result.success || !result.data) {
-  console.error('Failed to load world:', result.error);
+  console.error('Failed to load world:', result.errors);
   return;
 }
 
@@ -113,6 +120,11 @@ import { FoliageRenderer } from '@world-editor/loader';
 const foliageRenderer = new FoliageRenderer(scene, {
   chunkSize: 16,              // 청크 크기
   maxInstancesPerChunk: 5000, // 청크당 최대 인스턴스
+  renderingProfile: {
+    foliageProfileVersion: worldData.rendering.foliageProfileVersion,
+    proceduralProfileVersion: worldData.rendering.proceduralProfileVersion,
+  },
+  textureUrls: worldData.rendering.textureUrls,
   lodDistances: {
     near: 100,   // 풀 디테일 거리
     mid: 200,    // 중간 LOD 거리
@@ -120,8 +132,8 @@ const foliageRenderer = new FoliageRenderer(scene, {
   },
 });
 
-// 잔디 데이터 로드
-foliageRenderer.loadFoliage(worldData.foliage);
+// 잔디/바위 foliage 데이터 로드 (mainTile 기준)
+foliageRenderer.loadTile(worldData.mainTile!.foliage);
 
 // 커스텀 설정
 foliageRenderer.setSunDirection(new Vector3(-0.5, 0.8, -0.3));
@@ -157,6 +169,12 @@ const propsRenderer = new ProceduralPropsRenderer(scene, {
   },
   windAngle: Math.PI / 4,   // 바람 방향 (라디안)
   windStrength: 0.5,        // 바람 세기 (0~1)
+  renderingProfile: worldData.rendering.proceduralProfileVersion,
+  textureUrls: {
+    rock: worldData.rendering.textureUrls.rock,
+    dirt: worldData.rendering.textureUrls.dirt,
+    leafAtlas: worldData.rendering.textureUrls.leafAtlas,
+  },
 });
 
 // Props 로드
@@ -177,8 +195,8 @@ console.log('Props count:', propsRenderer.getPropCount());
 | 타입 | 텍스처 | 바람 | 설명 |
 |------|--------|------|------|
 | `rock` | rock_diff.jpg (triplanar) | 없음 | 바위 에셋, edge smoothing |
-| `tree` | dirt_diffuse.jpg (bark) | O | 나무, 껍질+잎사귀 |
-| `bush` | dirt_diffuse.jpg (bark) | O | 덤불 |
+| `tree` | dirt_diffuse + leaf_atlas | O | 나무, bark + leaf card |
+| `bush` | leaf_atlas (+ twig bark) | O | 덤불, leaf card 클러스터 |
 | `grass_clump` | dirt_diffuse.jpg (bark) | O | 잔디 덩어리 |
 
 ---
@@ -260,7 +278,7 @@ class Game {
     const result = WorldLoader.loadWorld(json);
 
     if (!result.success || !result.data) {
-      throw new Error(`Failed to load world: ${result.error}`);
+      throw new Error(`Failed to load world: ${result.errors.join(", ")}`);
     }
 
     const worldData = result.data;
@@ -299,12 +317,17 @@ class Game {
 
     this.terrainRenderer.setFog(this.scene.fogColor, this.scene.fogDensity);
 
-    // 5. 잔디 렌더러
-    if (worldData.foliage) {
+    // 5. 잔디/바위 foliage 렌더러
+    if (worldData.mainTile?.foliage) {
       this.foliageRenderer = new FoliageRenderer(this.scene, {
+        renderingProfile: {
+          foliageProfileVersion: worldData.rendering.foliageProfileVersion,
+          proceduralProfileVersion: worldData.rendering.proceduralProfileVersion,
+        },
+        textureUrls: worldData.rendering.textureUrls,
         lodDistances: { near: 100, mid: 200, far: 450 },
       });
-      this.foliageRenderer.loadFoliage(worldData.foliage);
+      this.foliageRenderer.loadTile(worldData.mainTile.foliage);
       this.foliageRenderer.setFog(this.scene.fogColor, this.scene.fogDensity);
     }
 
@@ -312,6 +335,12 @@ class Game {
     if (worldData.proceduralProps?.length > 0) {
       this.propsRenderer = new ProceduralPropsRenderer(this.scene, {
         useInstancing: false,
+        renderingProfile: worldData.rendering.proceduralProfileVersion,
+        textureUrls: {
+          rock: worldData.rendering.textureUrls.rock,
+          dirt: worldData.rendering.textureUrls.dirt,
+          leafAtlas: worldData.rendering.textureUrls.leafAtlas,
+        },
       });
       this.propsRenderer.loadProps(worldData.proceduralProps);
     }

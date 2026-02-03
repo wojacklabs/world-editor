@@ -23,6 +23,7 @@ import {
 } from "@babylonjs/core";
 import type { ProceduralPropInstance } from "./types";
 import { ProceduralAssetGenerator, GeneratorParams } from "./ProceduralAssetGenerator";
+import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../shared/foliage/FoliageQualityProfile";
 
 export interface ProceduralPropsRendererOptions {
   /** Use instancing for better performance (default: false - uses individual meshes to preserve unique params) */
@@ -33,11 +34,26 @@ export interface ProceduralPropsRendererOptions {
   windAngle?: number;
   /** Wind strength 0-1 (default: 0.5) */
   windStrength?: number;
+  /** Rendering profile version tag from exported world data */
+  renderingProfile?: string;
+  /** Override texture paths from exported world data */
+  textureUrls?: {
+    rock?: string;
+    dirt?: string;
+    leafAtlas?: string;
+  };
 }
+
+type NormalizedProceduralPropsRendererOptions = {
+  useInstancing: boolean;
+  lodDistances: { near: number; mid: number; far: number };
+  windAngle: number;
+  windStrength: number;
+};
 
 export class ProceduralPropsRenderer {
   private scene: Scene;
-  private options: Required<ProceduralPropsRendererOptions>;
+  private options: NormalizedProceduralPropsRendererOptions;
   private generator: ProceduralAssetGenerator;
 
   // Individual meshes (preserves unique params)
@@ -48,21 +64,33 @@ export class ProceduralPropsRenderer {
   private instanceMeshes: Map<string, Mesh> = new Map();
 
   private lastTime: number = 0;
+  private referenceReadyPromise: Promise<void>;
 
   constructor(scene: Scene, options: ProceduralPropsRendererOptions = {}) {
     this.scene = scene;
     this.options = {
       useInstancing: options.useInstancing ?? false, // Default to individual for quality
       lodDistances: options.lodDistances ?? { near: 30, mid: 60, far: 120 },
-      windAngle: options.windAngle ?? Math.PI / 4,
-      windStrength: options.windStrength ?? 0.5,
+      windAngle:
+        options.windAngle ??
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians,
+      windStrength:
+        options.windStrength ??
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength,
     };
 
     this.generator = new ProceduralAssetGenerator(scene);
+    if (options.renderingProfile) {
+      this.generator.setRenderingProfileVersion(options.renderingProfile);
+    }
+    if (options.textureUrls) {
+      this.generator.setTextureUrls(options.textureUrls);
+    }
     this.generator.setWind(
       new Vector2(Math.cos(this.options.windAngle), Math.sin(this.options.windAngle)),
       this.options.windStrength
     );
+    this.referenceReadyPromise = this.generator.ensureReferenceTemplatesLoaded();
 
     // Register time update for wind animation
     this.lastTime = performance.now();
@@ -78,7 +106,16 @@ export class ProceduralPropsRenderer {
    * Load procedural props from decoded world data
    */
   loadProps(props: ProceduralPropInstance[]): void {
+    void this.loadPropsAsync(props);
+  }
+
+  /**
+   * Async load variant that waits for reference tree/bush templates.
+   */
+  async loadPropsAsync(props: ProceduralPropInstance[]): Promise<void> {
     if (props.length === 0) return;
+
+    await this.referenceReadyPromise;
 
     if (this.options.useInstancing) {
       this.loadPropsInstanced(props);
@@ -260,5 +297,7 @@ export class ProceduralPropsRenderer {
       mesh.dispose();
     }
     this.propMeshes = [];
+
+    this.generator.dispose();
   }
 }

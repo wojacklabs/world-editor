@@ -1,6 +1,6 @@
 # World Editor Data Format Specification
 
-Version: 1.0.0
+Version: 2.0.0
 
 ## Overview
 
@@ -18,10 +18,23 @@ Used when exporting a single terrain tile.
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "name": "My Terrain",
   "createdAt": "2024-01-15T10:30:00.000Z",
   "modifiedAt": "2024-01-15T12:45:00.000Z",
+
+  "rendering": {
+    "leafAtlas": "/textures/leaf_atlas",
+    "foliageProfileVersion": "2.0.0",
+    "proceduralProfileVersion": "2.0.0",
+    "textureUrls": {
+      "grass": "/textures/grass_diff",
+      "dirt": "/textures/dirt_diffuse",
+      "rock": "/textures/rock_diff",
+      "sand": "/textures/grass_diff",
+      "leafAtlas": "/textures/leaf_atlas"
+    }
+  },
 
   "terrain": {
     "size": 64,
@@ -62,10 +75,23 @@ Used when exporting multiple tiles with world grid configuration.
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "2.0.0",
   "name": "My World",
   "createdAt": "...",
   "modifiedAt": "...",
+
+  "rendering": {
+    "leafAtlas": "/textures/leaf_atlas",
+    "foliageProfileVersion": "2.0.0",
+    "proceduralProfileVersion": "2.0.0",
+    "textureUrls": {
+      "grass": "/textures/grass_diff",
+      "dirt": "/textures/dirt_diffuse",
+      "rock": "/textures/rock_diff",
+      "sand": "/textures/grass_diff",
+      "leafAtlas": "/textures/leaf_atlas"
+    }
+  },
 
   "mainTile": {
     "terrain": { ... },
@@ -97,6 +123,17 @@ Used when exporting multiple tiles with world grid configuration.
 ```
 
 ## Data Structures
+
+### Rendering (v2 필수)
+
+`rendering` 섹션은 v2.0.0에서 필수입니다.
+
+- `leafAtlas`: leaf card 알파 컷아웃 텍스처 기본 경로
+- `foliageProfileVersion`: biome foliage 셰이더/프로파일 버전
+- `proceduralProfileVersion`: procedural tree/bush/rock 프로파일 버전
+- `textureUrls`: 최소 `grass`, `dirt`, `rock`, `sand`, `leafAtlas` 키 포함
+
+Loader는 위 필드가 누락되면 `rendering.*` 경로를 포함한 에러로 실패합니다.
 
 ### Heightmap
 
@@ -210,11 +247,16 @@ Terrain bounds: [-size/2, size/2] on X and Z axes
 
 ## Version History
 
-### 1.0.0 (Current)
+### 2.0.0 (Current)
 
-- Initial release
-- Supports: heightmap, splatmap, waterMask, foliage
-- Base64 encoding for all binary data
+- `rendering` 섹션 필수화
+- leaf atlas / foliage / procedural profile 버전 명시
+- Loader가 v2 필수 필드 누락 시 명확한 경로 기반 에러 반환
+
+### 1.x (Legacy)
+
+- 초기 포맷
+- `rendering` 섹션 없음
 
 ## Usage with WorldLoader
 

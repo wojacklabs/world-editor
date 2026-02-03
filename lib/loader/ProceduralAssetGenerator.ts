@@ -14,12 +14,21 @@ import {
   Effect,
   Vector3,
   Vector2,
+  Matrix,
   Color3,
   VertexData,
   VertexBuffer,
   Quaternion,
   Texture,
 } from "@babylonjs/core";
+import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
+import "@babylonjs/loaders/glTF";
+import { loadTextureWithFallback } from "../shared/rendering/TextureLoader";
+import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../shared/foliage/FoliageQualityProfile";
+import { createLeafCardMesh } from "../shared/foliage/LeafCards";
+
+const REFERENCE_TREE_ROOT_URL = "/assets/references/infinite-terrain/";
+const REFERENCE_TREE_FILE_NAME = "tree.glb";
 
 // ============================================
 // Register Shaders
@@ -111,6 +120,12 @@ uniform vec3 fogColor;
 uniform float fogDensity;
 uniform sampler2D dirtTexture;
 uniform float dirtTextureScale;
+uniform sampler2D leafAtlas;
+uniform float uLeafAlphaCutoff;
+uniform float uLeafFadeStart;
+uniform float uLeafFadeEnd;
+uniform float uUseLeafAtlas;
+uniform float uLeafMaskFromLuma;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -154,8 +169,27 @@ float fbm(vec3 p) {
     return value;
 }
 
+float hash2D(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main() {
     vec3 normal = normalize(vNormal);
+    float leafMask = step(vColor.r + 0.02, vColor.g);
+    vec4 leafSample = texture2D(leafAtlas, vUV);
+    float usesLeafAtlas = uUseLeafAtlas * leafMask;
+    float leafMaskAlpha = mix(leafSample.a, dot(leafSample.rgb, vec3(0.299, 0.587, 0.114)), uLeafMaskFromLuma);
+
+    if (usesLeafAtlas > 0.5 && leafMaskAlpha < uLeafAlphaCutoff) {
+        discard;
+    }
+
+    float fadeAlpha = 1.0 - smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
+    float dither = hash2D(gl_FragCoord.xy + vPosition.xz * 3.17);
+    if (leafMask > 0.5 && dither > clamp(fadeAlpha, 0.0, 1.0)) {
+        discard;
+    }
+
     vec3 meshColor = vColor.a > 0.5 ? vColor.rgb : baseColor;
     float colorNoise = fbm(vPosition * 2.0);
     vec3 color = mix(meshColor, meshColor * 0.8, colorNoise * 0.3);
@@ -173,7 +207,7 @@ void main() {
     color = mix(color, mix(color, dirtSample, 0.4), isBark);
 
     float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y);
-    float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;
+    float isLeaf = mix(0.3, 1.0, leafMask);
     color = mix(color * 0.85, color * 1.1, tipFactor * isLeaf);
 
     float NdotL = dot(normal, sunDirection);
@@ -758,10 +792,27 @@ export interface GeneratorParams {
 export class ProceduralAssetGenerator {
   private scene: Scene;
   private time: number = 0;
-  private windDirection: Vector2 = new Vector2(Math.cos(Math.PI * 0.25), Math.sin(Math.PI * 0.25));
+  private windDirection: Vector2 = new Vector2(
+    Math.cos(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians),
+    Math.sin(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians)
+  );
   private windStrength: number = 0.5;
   private fogColor: Color3 = new Color3(0.6, 0.75, 0.9);  // Matching editor
   private fogDensity: number = 0.008;  // Matching editor
+  private renderingProfileVersion: string =
+    DEFAULT_FOLIAGE_QUALITY_PROFILE.proceduralProfileVersion;
+  private textureUrls: {
+    rock: string;
+    dirt: string;
+    leafAtlas: string;
+  } = {
+    rock: DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
+    dirt: DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.dirt,
+    leafAtlas: DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.leafAtlas,
+  };
+  private referenceTemplates: Partial<Record<"tree" | "bush", Mesh>> = {};
+  private referenceTemplatesPromise: Promise<void> | null = null;
+  private disposed = false;
 
   constructor(scene: Scene) {
     this.scene = scene;
@@ -771,6 +822,347 @@ export class ProceduralAssetGenerator {
     }
     if (scene.fogDensity) {
       this.fogDensity = scene.fogDensity;
+    }
+  }
+
+  private seeded01(seed: number): number {
+    const n = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
+    return n - Math.floor(n);
+  }
+
+  private bakeMeshToWorld(source: Mesh, name: string): Mesh | null {
+    const positions = source.getVerticesData(VertexBuffer.PositionKind);
+    const normals = source.getVerticesData(VertexBuffer.NormalKind);
+    const uvs = source.getVerticesData(VertexBuffer.UVKind);
+    const indices = source.getIndices();
+
+    if (!positions || !indices) {
+      return null;
+    }
+
+    source.computeWorldMatrix(true);
+    const world = source.getWorldMatrix();
+    const temp = new Vector3();
+
+    const outPositions = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+      Vector3.TransformCoordinatesFromFloatsToRef(
+        positions[i],
+        positions[i + 1],
+        positions[i + 2],
+        world,
+        temp
+      );
+      outPositions[i] = temp.x;
+      outPositions[i + 1] = temp.y;
+      outPositions[i + 2] = temp.z;
+    }
+
+    let outNormals: Float32Array | null = null;
+    if (normals) {
+      outNormals = new Float32Array(normals.length);
+      for (let i = 0; i < normals.length; i += 3) {
+        Vector3.TransformNormalFromFloatsToRef(
+          normals[i],
+          normals[i + 1],
+          normals[i + 2],
+          world,
+          temp
+        );
+        temp.normalize();
+        outNormals[i] = temp.x;
+        outNormals[i + 1] = temp.y;
+        outNormals[i + 2] = temp.z;
+      }
+    }
+
+    const baked = new Mesh(name, this.scene);
+    const vertexData = new VertexData();
+    vertexData.positions = outPositions;
+    vertexData.indices = Array.from(indices);
+    vertexData.uvs = uvs ? Array.from(uvs) : null;
+    vertexData.normals = outNormals ? Array.from(outNormals) : null;
+    if (!vertexData.normals) {
+      const computedNormals: number[] = [];
+      VertexData.ComputeNormals(
+        Array.from(outPositions),
+        Array.from(indices),
+        computedNormals
+      );
+      vertexData.normals = computedNormals;
+    }
+    vertexData.applyToMesh(baked);
+
+    return baked;
+  }
+
+  private recenterMeshToGround(mesh: Mesh): void {
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+    if (!positions || positions.length < 3) return;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i];
+      const y = positions[i + 1];
+      const z = positions[i + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+
+    const centerX = (minX + maxX) * 0.5;
+    const centerZ = (minZ + maxZ) * 0.5;
+
+    const shifted = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+      shifted[i] = positions[i] - centerX;
+      shifted[i + 1] = positions[i + 1] - minY;
+      shifted[i + 2] = positions[i + 2] - centerZ;
+    }
+
+    mesh.setVerticesData(VertexBuffer.PositionKind, shifted, true);
+    mesh.refreshBoundingInfo();
+  }
+
+  private applyReferenceVariationDeformation(
+    mesh: Mesh,
+    seedBase: number,
+    assetType: "tree" | "bush"
+  ): void {
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+    const indices = mesh.getIndices();
+    if (!positions || !indices || positions.length < 3) {
+      return;
+    }
+
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (let i = 1; i < positions.length; i += 3) {
+      const y = positions[i];
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+
+    const heightRange = Math.max(maxY - minY, 0.0001);
+    const bendScale = assetType === "tree" ? 0.22 : 0.14;
+    const twistScale = assetType === "tree" ? 0.75 : 0.45;
+    const jitterScale = assetType === "tree" ? 0.018 : 0.012;
+    const crownScale = 0.8 + this.seeded01(seedBase + 5.7) * 0.55;
+    const trunkScale = 0.82 + this.seeded01(seedBase + 6.1) * 0.22;
+    const bendX = (this.seeded01(seedBase + 7.3) - 0.5) * bendScale;
+    const bendZ = (this.seeded01(seedBase + 8.9) - 0.5) * bendScale;
+    const twistAmount = (this.seeded01(seedBase + 9.7) - 0.5) * twistScale;
+    const stretch = 0.9 + this.seeded01(seedBase + 10.9) * 0.35;
+
+    const deformed = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i];
+      const y = positions[i + 1];
+      const z = positions[i + 2];
+
+      const tRaw = (y - minY) / heightRange;
+      const t = Math.max(0, Math.min(1, tRaw));
+      const smoothT = t * t * (3 - 2 * t);
+      const topWeight = smoothT * smoothT;
+
+      const radiusScale = trunkScale + (crownScale - trunkScale) * smoothT;
+      let px = x * radiusScale;
+      let py = y * stretch;
+      let pz = z * radiusScale;
+
+      const twist = twistAmount * topWeight;
+      const cosTwist = Math.cos(twist);
+      const sinTwist = Math.sin(twist);
+      const tx = px * cosTwist - pz * sinTwist;
+      const tz = px * sinTwist + pz * cosTwist;
+
+      px = tx + bendX * topWeight;
+      pz = tz + bendZ * topWeight;
+
+      const jitterSeed = seedBase + x * 13.37 + y * 7.11 + z * 5.73;
+      const jitter = (this.seeded01(jitterSeed) - 0.5) * jitterScale * smoothT;
+      px += jitter;
+      pz += (this.seeded01(jitterSeed + 17.0) - 0.5) * jitterScale * smoothT;
+      py += (this.seeded01(jitterSeed + 29.0) - 0.5) * jitterScale * 0.6 * smoothT;
+
+      deformed[i] = px;
+      deformed[i + 1] = py;
+      deformed[i + 2] = pz;
+    }
+
+    mesh.setVerticesData(VertexBuffer.PositionKind, deformed, true);
+    const normals: number[] = [];
+    VertexData.ComputeNormals(Array.from(deformed), Array.from(indices), normals);
+    mesh.setVerticesData(VertexBuffer.NormalKind, normals, true);
+    mesh.refreshBoundingInfo();
+  }
+
+  private createReferenceVariationMesh(
+    assetType: "tree" | "bush",
+    seed: number,
+    size: number
+  ): Mesh | null {
+    const template = this.referenceTemplates[assetType];
+    if (!template) {
+      return null;
+    }
+
+    const mesh = template.clone(`${assetType}_ref_${seed}`);
+    if (!mesh) {
+      return null;
+    }
+
+    mesh.makeGeometryUnique();
+
+    const variationIndex = Math.floor(Math.abs(seed)) % 8;
+    const seedBase =
+      variationIndex * 37.17 +
+      (assetType === "tree" ? 11.7 : 29.3);
+    const yaw = (this.seeded01(seedBase + 0.9) - 0.5) * 0.65;
+    const sx = 0.88 + this.seeded01(seedBase + 1.7) * 0.26;
+    const sy = 0.9 + this.seeded01(seedBase + 2.5) * 0.34;
+    const sz = 0.88 + this.seeded01(seedBase + 3.3) * 0.26;
+
+    const variationTransform = Matrix.Scaling(sx, sy, sz).multiply(
+      Matrix.RotationY(yaw)
+    );
+    mesh.bakeTransformIntoVertices(variationTransform);
+    this.applyReferenceVariationDeformation(mesh, seedBase, assetType);
+    mesh.scaling.setAll(size);
+
+    return mesh;
+  }
+
+  async ensureReferenceTemplatesLoaded(): Promise<void> {
+    if (this.referenceTemplates.tree || this.referenceTemplates.bush) {
+      return;
+    }
+
+    if (this.referenceTemplatesPromise) {
+      await this.referenceTemplatesPromise;
+      return;
+    }
+
+    this.referenceTemplatesPromise = this.loadReferenceTemplatesIfAvailable();
+    await this.referenceTemplatesPromise;
+  }
+
+  private async loadReferenceTemplatesIfAvailable(): Promise<void> {
+    try {
+      const result = await SceneLoader.ImportMeshAsync(
+        "",
+        REFERENCE_TREE_ROOT_URL,
+        REFERENCE_TREE_FILE_NAME,
+        this.scene
+      );
+
+      if (this.disposed) {
+        for (const mesh of result.meshes) {
+          mesh.dispose(false, true);
+        }
+        result.skeletons?.forEach((skeleton) => skeleton.dispose());
+        result.animationGroups?.forEach((group) => group.dispose());
+        result.particleSystems?.forEach((ps) => ps.dispose());
+        result.transformNodes?.forEach((node) => node.dispose());
+        return;
+      }
+
+      const importedMeshes = result.meshes.filter(
+        (mesh): mesh is Mesh =>
+          mesh instanceof Mesh &&
+          !!mesh.getVerticesData(VertexBuffer.PositionKind) &&
+          !!mesh.getIndices()
+      );
+
+      if (importedMeshes.length === 0) {
+        return;
+      }
+
+      const trunkSources = importedMeshes.filter((mesh) =>
+        mesh.name.toLowerCase().includes("trunk")
+      );
+      const bushSources = importedMeshes.filter((mesh) =>
+        mesh.name.toLowerCase().startsWith("bush_")
+      );
+
+      const buildMergedTemplate = (
+        includeTrunk: boolean,
+        name: string
+      ): Mesh | null => {
+        const bakedParts: Mesh[] = [];
+
+        if (includeTrunk) {
+          for (let i = 0; i < trunkSources.length; i++) {
+            const baked = this.bakeMeshToWorld(trunkSources[i], `loader_ref_trunk_${i}`);
+            if (!baked) continue;
+            setMeshVertexColor(baked, 0.44, 0.32, 0.18);
+            bakedParts.push(baked);
+          }
+        }
+
+        for (let i = 0; i < bushSources.length; i++) {
+          const baked = this.bakeMeshToWorld(bushSources[i], `loader_ref_bush_${i}`);
+          if (!baked) continue;
+          setMeshVertexColor(baked, 0.23, 0.48, 0.2);
+          bakedParts.push(baked);
+        }
+
+        if (bakedParts.length === 0) {
+          return null;
+        }
+
+        const merged = Mesh.MergeMeshes(
+          bakedParts,
+          true,
+          true,
+          undefined,
+          false,
+          true
+        );
+        if (!merged) {
+          return null;
+        }
+
+        merged.name = name;
+        this.recenterMeshToGround(merged);
+        merged.isVisible = false;
+        merged.isPickable = false;
+        merged.material = null;
+        return merged;
+      };
+
+      const bushTemplate = buildMergedTemplate(false, "loader_ref_bush_template");
+      const treeTemplate = buildMergedTemplate(true, "loader_ref_tree_template");
+
+      if (bushTemplate) {
+        this.referenceTemplates.bush = bushTemplate;
+      }
+      if (treeTemplate) {
+        this.referenceTemplates.tree = treeTemplate;
+      }
+
+      for (const mesh of result.meshes) {
+        mesh.dispose(false, true);
+      }
+      result.skeletons?.forEach((skeleton) => skeleton.dispose());
+      result.animationGroups?.forEach((group) => group.dispose());
+      result.particleSystems?.forEach((ps) => ps.dispose());
+      result.transformNodes?.forEach((node) => node.dispose());
+
+      if (this.referenceTemplates.tree || this.referenceTemplates.bush) {
+        console.log(
+          "[ProceduralAssetGenerator] Loaded reference tree/bush templates from GLB"
+        );
+      }
+    } catch {
+      // Keep fallback path procedural if reference asset is unavailable.
     }
   }
 
@@ -797,6 +1189,18 @@ export class ProceduralAssetGenerator {
     this.fogDensity = density;
   }
 
+  setRenderingProfileVersion(version: string): void {
+    this.renderingProfileVersion = version;
+  }
+
+  setTextureUrls(urls: { rock?: string; dirt?: string; leafAtlas?: string }): void {
+    this.textureUrls = {
+      rock: urls.rock ?? this.textureUrls.rock,
+      dirt: urls.dirt ?? this.textureUrls.dirt,
+      leafAtlas: urls.leafAtlas ?? this.textureUrls.leafAtlas,
+    };
+  }
+
   /**
    * Generate a procedural mesh based on params
    */
@@ -805,9 +1209,15 @@ export class ProceduralAssetGenerator {
       case "rock":
         return this.generateRock(params);
       case "tree":
-        return this.generateTree(params);
+        return (
+          this.createReferenceVariationMesh("tree", params.seed, params.size) ??
+          this.generateTree(params)
+        );
       case "bush":
-        return this.generateBush(params);
+        return (
+          this.createReferenceVariationMesh("bush", params.seed, params.size) ??
+          this.generateBush(params)
+        );
       case "grass_clump":
         return this.generateGrassClump(params);
       default:
@@ -824,7 +1234,7 @@ export class ProceduralAssetGenerator {
 
     if (needsWind) {
       const material = new ShaderMaterial(
-        `loaderFoliageMat_${params.seed}`,
+        `loaderFoliageMat_${this.renderingProfileVersion}_${params.seed}`,
         this.scene,
         {
           vertex: "loaderFoliageWind",
@@ -839,24 +1249,29 @@ export class ProceduralAssetGenerator {
             "baseColor", "detailColor", "sunDirection",
             "ambientIntensity", "fogColor", "fogDensity",
             "dirtTextureScale",
+            "uLeafAlphaCutoff",
+            "uLeafFadeStart",
+            "uLeafFadeEnd",
+            "uUseLeafAtlas",
+            "uLeafMaskFromLuma",
           ],
-          samplers: ["dirtTexture"],
+          samplers: ["dirtTexture", "leafAtlas"],
         }
       );
 
       material.setVector2("uWindDirection", this.windDirection);
 
-      let windStr = 0.5, minHeight = 0.0, maxHeight = 0.8;
+      let windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength, minHeight = 0.0, maxHeight = 0.8;
       if (params.type === "grass_clump") {
-        windStr = 0.8;
+        windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassClumpStrength;
         minHeight = 0.0;
         maxHeight = 0.5;
       } else if (params.type === "bush") {
-        windStr = 0.4;
+        windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.bushStrength;
         minHeight = 0.05;
         maxHeight = 0.4;
       } else if (params.type === "tree") {
-        windStr = 0.3;
+        windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength;
         minHeight = 0.4;
         maxHeight = 2.0;
       }
@@ -875,10 +1290,38 @@ export class ProceduralAssetGenerator {
       material.setFloat("dirtTextureScale", 0.5);
 
       // Load dirt texture for bark triplanar mapping
-      const dirtTex = new Texture("/textures/dirt_diffuse.jpg", this.scene);
-      dirtTex.wrapU = Texture.WRAP_ADDRESSMODE;
-      dirtTex.wrapV = Texture.WRAP_ADDRESSMODE;
+      const dirtTex = loadTextureWithFallback(this.scene, this.textureUrls.dirt, {
+        preferredExtensions: ["ktx2", "jpg", "png"],
+        wrapU: Texture.WRAP_ADDRESSMODE,
+        wrapV: Texture.WRAP_ADDRESSMODE,
+        anisotropicFilteringLevel: 8,
+      });
       material.setTexture("dirtTexture", dirtTex);
+
+      const leafAtlas = loadTextureWithFallback(this.scene, this.textureUrls.leafAtlas, {
+        preferredExtensions: ["png", "ktx2", "jpg"],
+        wrapU: Texture.CLAMP_ADDRESSMODE,
+        wrapV: Texture.CLAMP_ADDRESSMODE,
+        anisotropicFilteringLevel: 4,
+      });
+      material.setTexture("leafAtlas", leafAtlas);
+      material.setFloat(
+        "uLeafAlphaCutoff",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff
+      );
+      material.setFloat(
+        "uLeafFadeStart",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart
+      );
+      material.setFloat(
+        "uLeafFadeEnd",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd
+      );
+      material.setFloat(
+        "uUseLeafAtlas",
+        params.type === "tree" || params.type === "bush" ? 1.0 : 0.0
+      );
+      material.setFloat("uLeafMaskFromLuma", 1.0);
 
       // Register update for wind animation
       this.scene.registerBeforeRender(() => {
@@ -889,7 +1332,7 @@ export class ProceduralAssetGenerator {
     } else {
       // Rock shader with triplanar texture
       const material = new ShaderMaterial(
-        `loaderRockMat_${params.seed}`,
+        `loaderRockMat_${this.renderingProfileVersion}_${params.seed}`,
         this.scene,
         {
           vertex: "loaderProceduralAsset",
@@ -916,9 +1359,12 @@ export class ProceduralAssetGenerator {
       material.setFloat("textureScale", 0.5);
 
       // Load rock diffuse texture for triplanar mapping
-      const rockTex = new Texture("/textures/rock_diff.jpg", this.scene);
-      rockTex.wrapU = Texture.WRAP_ADDRESSMODE;
-      rockTex.wrapV = Texture.WRAP_ADDRESSMODE;
+      const rockTex = loadTextureWithFallback(this.scene, this.textureUrls.rock, {
+        preferredExtensions: ["ktx2", "jpg", "png"],
+        wrapU: Texture.WRAP_ADDRESSMODE,
+        wrapV: Texture.WRAP_ADDRESSMODE,
+        anisotropicFilteringLevel: 8,
+      });
       material.setTexture("rockTexture", rockTex);
 
       return material;
@@ -1057,7 +1503,6 @@ export class ProceduralAssetGenerator {
   private generateTree(params: GeneratorParams): Mesh {
     const seed = params.seed;
     const meshes: Mesh[] = [];
-    const leafSubdivisions = calcSubdivision(params.size, 3);
 
     // Trunk parameters
     const trunkHeight = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 1.2;
@@ -1088,7 +1533,7 @@ export class ProceduralAssetGenerator {
 
       for (let i = 0; i < trunkPositions.length; i += 3) {
         let x = trunkPositions[i];
-        let y = trunkPositions[i + 1];
+        const y = trunkPositions[i + 1];
         let z = trunkPositions[i + 2];
 
         const t = (y + halfHeight) / trunkHeight;
@@ -1121,20 +1566,25 @@ export class ProceduralAssetGenerator {
 
     // Branches
     const branchCount = 3 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 4);
-    const branchStartY = trunkHeight * (0.35 + Math.abs(noise3D(seed * 4.5, 0, 0)) * 0.2);
+    const branchStartY =
+      trunkHeight * (0.35 + Math.abs(noise3D(seed * 4.5, 0, 0)) * 0.2);
 
     for (let i = 0; i < branchCount; i++) {
       const bSeed = seed + i * 73.1;
 
       const heightRatio = i / Math.max(branchCount - 1, 1);
-      const branchLength = (0.2 + Math.abs(noise3D(bSeed, 0, 0)) * 0.25) * (1.15 - heightRatio * 0.4);
-      const branchThick = (0.025 + Math.abs(noise3D(0, bSeed, 0)) * 0.02) * (1.2 - heightRatio * 0.3);
+      const branchLength =
+        (0.2 + Math.abs(noise3D(bSeed, 0, 0)) * 0.25) * (1.15 - heightRatio * 0.4);
+      const branchThick =
+        (0.025 + Math.abs(noise3D(0, bSeed, 0)) * 0.02) * (1.2 - heightRatio * 0.3);
 
       const goldenAngle = Math.PI * (3 - Math.sqrt(5));
       const branchAngleH = i * goldenAngle + noise3D(0, 0, bSeed) * 0.4;
-      const branchAngleV = (0.35 + heightRatio * 0.35) + Math.abs(noise3D(bSeed * 2, 0, 0)) * 0.25;
+      const branchAngleV =
+        0.35 + heightRatio * 0.35 + Math.abs(noise3D(bSeed * 2, 0, 0)) * 0.25;
 
-      const branchY = branchStartY + heightRatio * (trunkHeight * 0.85 - branchStartY);
+      const branchY =
+        branchStartY + heightRatio * (trunkHeight * 0.85 - branchStartY);
 
       const t = branchY / trunkHeight;
       const trunkRadiusAtY = trunkThickness * (1 - t * (1 - trunkTaper));
@@ -1143,8 +1593,10 @@ export class ProceduralAssetGenerator {
       const bendOffsetZ = trunkBendZ * t * t;
 
       const branchStartOffset = trunkRadiusAtY * 0.3;
-      const branchStartX = bendOffsetX + Math.cos(branchAngleH) * branchStartOffset;
-      const branchStartZ = bendOffsetZ + Math.sin(branchAngleH) * branchStartOffset;
+      const branchStartX =
+        bendOffsetX + Math.cos(branchAngleH) * branchStartOffset;
+      const branchStartZ =
+        bendOffsetZ + Math.sin(branchAngleH) * branchStartOffset;
 
       const cosV = Math.cos(branchAngleV);
       const sinV = Math.sin(branchAngleV);
@@ -1194,132 +1646,106 @@ export class ProceduralAssetGenerator {
 
       meshes.push(branch);
 
-      // Leaf clusters at branch end
-      const leafClusterCount = 1 + Math.floor(Math.abs(noise3D(bSeed * 5, 0, 0)) * 1.5);
+      // Leaf-card clusters at branch end
+      const leafClusterCount = 1 + Math.floor(Math.abs(noise3D(bSeed * 5, 0, 0)) * 2.2);
 
       for (let lc = 0; lc < leafClusterCount; lc++) {
         const lcSeed = bSeed + lc * 31.7;
-        const leafSize = (0.1 + Math.abs(noise3D(lcSeed, 0, 0)) * 0.1) * (1.1 - heightRatio * 0.25);
-        const leafScaleX = 0.8 + Math.abs(noise3D(lcSeed * 2, 0, 0)) * 0.4;
-        const leafScaleY = 0.55 + Math.abs(noise3D(0, lcSeed * 2, 0)) * 0.3;
-        const leafScaleZ = 0.8 + Math.abs(noise3D(0, 0, lcSeed * 2)) * 0.4;
+        const clusterRadius =
+          (0.06 + Math.abs(noise3D(lcSeed * 1.3, 0, 0)) * 0.12) *
+          (1.1 - heightRatio * 0.25);
+        const cardCount = 6 + Math.floor(Math.abs(noise3D(0, lcSeed * 1.7, 0)) * 8);
 
-        const leaf = MeshBuilder.CreateIcoSphere(
-          "leaf_" + i + "_" + lc,
-          { radius: leafSize, subdivisions: leafSubdivisions, updatable: true },
-          this.scene
-        );
+        for (let c = 0; c < cardCount; c++) {
+          const cardSeed = lcSeed + c * 19.73;
+          const cardWidth =
+            clusterRadius * (0.45 + Math.abs(noise3D(cardSeed * 2, 0, 0)) * 0.55);
+          const cardHeight =
+            clusterRadius * (0.9 + Math.abs(noise3D(0, cardSeed * 2, 0)) * 1.05);
 
-        // Deform leaf
-        const lPositions = leaf.getVerticesData(VertexBuffer.PositionKind);
-        if (lPositions) {
-          const newLPos = new Float32Array(lPositions.length);
-          for (let j = 0; j < lPositions.length; j += 3) {
-            let lx = lPositions[j] * leafScaleX;
-            let ly = lPositions[j + 1] * leafScaleY;
-            let lz = lPositions[j + 2] * leafScaleZ;
-
-            if (ly < 0) {
-              ly *= 0.4;
+          const card = createLeafCardMesh(
+            `leaf_card_${i}_${lc}_${c}`,
+            this.scene,
+            {
+              width: cardWidth,
+              height: cardHeight,
+              seed: cardSeed,
+              curve: clusterRadius * 0.35,
             }
+          );
 
-            const llen = Math.sqrt(lx * lx + ly * ly + lz * lz);
-            if (llen > 0.001) {
-              const bump = fbm3D(lx * 5 + lcSeed, ly * 5, lz * 5, 2) * 0.05;
-              lx += (lx / llen) * bump;
-              ly += (ly / llen) * bump;
-              lz += (lz / llen) * bump;
-            }
+          const radial =
+            Math.pow(Math.abs(noise3D(cardSeed * 3.1, 0, 0)), 0.7) *
+            clusterRadius *
+            0.95;
+          const theta = (noise3D(0, cardSeed * 4.1, 0) + 0.5) * Math.PI * 2;
+          const lift = Math.abs(noise3D(0, 0, cardSeed * 5.1)) * clusterRadius * 0.7;
 
-            newLPos[j] = lx;
-            newLPos[j + 1] = ly;
-            newLPos[j + 2] = lz;
-          }
-          leaf.updateVerticesData(VertexBuffer.PositionKind, newLPos);
+          card.position.x =
+            branchEndX + Math.cos(theta) * radial + branchDirX * clusterRadius * 0.08;
+          card.position.y = branchEndY + lift + branchDirY * clusterRadius * 0.1;
+          card.position.z =
+            branchEndZ + Math.sin(theta) * radial + branchDirZ * clusterRadius * 0.08;
 
-          const lIndices = leaf.getIndices();
-          const lNormals = leaf.getVerticesData(VertexBuffer.NormalKind);
-          if (lIndices && lNormals) {
-            VertexData.ComputeNormals(newLPos, lIndices, lNormals);
-            leaf.updateVerticesData(VertexBuffer.NormalKind, lNormals);
-          }
+          card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.6;
+          card.rotation.x =
+            -0.12 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.45;
+          card.rotation.z = noise3D(0, 0, cardSeed * 6.5) * 0.25;
+
+          setLeafVertexColors(card, cardSeed, heightRatio > 0.7);
+          meshes.push(card);
         }
-
-        const leafOffsetAngle = lc * Math.PI + noise3D(lcSeed * 3, 0, 0) * 0.8;
-        const leafOffsetDist = lc === 0 ? 0 : leafSize * 0.25;
-        leaf.position.x = branchEndX + Math.cos(leafOffsetAngle) * leafOffsetDist;
-        leaf.position.y = branchEndY + leafSize * leafScaleY * 0.15;
-        leaf.position.z = branchEndZ + Math.sin(leafOffsetAngle) * leafOffsetDist;
-
-        setLeafVertexColors(leaf, lcSeed, false);
-        meshes.push(leaf);
       }
     }
 
-    // Top leaves
-    const topLeafCount = 2 + Math.floor(Math.abs(noise3D(seed * 7, seed, 0)) * 2);
+    // Top canopy clusters
+    const topClusterCount = 2 + Math.floor(Math.abs(noise3D(seed * 7, seed, 0)) * 3);
     const trunkTopX = trunkBendX;
     const trunkTopZ = trunkBendZ;
     const trunkTopY = trunkHeight;
     const trunkTopRadius = trunkThickness * trunkTaper;
 
-    for (let i = 0; i < topLeafCount; i++) {
+    for (let i = 0; i < topClusterCount; i++) {
       const tSeed = seed + i * 51.7 + 1000;
-      const topLeafSize = 0.12 + Math.abs(noise3D(tSeed, 0, 0)) * 0.15;
-      const topLeafScaleX = 0.75 + Math.abs(noise3D(tSeed * 2, 0, 0)) * 0.4;
-      const topLeafScaleY = 0.55 + Math.abs(noise3D(0, tSeed * 2, 0)) * 0.35;
-      const topLeafScaleZ = 0.75 + Math.abs(noise3D(0, 0, tSeed * 2)) * 0.4;
+      const clusterRadius = 0.08 + Math.abs(noise3D(tSeed * 1.9, 0, 0)) * 0.16;
+      const cardCount = 8 + Math.floor(Math.abs(noise3D(0, tSeed * 2.1, 0)) * 8);
+      const topTheta =
+        i * (Math.PI * 2 / topClusterCount) + noise3D(0, tSeed * 3, 0) * 0.6;
+      const topDist = trunkTopRadius * 0.25 + Math.abs(noise3D(tSeed * 4, 0, 0)) * 0.09;
+      const clusterCenterX = trunkTopX + Math.cos(topTheta) * topDist;
+      const clusterCenterZ = trunkTopZ + Math.sin(topTheta) * topDist;
+      const clusterCenterY = trunkTopY + i * 0.04;
 
-      const topLeaf = MeshBuilder.CreateIcoSphere(
-        "topLeaf_" + i,
-        { radius: topLeafSize, subdivisions: leafSubdivisions, updatable: true },
-        this.scene
-      );
+      for (let c = 0; c < cardCount; c++) {
+        const cardSeed = tSeed + c * 17.11;
+        const cardWidth =
+          clusterRadius * (0.45 + Math.abs(noise3D(cardSeed * 2.4, 0, 0)) * 0.55);
+        const cardHeight =
+          clusterRadius * (0.95 + Math.abs(noise3D(0, cardSeed * 2.4, 0)) * 1.1);
 
-      const tlPositions = topLeaf.getVerticesData(VertexBuffer.PositionKind);
-      if (tlPositions) {
-        const newTLPos = new Float32Array(tlPositions.length);
-        for (let j = 0; j < tlPositions.length; j += 3) {
-          let tlx = tlPositions[j] * topLeafScaleX;
-          let tly = tlPositions[j + 1] * topLeafScaleY;
-          let tlz = tlPositions[j + 2] * topLeafScaleZ;
+        const card = createLeafCardMesh(`top_leaf_card_${i}_${c}`, this.scene, {
+          width: cardWidth,
+          height: cardHeight,
+          seed: cardSeed,
+          curve: clusterRadius * 0.4,
+        });
 
-          if (tly < 0) {
-            tly *= 0.35;
-          }
+        const radial =
+          Math.pow(Math.abs(noise3D(cardSeed * 3.3, 0, 0)), 0.72) *
+          clusterRadius *
+          1.05;
+        const theta = (noise3D(0, cardSeed * 4.7, 0) + 0.5) * Math.PI * 2;
+        card.position.x = clusterCenterX + Math.cos(theta) * radial;
+        card.position.y =
+          clusterCenterY + Math.abs(noise3D(0, 0, cardSeed * 5.2)) * clusterRadius * 0.85;
+        card.position.z = clusterCenterZ + Math.sin(theta) * radial;
+        card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.8;
+        card.rotation.x = -0.08 + Math.abs(noise3D(0, cardSeed * 6.7, 0)) * 0.4;
+        card.rotation.z = noise3D(0, 0, cardSeed * 6.9) * 0.28;
 
-          const tllen = Math.sqrt(tlx * tlx + tly * tly + tlz * tlz);
-          if (tllen > 0.001) {
-            const bump = fbm3D(tlx * 5 + tSeed, tly * 5, tlz * 5, 2) * 0.07;
-            tlx += (tlx / tllen) * bump;
-            tly += (tly / tllen) * bump;
-            tlz += (tlz / tllen) * bump;
-          }
-
-          newTLPos[j] = tlx;
-          newTLPos[j + 1] = tly;
-          newTLPos[j + 2] = tlz;
-        }
-        topLeaf.updateVerticesData(VertexBuffer.PositionKind, newTLPos);
-
-        const tlIndices = topLeaf.getIndices();
-        const tlNormals = topLeaf.getVerticesData(VertexBuffer.NormalKind);
-        if (tlIndices && tlNormals) {
-          VertexData.ComputeNormals(newTLPos, tlIndices, tlNormals);
-          topLeaf.updateVerticesData(VertexBuffer.NormalKind, tlNormals);
-        }
+        setLeafVertexColors(card, cardSeed, true);
+        meshes.push(card);
       }
-
-      const topTheta = i * (Math.PI * 2 / topLeafCount) + noise3D(0, tSeed * 3, 0) * 0.6;
-      const topDist = trunkTopRadius * 0.3 + Math.abs(noise3D(tSeed * 4, 0, 0)) * 0.08;
-      const layerHeight = i * 0.03;
-
-      topLeaf.position.x = trunkTopX + Math.cos(topTheta) * topDist;
-      topLeaf.position.z = trunkTopZ + Math.sin(topTheta) * topDist;
-      topLeaf.position.y = trunkTopY + topLeafSize * topLeafScaleY * 0.15 + layerHeight;
-
-      setLeafVertexColors(topLeaf, tSeed, true);
-      meshes.push(topLeaf);
     }
 
     const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true);
@@ -1332,89 +1758,84 @@ export class ProceduralAssetGenerator {
     return new Mesh("tree_" + seed, this.scene);
   }
 
-  // ============================================
-  // Bush Generation
-  // ============================================
-
   private generateBush(params: GeneratorParams): Mesh {
     const seed = params.seed;
     const meshes: Mesh[] = [];
-    const bushSubdivisions = calcSubdivision(params.size, 3);
 
     const overallSpread = 0.25 + Math.abs(noise3D(0, seed, 0)) * 0.35;
-    const branchCount = 6 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 6);
+    const clusterCount = 6 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 7);
 
-    for (let i = 0; i < branchCount; i++) {
-      const iSeed = seed + i * 97.3;
-
-      const branchLength = 0.08 + Math.abs(noise3D(iSeed, 0, 0)) * 0.12;
-      const branchThickness = 0.04 + Math.abs(noise3D(0, iSeed, 0)) * 0.06;
-      const branchFlatness = 0.4 + Math.abs(noise3D(0, 0, iSeed)) * 0.5;
-
-      const theta = (noise3D(0, iSeed * 2, 0) + 0.5) * Math.PI * 2;
-      const elevationAngle = Math.abs(noise3D(iSeed * 2.5, 0, 0)) * 0.4;
-
-      const sphere = MeshBuilder.CreateIcoSphere(
-        "bush_" + i,
-        { radius: branchLength, subdivisions: bushSubdivisions, updatable: true },
+    const twigCount = 2 + Math.floor(Math.abs(noise3D(seed * 2.2, 0, 0)) * 3);
+    for (let i = 0; i < twigCount; i++) {
+      const twigSeed = seed + i * 37.13;
+      const twigLength = 0.11 + Math.abs(noise3D(twigSeed, 0, 0)) * 0.16;
+      const twigRadius = 0.01 + Math.abs(noise3D(0, twigSeed, 0)) * 0.015;
+      const twig = MeshBuilder.CreateCylinder(
+        `bush_twig_${i}`,
+        {
+          height: twigLength,
+          diameterTop: twigRadius * 0.6,
+          diameterBottom: twigRadius,
+          tessellation: 5,
+        },
         this.scene
       );
 
-      const positions = sphere.getVerticesData(VertexBuffer.PositionKind);
-      if (positions) {
-        const newPositions = new Float32Array(positions.length);
+      const yaw = (noise3D(0, twigSeed * 2.1, 0) + 0.5) * Math.PI * 2;
+      const pitch = 0.2 + Math.abs(noise3D(twigSeed * 2.3, 0, 0)) * 0.45;
+      twig.rotation.y = yaw;
+      twig.rotation.z = pitch;
+      twig.position.x = Math.cos(yaw) * 0.04;
+      twig.position.z = Math.sin(yaw) * 0.04;
+      twig.position.y = twigLength * 0.35;
+      setBarkVertexColors(twig, twigSeed, true);
+      meshes.push(twig);
+    }
 
-        for (let j = 0; j < positions.length; j += 3) {
-          let x = positions[j];
-          let y = positions[j + 1];
-          let z = positions[j + 2];
+    for (let i = 0; i < clusterCount; i++) {
+      const iSeed = seed + i * 97.3;
+      const radialDist =
+        Math.pow(Math.abs(noise3D(iSeed * 3.1, 0, 0)), 0.9) * overallSpread;
+      const centerTheta = (noise3D(iSeed * 3.5, 0, 0) + 0.5) * Math.PI * 2;
+      const centerX = Math.cos(centerTheta) * radialDist;
+      const centerZ = Math.sin(centerTheta) * radialDist;
+      const centerY = 0.03 + Math.abs(noise3D(0, iSeed * 3.9, 0)) * 0.16;
 
-          const dirX = Math.cos(theta) * Math.cos(elevationAngle);
-          const dirY = Math.sin(elevationAngle);
-          const dirZ = Math.sin(theta) * Math.cos(elevationAngle);
+      const clusterRadius = 0.08 + Math.abs(noise3D(iSeed * 4.1, 0, 0)) * 0.12;
+      const cardCount = 8 + Math.floor(Math.abs(noise3D(0, iSeed * 4.3, 0)) * 11);
 
-          const dot = (x * dirX + y * dirY + z * dirZ) / branchLength;
-          const stretch = 1.0 + Math.max(0, dot) * 1.5;
+      for (let c = 0; c < cardCount; c++) {
+        const cardSeed = iSeed + c * 29.17;
+        const cardWidth =
+          clusterRadius * (0.5 + Math.abs(noise3D(cardSeed * 2.2, 0, 0)) * 0.55);
+        const cardHeight =
+          clusterRadius * (0.95 + Math.abs(noise3D(0, cardSeed * 2.2, 0)) * 1.0);
 
-          x *= branchThickness / branchLength * stretch;
-          y *= branchThickness / branchLength * branchFlatness * stretch;
-          z *= branchThickness / branchLength * stretch;
+        const card = createLeafCardMesh(`bush_leaf_card_${i}_${c}`, this.scene, {
+          width: cardWidth,
+          height: cardHeight,
+          seed: cardSeed,
+          curve: clusterRadius * 0.35,
+        });
 
-          x += dirX * branchLength * 0.5;
-          y += dirY * branchLength * 0.3;
-          z += dirZ * branchLength * 0.5;
+        const radial =
+          Math.pow(Math.abs(noise3D(cardSeed * 3.4, 0, 0)), 0.75) *
+          clusterRadius *
+          1.05;
+        const theta = (noise3D(0, cardSeed * 4.6, 0) + 0.5) * Math.PI * 2;
+        const lift = Math.abs(noise3D(0, 0, cardSeed * 5.3)) * clusterRadius * 0.85;
 
-          const len = Math.sqrt(x * x + y * y + z * z);
-          if (len > 0.001) {
-            const bump = fbm3D(x * 8 + iSeed, y * 8, z * 8 + iSeed * 0.5, 2) * 0.02;
-            x += (x / len) * bump;
-            y += (y / len) * bump;
-            z += (z / len) * bump;
-          }
+        card.position.x = centerX + Math.cos(theta) * radial;
+        card.position.y = centerY + lift;
+        card.position.z = centerZ + Math.sin(theta) * radial;
 
-          newPositions[j] = x;
-          newPositions[j + 1] = y;
-          newPositions[j + 2] = z;
-        }
+        card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.7;
+        card.rotation.x = -0.1 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.5;
+        card.rotation.z = noise3D(0, 0, cardSeed * 6.5) * 0.3;
 
-        sphere.updateVerticesData(VertexBuffer.PositionKind, newPositions);
-
-        const indices = sphere.getIndices();
-        const normals = sphere.getVerticesData(VertexBuffer.NormalKind);
-        if (indices && normals) {
-          VertexData.ComputeNormals(newPositions, indices, normals);
-          sphere.updateVerticesData(VertexBuffer.NormalKind, normals);
-        }
+        setLeafVertexColors(card, cardSeed, false);
+        meshes.push(card);
       }
-
-      const radialDist = Math.abs(noise3D(iSeed * 3, 0, 0)) * overallSpread * 0.3;
-      const posTheta = (noise3D(iSeed * 3.5, 0, 0) + 0.5) * Math.PI * 2;
-      sphere.position.x = Math.cos(posTheta) * radialDist;
-      sphere.position.z = Math.sin(posTheta) * radialDist;
-      sphere.position.y = branchThickness * 0.3;
-
-      setBushVertexColors(sphere, iSeed);
-      meshes.push(sphere);
     }
 
     const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true);
@@ -1426,10 +1847,6 @@ export class ProceduralAssetGenerator {
 
     return new Mesh("bush_" + seed, this.scene);
   }
-
-  // ============================================
-  // Grass Clump Generation
-  // ============================================
 
   private generateGrassClump(params: GeneratorParams): Mesh {
     const seed = params.seed;
@@ -1531,5 +1948,16 @@ export class ProceduralAssetGenerator {
     }
 
     return new Mesh("grass_" + seed, this.scene);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (this.referenceTemplates.tree) {
+      this.referenceTemplates.tree.dispose();
+    }
+    if (this.referenceTemplates.bush) {
+      this.referenceTemplates.bush.dispose();
+    }
+    this.referenceTemplates = {};
   }
 }

@@ -53,6 +53,7 @@ export interface DecodedWorldProject {
   name: string;
   createdAt: string;
   modifiedAt: string;
+  rendering: DecodedRenderingConfig;
 
   mainTile: DecodedTileData | null;
   tiles: Map<string, DecodedTileData>;
@@ -102,6 +103,7 @@ export interface SerializedWorldProject {
   name: string;
   createdAt: string;
   modifiedAt: string;
+  rendering: SerializedRenderingConfig;
 
   // Single tile export format
   terrain?: {
@@ -144,6 +146,32 @@ export interface SerializedWorldProject {
   foliage?: Record<string, string>;
   props?: PropInstance[];
   proceduralProps?: ProceduralPropInstance[];
+}
+
+// ============================================
+// Rendering Profile (v2.0.0)
+// ============================================
+
+export interface RenderingTextureUrls {
+  grass: string;
+  dirt: string;
+  rock: string;
+  sand: string;
+  leafAtlas: string;
+}
+
+export interface SerializedRenderingConfig {
+  leafAtlas: string;
+  foliageProfileVersion: string;
+  proceduralProfileVersion: string;
+  textureUrls: RenderingTextureUrls;
+}
+
+export interface DecodedRenderingConfig {
+  leafAtlas: string;
+  foliageProfileVersion: string;
+  proceduralProfileVersion: string;
+  textureUrls: RenderingTextureUrls;
 }
 
 // ============================================
@@ -339,4 +367,11 @@ export interface FoliageRendererOptions {
   lodEnabled?: boolean;
   /** LOD distances: { near, mid, far } */
   lodDistances?: { near: number; mid: number; far: number };
+  /** Rendering profile information from world export */
+  renderingProfile?: {
+    foliageProfileVersion: string;
+    proceduralProfileVersion: string;
+  };
+  /** Optional texture overrides */
+  textureUrls?: Partial<RenderingTextureUrls>;
 }

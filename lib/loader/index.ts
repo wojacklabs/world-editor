@@ -20,6 +20,7 @@
 export type {
   DecodedTileData,
   DecodedWorldProject,
+  DecodedRenderingConfig,
   TileConnections,
   WorldSettings,
   WorldMetadata,
@@ -28,7 +29,12 @@ export type {
 } from "./types";
 
 // Types - Serialized (Storage)
-export type { SerializedTileData, SerializedWorldProject } from "./types";
+export type {
+  SerializedTileData,
+  SerializedWorldProject,
+  SerializedRenderingConfig,
+  RenderingTextureUrls,
+} from "./types";
 
 // Types - Configuration
 export type {
