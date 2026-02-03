@@ -107,7 +107,7 @@ export class EditorEngine {
 
   async init(): Promise<void> {
     // Initialize KTX2 texture support
-    initializeKTX2Support();
+    await initializeKTX2Support();
 
     // Check WebGPU support
     const webGPUSupported = await WebGPUEngine.IsSupportedAsync;
