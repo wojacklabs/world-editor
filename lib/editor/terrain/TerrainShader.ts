@@ -9,33 +9,18 @@ import {
   Engine,
   BaseTexture,
 } from "@babylonjs/core";
+import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
 
 /**
- * Load texture with fallback support
- *
- * Currently using JPG format due to KTX2 CDN availability issues.
- * To enable KTX2:
- * 1. Self-host KTX2 decoder files in public/ktx2/
- * 2. Update KTX2Setup.ts to use self-hosted path
- * 3. Change extension below from "jpg" to "ktx2"
- *
- * @param basePath - Path without extension (e.g., "/textures/grass_diff")
- * @param scene - Babylon.js scene
- * @param extension - File extension (default: "jpg")
+ * Load terrain texture with KTX2-first fallback.
  */
-function loadTextureWithKTX2Fallback(
-  basePath: string,
-  scene: Scene,
-  extension: string = "jpg"
-): Texture {
-  const texturePath = `${basePath}.${extension}`;
-
-  const texture = new Texture(texturePath, scene);
-  texture.wrapU = Texture.WRAP_ADDRESSMODE;
-  texture.wrapV = Texture.WRAP_ADDRESSMODE;
-  texture.anisotropicFilteringLevel = 16;
-
-  return texture;
+function loadTerrainTexture(basePath: string, scene: Scene): Texture {
+  return loadTextureWithFallback(scene, basePath, {
+    preferredExtensions: ["ktx2", "jpg", "png"],
+    anisotropicFilteringLevel: 16,
+    wrapU: Texture.WRAP_ADDRESSMODE,
+    wrapV: Texture.WRAP_ADDRESSMODE,
+  });
 }
 
 // Register custom shaders
@@ -1099,21 +1084,21 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
   material.setColor3("uSandColor", new Color3(0.82, 0.72, 0.52));  // Warm sandy yellow
 
   // Load rock textures (supports KTX2 when available)
-  material.setTexture("uRockDiffuse", loadTextureWithKTX2Fallback("/textures/rock_diff", scene, "jpg"));
-  material.setTexture("uRockNormal", loadTextureWithKTX2Fallback("/textures/rock_nor", scene, "jpg"));
-  material.setTexture("uRockDisp", loadTextureWithKTX2Fallback("/textures/rock_disp", scene, "jpg"));
-  material.setTexture("uRockARM", loadTextureWithKTX2Fallback("/textures/rock_arm", scene, "jpg"));
+  material.setTexture("uRockDiffuse", loadTerrainTexture("/textures/rock_diff", scene));
+  material.setTexture("uRockNormal", loadTerrainTexture("/textures/rock_nor", scene));
+  material.setTexture("uRockDisp", loadTerrainTexture("/textures/rock_disp", scene));
+  material.setTexture("uRockARM", loadTerrainTexture("/textures/rock_arm", scene));
 
   // Load dirt textures (dry mud)
-  material.setTexture("uDirtDiffuse", loadTextureWithKTX2Fallback("/textures/dirt_diffuse", scene, "jpg"));
-  material.setTexture("uDirtNormal", loadTextureWithKTX2Fallback("/textures/dirt_normal", scene, "jpg"));
-  material.setTexture("uDirtDisp", loadTextureWithKTX2Fallback("/textures/dirt_disp", scene, "jpg"));
+  material.setTexture("uDirtDiffuse", loadTerrainTexture("/textures/dirt_diffuse", scene));
+  material.setTexture("uDirtNormal", loadTerrainTexture("/textures/dirt_normal", scene));
+  material.setTexture("uDirtDisp", loadTerrainTexture("/textures/dirt_disp", scene));
 
   // Load grass textures (coastal grass)
-  material.setTexture("uGrassDiffuse", loadTextureWithKTX2Fallback("/textures/grass_diff", scene, "jpg"));
-  material.setTexture("uGrassNormal", loadTextureWithKTX2Fallback("/textures/grass_nor", scene, "jpg"));
-  material.setTexture("uGrassARM", loadTextureWithKTX2Fallback("/textures/grass_arm", scene, "jpg"));
-  material.setTexture("uGrassDisp", loadTextureWithKTX2Fallback("/textures/grass_disp", scene, "jpg"));
+  material.setTexture("uGrassDiffuse", loadTerrainTexture("/textures/grass_diff", scene));
+  material.setTexture("uGrassNormal", loadTerrainTexture("/textures/grass_nor", scene));
+  material.setTexture("uGrassARM", loadTerrainTexture("/textures/grass_arm", scene));
+  material.setTexture("uGrassDisp", loadTerrainTexture("/textures/grass_disp", scene));
 
   // Texture tiling scale (higher = smaller texture, more repeats)
   material.setFloat("uTextureScale", 1.0);  // 1.0 = texture repeats every 1 world unit (matches original texture size)

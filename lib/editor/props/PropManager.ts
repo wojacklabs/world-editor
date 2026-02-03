@@ -7,13 +7,18 @@ import {
   ShaderMaterial,
   Effect,
   VertexBuffer,
+  VertexData,
   Frustum,
   BoundingInfo,
   BoundingSphere,
 } from "@babylonjs/core";
 import * as BABYLON from "@babylonjs/core";
+import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
+import "@babylonjs/loaders/glTF";
 import { Heightmap } from "../terrain/Heightmap";
 import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from "./ProceduralAsset";
+import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
+import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
 
 // ============================================
 // LOD Configuration
@@ -38,6 +43,9 @@ const LOD_DISTANCES = {
   highToMedium: 30,   // Switch from High to Medium at 30 units
   mediumToLow: 80,    // Switch from Medium to Low at 80 units
 };
+
+const REFERENCE_TREE_ROOT_URL = "/assets/references/infinite-terrain/";
+const REFERENCE_TREE_FILE_NAME = "tree.glb";
 
 // ============================================
 // Thin instance shaders for props (supports world0-world3 attributes)
@@ -283,6 +291,12 @@ uniform vec3 fogColor;
 uniform float fogDensity;
 uniform sampler2D dirtTexture;
 uniform float dirtTextureScale;
+uniform sampler2D leafAtlas;
+uniform float uLeafAlphaCutoff;
+uniform float uLeafFadeStart;
+uniform float uLeafFadeEnd;
+uniform float uUseLeafAtlas;
+uniform float uLeafMaskFromLuma;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -328,8 +342,26 @@ float fbm(vec3 p) {
     return value;
 }
 
+float hash2D(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main() {
     vec3 normal = normalize(vNormal);
+    float leafMask = step(vColor.r + 0.02, vColor.g);
+    vec4 leafSample = texture2D(leafAtlas, vUV);
+    float usesLeafAtlas = uUseLeafAtlas * leafMask;
+    float leafMaskAlpha = mix(leafSample.a, dot(leafSample.rgb, vec3(0.299, 0.587, 0.114)), uLeafMaskFromLuma);
+
+    if (usesLeafAtlas > 0.5 && leafMaskAlpha < uLeafAlphaCutoff) {
+        discard;
+    }
+
+    float fadeAlpha = 1.0 - smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
+    float dither = hash2D(gl_FragCoord.xy + vPosition.xz * 3.17);
+    if (leafMask > 0.5 && dither > clamp(fadeAlpha, 0.0, 1.0)) {
+        discard;
+    }
 
     // Use vertex color if available, otherwise use baseColor
     vec3 meshColor = vColor.a > 0.5 ? vColor.rgb : baseColor;
@@ -340,7 +372,7 @@ void main() {
 
     // Height-based color (tips lighter)
     float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y);
-    float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;
+    float isLeaf = mix(0.3, 1.0, leafMask);
     color = mix(color * 0.85, color * 1.1, tipFactor * isLeaf);
 
     // Triplanar dirt texture for bark (R > G = brown = bark)
@@ -447,6 +479,10 @@ export class PropManager {
   private previewMesh: Mesh | null = null;
   private previewParams: AssetParams | null = null;
   private previewVisible = false;
+  private previewMatrixBuffer: Float32Array | null = null;
+  private previewPosition = new Vector3(0, 0, 0);
+  private previewRotation = new Vector3(0, 0, 0);
+  private previewScale = 1.0;
 
   // Async initialization state
   private initializationComplete = false;
@@ -456,6 +492,7 @@ export class PropManager {
   // Frustum culling
   private frustumPlanesCache: BABYLON.Plane[] = [];
   private lastFrustumUpdateFrame = -1;
+  private referenceTemplates: Partial<Record<"tree" | "bush", Mesh>> = {};
 
   constructor(scene: Scene, heightmap: Heightmap) {
     this.scene = scene;
@@ -480,6 +517,346 @@ export class PropManager {
     return this.initializationComplete;
   }
 
+  private seeded01(seed: number): number {
+    const n = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
+    return n - Math.floor(n);
+  }
+
+  private setMeshVertexColor(mesh: Mesh, r: number, g: number, b: number): void {
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+    if (!positions) return;
+
+    const vertexCount = positions.length / 3;
+    const colors = new Float32Array(vertexCount * 4);
+    for (let i = 0; i < vertexCount; i++) {
+      colors[i * 4] = r;
+      colors[i * 4 + 1] = g;
+      colors[i * 4 + 2] = b;
+      colors[i * 4 + 3] = 1.0;
+    }
+    mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+  }
+
+  private bakeMeshToWorld(source: Mesh, name: string): Mesh | null {
+    const positions = source.getVerticesData(VertexBuffer.PositionKind);
+    const normals = source.getVerticesData(VertexBuffer.NormalKind);
+    const uvs = source.getVerticesData(VertexBuffer.UVKind);
+    const indices = source.getIndices();
+
+    if (!positions || !indices) {
+      return null;
+    }
+
+    source.computeWorldMatrix(true);
+    const world = source.getWorldMatrix();
+
+    const outPositions = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+      BABYLON.Vector3.TransformCoordinatesFromFloatsToRef(
+        positions[i],
+        positions[i + 1],
+        positions[i + 2],
+        world,
+        this._tempVector3
+      );
+      outPositions[i] = this._tempVector3.x;
+      outPositions[i + 1] = this._tempVector3.y;
+      outPositions[i + 2] = this._tempVector3.z;
+    }
+
+    let outNormals: Float32Array | null = null;
+    if (normals) {
+      outNormals = new Float32Array(normals.length);
+      for (let i = 0; i < normals.length; i += 3) {
+        BABYLON.Vector3.TransformNormalFromFloatsToRef(
+          normals[i],
+          normals[i + 1],
+          normals[i + 2],
+          world,
+          this._tempVector3
+        );
+        this._tempVector3.normalize();
+        outNormals[i] = this._tempVector3.x;
+        outNormals[i + 1] = this._tempVector3.y;
+        outNormals[i + 2] = this._tempVector3.z;
+      }
+    }
+
+    const baked = new Mesh(name, this.scene);
+    const vertexData = new VertexData();
+    vertexData.positions = outPositions;
+    vertexData.indices = Array.from(indices);
+    vertexData.uvs = uvs ? Array.from(uvs) : null;
+    vertexData.normals = outNormals ? Array.from(outNormals) : null;
+    if (!vertexData.normals) {
+      const computedNormals: number[] = [];
+      VertexData.ComputeNormals(
+        Array.from(outPositions),
+        Array.from(indices),
+        computedNormals
+      );
+      vertexData.normals = computedNormals;
+    }
+    vertexData.applyToMesh(baked);
+
+    return baked;
+  }
+
+  private recenterMeshToGround(mesh: Mesh): void {
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+    if (!positions || positions.length < 3) return;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i];
+      const y = positions[i + 1];
+      const z = positions[i + 2];
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+
+    const centerX = (minX + maxX) * 0.5;
+    const centerZ = (minZ + maxZ) * 0.5;
+
+    const shifted = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+      shifted[i] = positions[i] - centerX;
+      shifted[i + 1] = positions[i + 1] - minY;
+      shifted[i + 2] = positions[i + 2] - centerZ;
+    }
+
+    mesh.setVerticesData(VertexBuffer.PositionKind, shifted, true);
+    mesh.refreshBoundingInfo();
+  }
+
+  private applyReferenceVariationDeformation(
+    mesh: Mesh,
+    seedBase: number,
+    assetType: "tree" | "bush"
+  ): void {
+    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+    const indices = mesh.getIndices();
+    if (!positions || !indices || positions.length < 3) {
+      return;
+    }
+
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (let i = 1; i < positions.length; i += 3) {
+      const y = positions[i];
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+
+    const heightRange = Math.max(maxY - minY, 0.0001);
+    const bendScale = assetType === "tree" ? 0.22 : 0.14;
+    const twistScale = assetType === "tree" ? 0.75 : 0.45;
+    const jitterScale = assetType === "tree" ? 0.018 : 0.012;
+    const crownScale = 0.8 + this.seeded01(seedBase + 5.7) * 0.55;
+    const trunkScale = 0.82 + this.seeded01(seedBase + 6.1) * 0.22;
+    const bendX = (this.seeded01(seedBase + 7.3) - 0.5) * bendScale;
+    const bendZ = (this.seeded01(seedBase + 8.9) - 0.5) * bendScale;
+    const twistAmount = (this.seeded01(seedBase + 9.7) - 0.5) * twistScale;
+    const stretch = 0.9 + this.seeded01(seedBase + 10.9) * 0.35;
+
+    const deformed = new Float32Array(positions.length);
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i];
+      const y = positions[i + 1];
+      const z = positions[i + 2];
+
+      const tRaw = (y - minY) / heightRange;
+      const t = Math.max(0, Math.min(1, tRaw));
+      const smoothT = t * t * (3 - 2 * t);
+      const topWeight = smoothT * smoothT;
+
+      const radiusScale = trunkScale + (crownScale - trunkScale) * smoothT;
+      let px = x * radiusScale;
+      let py = y * stretch;
+      let pz = z * radiusScale;
+
+      const twist = twistAmount * topWeight;
+      const cosTwist = Math.cos(twist);
+      const sinTwist = Math.sin(twist);
+      const tx = px * cosTwist - pz * sinTwist;
+      const tz = px * sinTwist + pz * cosTwist;
+
+      px = tx + bendX * topWeight;
+      pz = tz + bendZ * topWeight;
+
+      const jitterSeed = seedBase + x * 13.37 + y * 7.11 + z * 5.73;
+      const jitter = (this.seeded01(jitterSeed) - 0.5) * jitterScale * smoothT;
+      px += jitter;
+      pz += (this.seeded01(jitterSeed + 17.0) - 0.5) * jitterScale * smoothT;
+      py += (this.seeded01(jitterSeed + 29.0) - 0.5) * jitterScale * 0.6 * smoothT;
+
+      deformed[i] = px;
+      deformed[i + 1] = py;
+      deformed[i + 2] = pz;
+    }
+
+    mesh.setVerticesData(VertexBuffer.PositionKind, deformed, true);
+    const normals: number[] = [];
+    VertexData.ComputeNormals(Array.from(deformed), Array.from(indices), normals);
+    mesh.setVerticesData(VertexBuffer.NormalKind, normals, true);
+    mesh.refreshBoundingInfo();
+  }
+
+  private createReferenceVariationMesh(
+    assetType: "tree" | "bush",
+    lod: MeshLOD,
+    variationIdx: number
+  ): Mesh | null {
+    const template = this.referenceTemplates[assetType];
+    if (!template) return null;
+
+    const mesh = template.clone(`${assetType}_ref_var${variationIdx}_lod${lod}`);
+    if (!mesh) return null;
+
+    mesh.makeGeometryUnique();
+
+    const seedBase =
+      variationIdx * 37.17 +
+      (assetType === "tree" ? 11.7 : 29.3);
+    const yaw = (this.seeded01(seedBase + 0.9) - 0.5) * 0.65;
+    const sx = 0.88 + this.seeded01(seedBase + 1.7) * 0.26;
+    const sy = 0.9 + this.seeded01(seedBase + 2.5) * 0.34;
+    const sz = 0.88 + this.seeded01(seedBase + 3.3) * 0.26;
+
+    const variationTransform = Matrix.Scaling(sx, sy, sz).multiply(
+      Matrix.RotationY(yaw)
+    );
+    mesh.bakeTransformIntoVertices(variationTransform);
+    this.applyReferenceVariationDeformation(mesh, seedBase, assetType);
+
+    return mesh;
+  }
+
+  private async loadReferenceTemplatesIfAvailable(): Promise<void> {
+    if (this.referenceTemplates.tree || this.referenceTemplates.bush) {
+      return;
+    }
+
+    try {
+      const result = await SceneLoader.ImportMeshAsync(
+        "",
+        REFERENCE_TREE_ROOT_URL,
+        REFERENCE_TREE_FILE_NAME,
+        this.scene
+      );
+
+      if (this.isDisposed) {
+        for (const mesh of result.meshes) {
+          mesh.dispose(false, true);
+        }
+        result.skeletons?.forEach((skeleton) => skeleton.dispose());
+        result.animationGroups?.forEach((group) => group.dispose());
+        result.particleSystems?.forEach((ps) => ps.dispose());
+        result.transformNodes?.forEach((node) => node.dispose());
+        return;
+      }
+
+      const importedMeshes = result.meshes.filter(
+        (mesh): mesh is Mesh =>
+          mesh instanceof Mesh &&
+          !!mesh.getVerticesData(VertexBuffer.PositionKind) &&
+          !!mesh.getIndices()
+      );
+
+      if (importedMeshes.length === 0) {
+        return;
+      }
+
+      const trunkSources = importedMeshes.filter((mesh) =>
+        mesh.name.toLowerCase().includes("trunk")
+      );
+      const bushSources = importedMeshes.filter((mesh) =>
+        mesh.name.toLowerCase().startsWith("bush_")
+      );
+
+      const buildMergedTemplate = (
+        includeTrunk: boolean,
+        mergedName: string
+      ): Mesh | null => {
+        const bakedParts: Mesh[] = [];
+
+        if (includeTrunk) {
+          for (let i = 0; i < trunkSources.length; i++) {
+            const baked = this.bakeMeshToWorld(trunkSources[i], `ref_trunk_${i}`);
+            if (!baked) continue;
+            this.setMeshVertexColor(baked, 0.44, 0.32, 0.18);
+            bakedParts.push(baked);
+          }
+        }
+
+        for (let i = 0; i < bushSources.length; i++) {
+          const baked = this.bakeMeshToWorld(bushSources[i], `ref_bush_${i}`);
+          if (!baked) continue;
+          this.setMeshVertexColor(baked, 0.23, 0.48, 0.2);
+          bakedParts.push(baked);
+        }
+
+        if (bakedParts.length === 0) {
+          return null;
+        }
+
+        const merged = Mesh.MergeMeshes(
+          bakedParts,
+          true,
+          true,
+          undefined,
+          false,
+          true
+        );
+        if (!merged) {
+          return null;
+        }
+
+        merged.name = mergedName;
+        this.recenterMeshToGround(merged);
+        merged.isVisible = false;
+        merged.isPickable = false;
+        merged.material = null;
+        return merged;
+      };
+
+      const bushTemplate = buildMergedTemplate(false, "ref_bush_template");
+      const treeTemplate = buildMergedTemplate(true, "ref_tree_template");
+
+      if (bushTemplate) {
+        this.referenceTemplates.bush = bushTemplate;
+      }
+      if (treeTemplate) {
+        this.referenceTemplates.tree = treeTemplate;
+      }
+
+      for (const mesh of result.meshes) {
+        mesh.dispose(false, true);
+      }
+      result.skeletons?.forEach((skeleton) => skeleton.dispose());
+      result.animationGroups?.forEach((group) => group.dispose());
+      result.particleSystems?.forEach((ps) => ps.dispose());
+      result.transformNodes?.forEach((node) => node.dispose());
+
+      if (this.referenceTemplates.tree || this.referenceTemplates.bush) {
+        console.log("[PropManager] Loaded reference tree/bush templates from GLB");
+      }
+    } catch (error) {
+      console.warn(
+        "[PropManager] Reference GLB not available, using procedural tree/bush variations.",
+        error
+      );
+    }
+  }
+
   /**
    * Initialize base variation meshes for each asset type (async version)
    * Creates meshes for all LOD levels progressively to avoid blocking
@@ -500,6 +877,8 @@ export class PropManager {
     for (const assetType of assetTypes) {
       this.variationMeshes.set(assetType, new Map());
     }
+
+    await this.loadReferenceTemplatesIfAvailable();
 
     // Create meshes progressively using requestAnimationFrame batching
     // Process one (assetType, LOD, variation) combination per frame to avoid blocking
@@ -543,16 +922,29 @@ export class PropManager {
 
             const seed = variationIdx * 1001 + 8;
             const subdivision = LOD_SUBDIVISIONS[assetType][lod];
+            const useReference =
+              assetType === "tree" || assetType === "bush";
 
-            const params: AssetParams = {
-              ...DEFAULT_ASSET_PARAMS[assetType],
-              seed,
-              size: 1.0,
-              subdivisionOverride: subdivision > 0 ? subdivision : undefined,
-            };
+            let mesh: Mesh | null = null;
+            if (useReference) {
+              mesh = this.createReferenceVariationMesh(
+                assetType as "tree" | "bush",
+                lod,
+                variationIdx
+              );
+            }
 
-            const asset = new ProceduralAsset(this.scene, params);
-            const mesh = asset.generate();
+            if (!mesh) {
+              const params: AssetParams = {
+                ...DEFAULT_ASSET_PARAMS[assetType],
+                seed,
+                size: 1.0,
+                subdivisionOverride: subdivision > 0 ? subdivision : undefined,
+              };
+
+              const asset = new ProceduralAsset(this.scene, params);
+              mesh = asset.generate();
+            }
 
             if (mesh) {
               mesh.name = `${assetType}_var${variationIdx}_lod${lod}`;
@@ -597,16 +989,29 @@ export class PropManager {
         for (let i = 0; i < VARIATIONS_PER_TYPE; i++) {
           const seed = i * 1001 + 8;
           const subdivision = LOD_SUBDIVISIONS[assetType][lod];
+          const useReference =
+            assetType === "tree" || assetType === "bush";
 
-          const params: AssetParams = {
-            ...DEFAULT_ASSET_PARAMS[assetType],
-            seed,
-            size: 1.0,
-            subdivisionOverride: subdivision > 0 ? subdivision : undefined,
-          };
+          let mesh: Mesh | null = null;
+          if (useReference) {
+            mesh = this.createReferenceVariationMesh(
+              assetType as "tree" | "bush",
+              lod,
+              i
+            );
+          }
 
-          const asset = new ProceduralAsset(this.scene, params);
-          const mesh = asset.generate();
+          if (!mesh) {
+            const params: AssetParams = {
+              ...DEFAULT_ASSET_PARAMS[assetType],
+              seed,
+              size: 1.0,
+              subdivisionOverride: subdivision > 0 ? subdivision : undefined,
+            };
+
+            const asset = new ProceduralAsset(this.scene, params);
+            mesh = asset.generate();
+          }
 
           if (mesh) {
             mesh.name = `${assetType}_var${i}_lod${lod}`;
@@ -667,33 +1072,38 @@ export class PropManager {
             "fogColor",
             "fogDensity",
             "dirtTextureScale",
+            "uLeafAlphaCutoff",
+            "uLeafFadeStart",
+            "uLeafFadeEnd",
+            "uUseLeafAtlas",
+            "uLeafMaskFromLuma",
           ],
-          samplers: ["dirtTexture"],
+          samplers: ["dirtTexture", "leafAtlas"],
         }
       );
 
       // Wind settings
-      const windAngle = Math.PI * 0.25;
+      const windAngle = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians;
       material.setVector2("uWindDirection", new BABYLON.Vector2(
         Math.cos(windAngle),
         Math.sin(windAngle)
       ));
 
       // Wind settings by type
-      let windStrength = 0.5;
+      let windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength;
       let minWindHeight = 0.0;
       let maxWindHeight = 0.8;
 
       if (assetType === "grass_clump") {
-        windStrength = 0.8;
+        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassClumpStrength;
         minWindHeight = 0.0;
         maxWindHeight = 0.7;
       } else if (assetType === "bush") {
-        windStrength = 0.4;
+        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.bushStrength;
         minWindHeight = 0.0;
         maxWindHeight = 0.3;
       } else if (assetType === "tree") {
-        windStrength = 0.35;
+        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength;
         minWindHeight = 0.5;
         maxWindHeight = 2.0;
       }
@@ -704,12 +1114,47 @@ export class PropManager {
       material.setFloat("uTime", 0);
 
       // Load dirt texture for bark triplanar mapping
-      const dirtTex = new BABYLON.Texture("/textures/dirt_diffuse.jpg", this.scene);
-      dirtTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
-      dirtTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
-      dirtTex.anisotropicFilteringLevel = 8;
+      const dirtTex = loadTextureWithFallback(
+        this.scene,
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.dirt,
+        {
+          preferredExtensions: ["ktx2", "jpg", "png"],
+          wrapU: BABYLON.Texture.WRAP_ADDRESSMODE,
+          wrapV: BABYLON.Texture.WRAP_ADDRESSMODE,
+          anisotropicFilteringLevel: 8,
+        }
+      );
       material.setTexture("dirtTexture", dirtTex);
       material.setFloat("dirtTextureScale", 0.5);
+
+      const leafAtlas = loadTextureWithFallback(
+        this.scene,
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.leafAtlas,
+        {
+          preferredExtensions: ["png", "ktx2", "jpg"],
+          wrapU: BABYLON.Texture.CLAMP_ADDRESSMODE,
+          wrapV: BABYLON.Texture.CLAMP_ADDRESSMODE,
+          anisotropicFilteringLevel: 4,
+        }
+      );
+      material.setTexture("leafAtlas", leafAtlas);
+      material.setFloat(
+        "uLeafAlphaCutoff",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff
+      );
+      material.setFloat(
+        "uLeafFadeStart",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart
+      );
+      material.setFloat(
+        "uLeafFadeEnd",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd
+      );
+      material.setFloat(
+        "uUseLeafAtlas",
+        assetType === "tree" || assetType === "bush" ? 1.0 : 0.0
+      );
+      material.setFloat("uLeafMaskFromLuma", 1.0);
     } else {
       // Rock uses thin instance static shader with triplanar texture
       // NOTE: Do NOT include world0-world3 in attributes - Babylon.js adds them
@@ -739,10 +1184,16 @@ export class PropManager {
       );
 
       // Load rock diffuse texture for triplanar mapping
-      const rockTex = new BABYLON.Texture("/textures/rock_diff.jpg", this.scene);
-      rockTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
-      rockTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
-      rockTex.anisotropicFilteringLevel = 8;
+      const rockTex = loadTextureWithFallback(
+        this.scene,
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
+        {
+          preferredExtensions: ["ktx2", "jpg", "png"],
+          wrapU: BABYLON.Texture.WRAP_ADDRESSMODE,
+          wrapV: BABYLON.Texture.WRAP_ADDRESSMODE,
+          anisotropicFilteringLevel: 8,
+        }
+      );
       material.setTexture("rockTexture", rockTex);
       material.setFloat("textureScale", 1.0);
     }
@@ -1241,7 +1692,9 @@ export class PropManager {
         groupMesh = baseMesh.clone(`inst_${lodGroupKey}`, null);
         if (!groupMesh) continue;
 
-        groupMesh.makeGeometryUnique();
+        // Keep shared geometry for instance-group meshes.
+        // Some imported GLB geometries use accessor layouts that can throw in makeGeometryUnique()
+        // ("Last accessed byte is out of bounds"), and we do not mutate vertex data here anyway.
         groupMesh.isPickable = true;
 
         const material = this.sharedMaterials.get(assetType);
@@ -1318,18 +1771,70 @@ export class PropManager {
     return variationIndex * 1001 + 8;
   }
 
-  // Create or update the preview with given params
-  createPreview(type: AssetType, size: number, seed?: number): void {
-    // Dispose existing preview
+  private disposePreviewResources(): void {
     if (this.previewAsset) {
       this.previewAsset.dispose();
       this.previewAsset = null;
       this.previewMesh = null;
+    } else if (this.previewMesh) {
+      this.previewMesh.dispose();
+      this.previewMesh = null;
     }
+    this.previewMatrixBuffer = null;
+  }
+
+  private updateThinPreviewTransform(): void {
+    if (!this.previewMesh || !this.previewMatrixBuffer) return;
+
+    this._tempVector3.set(this.previewScale, this.previewScale, this.previewScale);
+    BABYLON.Quaternion.FromEulerAnglesToRef(
+      this.previewRotation.x,
+      this.previewRotation.y,
+      this.previewRotation.z,
+      this._tempQuaternion
+    );
+    Matrix.ComposeToRef(
+      this._tempVector3,
+      this._tempQuaternion,
+      this.previewPosition,
+      this._tempMatrix
+    );
+    this._tempMatrix.copyToArray(this.previewMatrixBuffer, 0);
+    this.previewMesh.thinInstanceSetBuffer("matrix", this.previewMatrixBuffer, 16, false);
+    this.previewMesh.thinInstanceCount = 1;
+    this.previewMesh.thinInstanceRefreshBoundingInfo();
+  }
+
+  private createThinPreviewFromVariation(type: AssetType, variationIndex: number): boolean {
+    const lodMap = this.variationMeshes.get(type);
+    const sourceMesh = lodMap?.get(MeshLOD.High)?.[variationIndex];
+    if (!sourceMesh) {
+      return false;
+    }
+
+    const previewMesh = sourceMesh.clone("preview_asset", null);
+    if (!previewMesh) {
+      return false;
+    }
+
+    previewMesh.isPickable = false;
+    previewMesh.material = this.sharedMaterials.get(type) ?? null;
+    previewMesh.isVisible = this.previewVisible;
+
+    this.previewMesh = previewMesh;
+    this.previewMatrixBuffer = new Float32Array(16);
+    this.updateThinPreviewTransform();
+    return true;
+  }
+
+  // Create or update the preview with given params
+  createPreview(type: AssetType, size: number, seed?: number): void {
+    this.disposePreviewResources();
 
     // Convert seed to variation seed pattern to match pre-generated variation meshes
     const rawSeed = seed ?? Math.random() * 10000;
     const variationSeed = this.toVariationSeed(rawSeed);
+    const variationIndex = this.getVariationIndex(variationSeed);
 
     // Create new preview params
     this.previewParams = {
@@ -1339,20 +1844,22 @@ export class PropManager {
       seed: variationSeed,
     };
 
-    // Generate preview asset
-    this.previewAsset = new ProceduralAsset(this.scene, this.previewParams);
-    this.previewMesh = this.previewAsset.generate();
+    this.previewScale = size;
+    this.previewRotation.set(0, 0, 0);
+
+    const createdThinPreview = this.createThinPreviewFromVariation(type, variationIndex);
+    if (!createdThinPreview) {
+      // Fallback path when async variation meshes are not ready yet.
+      this.previewAsset = new ProceduralAsset(this.scene, this.previewParams);
+      this.previewMesh = this.previewAsset.generate();
+      if (this.previewMesh) {
+        this.previewMesh.position.copyFrom(this.previewPosition);
+      }
+    }
 
     if (this.previewMesh) {
       this.previewMesh.name = "preview_asset";
       this.previewMesh.isPickable = false;
-
-      // Make semi-transparent
-      if (this.previewMesh.material) {
-        const mat = this.previewMesh.material as BABYLON.ShaderMaterial;
-        mat.alpha = 0.8;
-      }
-
       this.previewMesh.isVisible = this.previewVisible;
     }
   }
@@ -1372,10 +1879,17 @@ export class PropManager {
   updatePreviewSize(size: number): void {
     if (!this.previewParams || !this.previewMesh) return;
 
-    // Just update the scale, don't recreate the mesh
-    const scaleFactor = size / this.previewParams.size;
-    this.previewMesh.scaling.scaleInPlace(scaleFactor);
+    const previousSize = this.previewParams.size;
+    this.previewScale = size;
     this.previewParams.size = size;
+    if (this.previewMatrixBuffer) {
+      this.updateThinPreviewTransform();
+      return;
+    }
+
+    // Fallback procedural preview path
+    const scaleFactor = size / Math.max(0.0001, previousSize);
+    this.previewMesh.scaling.scaleInPlace(scaleFactor);
   }
 
   // Update preview with full asset params (from AI chat panel)
@@ -1389,12 +1903,7 @@ export class PropManager {
     colorBase: Color3;
     colorDetail: Color3;
   }): void {
-    // Dispose existing preview
-    if (this.previewAsset) {
-      this.previewAsset.dispose();
-      this.previewAsset = null;
-      this.previewMesh = null;
-    }
+    this.disposePreviewResources();
 
     // Create new preview params with full customization
     this.previewParams = {
@@ -1407,6 +1916,8 @@ export class PropManager {
       colorBase: params.colorBase,
       colorDetail: params.colorDetail,
     };
+    this.previewScale = params.size;
+    this.previewRotation.set(0, 0, 0);
 
     // Generate preview asset
     this.previewAsset = new ProceduralAsset(this.scene, this.previewParams);
@@ -1427,6 +1938,7 @@ export class PropManager {
       const centerX = scale / 2;
       const centerZ = scale / 2;
       const centerY = this.heightmap.getInterpolatedHeight(centerX, centerZ);
+      this.previewPosition.set(centerX, centerY, centerZ);
       this.previewMesh.position.set(centerX, centerY, centerZ);
 
       this.previewMesh.isVisible = true;
@@ -1439,6 +1951,11 @@ export class PropManager {
     if (!this.previewMesh) return;
 
     const y = this.heightmap.getInterpolatedHeight(x, z);
+    this.previewPosition.set(x, y, z);
+    if (this.previewMatrixBuffer) {
+      this.updateThinPreviewTransform();
+      return;
+    }
     this.previewMesh.position.set(x, y, z);
   }
 
@@ -1458,12 +1975,12 @@ export class PropManager {
   // Place the current preview as a permanent prop
   // Returns { id, newSeed } so caller can update store
   placeCurrentPreview(): { id: string; newSeed: number } | null {
-    if (!this.previewMesh || !this.previewParams || !this.previewAsset) {
+    if (!this.previewMesh || !this.previewParams) {
       return null;
     }
 
-    const x = this.previewMesh.position.x;
-    const z = this.previewMesh.position.z;
+    const x = this.previewMatrixBuffer ? this.previewPosition.x : this.previewMesh.position.x;
+    const z = this.previewMatrixBuffer ? this.previewPosition.z : this.previewMesh.position.z;
     const y = this.heightmap.getInterpolatedHeight(x, z);
 
     const id = `prop_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1480,8 +1997,10 @@ export class PropManager {
       variationIndex,
       params,
       position: new Vector3(x, y, z),
-      rotation: this.previewMesh.rotation.clone(),
-      scale: this.previewMesh.scaling.clone(),
+      rotation: this.previewMatrixBuffer
+        ? this.previewRotation.clone()
+        : this.previewMesh.rotation.clone(),
+      scale: new Vector3(this.previewScale, this.previewScale, this.previewScale),
       visible: true,
     };
 
@@ -1730,12 +2249,8 @@ export class PropManager {
     this.isDisposed = true;  // Prevent pending async callbacks from running
     this.clearAll();
 
-    // Dispose preview
-    if (this.previewAsset) {
-      this.previewAsset.dispose();
-      this.previewAsset = null;
-      this.previewMesh = null;
-    }
+    // Dispose preview resources
+    this.disposePreviewResources();
 
     // Dispose instance group meshes
     for (const groupMesh of this.instanceGroups.values()) {
@@ -1758,5 +2273,13 @@ export class PropManager {
       material.dispose();
     }
     this.sharedMaterials.clear();
+
+    if (this.referenceTemplates.tree) {
+      this.referenceTemplates.tree.dispose();
+    }
+    if (this.referenceTemplates.bush) {
+      this.referenceTemplates.bush.dispose();
+    }
+    this.referenceTemplates = {};
   }
 }

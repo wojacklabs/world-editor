@@ -12,6 +12,9 @@ import {
   Quaternion,
 } from "@babylonjs/core";
 import * as BABYLON from "@babylonjs/core";
+import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
+import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
+import { createLeafCardMesh } from "../../shared/foliage/LeafCards";
 
 // ============================================
 // Wind-enabled vertex shader for foliage (grass, bush, tree leaves)
@@ -118,6 +121,12 @@ uniform vec3 fogColor;
 uniform float fogDensity;
 uniform sampler2D dirtTexture;
 uniform float dirtTextureScale;
+uniform sampler2D leafAtlas;
+uniform float uLeafAlphaCutoff;
+uniform float uLeafFadeStart;
+uniform float uLeafFadeEnd;
+uniform float uUseLeafAtlas;
+uniform float uLeafMaskFromLuma;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -163,8 +172,27 @@ float fbm(vec3 p) {
     return value;
 }
 
+float hash2D(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
 void main() {
     vec3 normal = normalize(vNormal);
+
+    float leafMask = step(vColor.r + 0.02, vColor.g);
+    vec4 leafSample = texture2D(leafAtlas, vUV);
+    float usesLeafAtlas = uUseLeafAtlas * leafMask;
+    float leafMaskAlpha = mix(leafSample.a, dot(leafSample.rgb, vec3(0.299, 0.587, 0.114)), uLeafMaskFromLuma);
+
+    if (usesLeafAtlas > 0.5 && leafMaskAlpha < uLeafAlphaCutoff) {
+        discard;
+    }
+
+    float fadeAlpha = 1.0 - smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
+    float dither = hash2D(gl_FragCoord.xy + vPosition.xz * 3.17);
+    if (leafMask > 0.5 && dither > clamp(fadeAlpha, 0.0, 1.0)) {
+        discard;
+    }
 
     // Use vertex color if available (alpha > 0), otherwise use baseColor
     vec3 meshColor = vColor.a > 0.5 ? vColor.rgb : baseColor;
@@ -175,7 +203,7 @@ void main() {
 
     // Height-based color (tips lighter) - only for foliage, not trunk
     float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y);
-    float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;  // Green = leaf, brown = trunk
+    float isLeaf = mix(0.3, 1.0, leafMask);  // Green = leaf, brown = trunk
     color = mix(color * 0.85, color * 1.1, tipFactor * isLeaf);
 
     // Triplanar dirt texture for bark (R > G = brown = bark)
@@ -1088,15 +1116,14 @@ export class ProceduralAsset {
   private generateTree(): Mesh {
     const seed = this.params.seed;
     const meshes: Mesh[] = [];
-    const leafSubdivisions = calcSubdivision(this.params.size, 3, this.params.subdivisionOverride);
 
-    // === 줄기 형태 파라미터 ===
-    const trunkHeight = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 1.2;                    // 0.8 ~ 2.0
-    const trunkThickness = 0.025 + Math.abs(noise3D(0, seed, 0)) * 0.04;             // 0.025 ~ 0.065
-    const trunkTaper = 0.25 + Math.abs(noise3D(0, 0, seed)) * 0.45;                   // 0.25 ~ 0.7 (위쪽 비율)
-    const trunkBendX = noise3D(seed * 2, 0, 0) * 0.3;                                 // 휘어짐
+    // === Trunk parameters ===
+    const trunkHeight = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 1.2;
+    const trunkThickness = 0.025 + Math.abs(noise3D(0, seed, 0)) * 0.04;
+    const trunkTaper = 0.25 + Math.abs(noise3D(0, 0, seed)) * 0.45;
+    const trunkBendX = noise3D(seed * 2, 0, 0) * 0.3;
     const trunkBendZ = noise3D(0, 0, seed * 2) * 0.3;
-    const trunkTwist = noise3D(seed * 3, seed * 0.5, 0) * 0.5;                        // 비틀림
+    const trunkTwist = noise3D(seed * 3, seed * 0.5, 0) * 0.5;
 
     const trunk = MeshBuilder.CreateCylinder(
       "trunk",
@@ -1111,7 +1138,7 @@ export class ProceduralAsset {
       this.scene
     );
 
-    // 줄기 변형 적용
+    // Trunk deformation
     const trunkPositions = trunk.getVerticesData(VertexBuffer.PositionKind);
     if (trunkPositions) {
       const newPositions = new Float32Array(trunkPositions.length);
@@ -1119,16 +1146,14 @@ export class ProceduralAsset {
 
       for (let i = 0; i < trunkPositions.length; i += 3) {
         let x = trunkPositions[i];
-        let y = trunkPositions[i + 1];
+        const y = trunkPositions[i + 1];
         let z = trunkPositions[i + 2];
 
-        const t = (y + halfHeight) / trunkHeight;  // 0~1
+        const t = (y + halfHeight) / trunkHeight;
 
-        // 휘어짐 (2차 곡선)
         x += trunkBendX * t * t;
         z += trunkBendZ * t * t;
 
-        // 비틀림
         const twistAngle = trunkTwist * t;
         const cosT = Math.cos(twistAngle);
         const sinT = Math.sin(twistAngle);
@@ -1137,7 +1162,6 @@ export class ProceduralAsset {
         x = rx;
         z = rz;
 
-        // 껍질 울퉁불퉁
         const bark = fbm3D(x * 20 + seed, y * 10, z * 20 + seed, 2) * 0.015;
         x += bark;
         z += bark;
@@ -1150,56 +1174,51 @@ export class ProceduralAsset {
     }
 
     trunk.position.y = trunkHeight / 2;
-    setBarkVertexColors(trunk, seed, false);  // 자연스러운 나무껍질 색상
+    setBarkVertexColors(trunk, seed, false);
     meshes.push(trunk);
 
-    // === 가지 파라미터 ===
-    const branchCount = 3 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 4);    // 3~7개 가지
-    const branchStartY = trunkHeight * (0.35 + Math.abs(noise3D(seed * 4.5, 0, 0)) * 0.2);  // 가지 시작 높이
+    // === Branch parameters ===
+    const branchCount = 3 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 4);
+    const branchStartY =
+      trunkHeight * (0.35 + Math.abs(noise3D(seed * 4.5, 0, 0)) * 0.2);
 
     for (let i = 0; i < branchCount; i++) {
       const bSeed = seed + i * 73.1;
+      const heightRatio = i / Math.max(branchCount - 1, 1);
+      const branchLength =
+        (0.2 + Math.abs(noise3D(bSeed, 0, 0)) * 0.25) * (1.15 - heightRatio * 0.4);
+      const branchThick =
+        (0.025 + Math.abs(noise3D(0, bSeed, 0)) * 0.02) * (1.2 - heightRatio * 0.3);
 
-      // 가지 파라미터 - 높이에 따라 조절 (아래 가지가 더 길고 두꺼움)
-      const heightRatio = i / Math.max(branchCount - 1, 1);  // 0 = 아래, 1 = 위
-      const branchLength = (0.2 + Math.abs(noise3D(bSeed, 0, 0)) * 0.25) * (1.15 - heightRatio * 0.4);
-      const branchThick = (0.025 + Math.abs(noise3D(0, bSeed, 0)) * 0.02) * (1.2 - heightRatio * 0.3);
-
-      // 가지 방향 - 골든 앵글로 균등 분산, 위로 갈수록 더 가파르게
-      const goldenAngle = Math.PI * (3 - Math.sqrt(5));  // ~137.5°
+      const goldenAngle = Math.PI * (3 - Math.sqrt(5));
       const branchAngleH = i * goldenAngle + noise3D(0, 0, bSeed) * 0.4;
-      const branchAngleV = (0.35 + heightRatio * 0.35) + Math.abs(noise3D(bSeed * 2, 0, 0)) * 0.25;
+      const branchAngleV =
+        0.35 + heightRatio * 0.35 + Math.abs(noise3D(bSeed * 2, 0, 0)) * 0.25;
 
-      // 가지 Y 위치 - 균등 분산
-      const branchY = branchStartY + heightRatio * (trunkHeight * 0.85 - branchStartY);
+      const branchY =
+        branchStartY + heightRatio * (trunkHeight * 0.85 - branchStartY);
 
-      // 줄기의 해당 높이에서의 반경 계산 (테이퍼 고려)
       const t = branchY / trunkHeight;
       const trunkRadiusAtY = trunkThickness * (1 - t * (1 - trunkTaper));
-
-      // 줄기 휘어짐 오프셋
       const bendOffsetX = trunkBendX * t * t;
       const bendOffsetZ = trunkBendZ * t * t;
 
-      // 가지 시작점: 줄기 안쪽에서 시작 (각도에 따른 이슈 방지)
-      // 줄기 반경의 30%만 사용하여 가지가 확실히 줄기 내부에서 시작
       const branchStartOffset = trunkRadiusAtY * 0.3;
-      const branchStartX = bendOffsetX + Math.cos(branchAngleH) * branchStartOffset;
-      const branchStartZ = bendOffsetZ + Math.sin(branchAngleH) * branchStartOffset;
+      const branchStartX =
+        bendOffsetX + Math.cos(branchAngleH) * branchStartOffset;
+      const branchStartZ =
+        bendOffsetZ + Math.sin(branchAngleH) * branchStartOffset;
 
-      // 가지 방향 벡터
       const cosV = Math.cos(branchAngleV);
       const sinV = Math.sin(branchAngleV);
       const branchDirX = Math.cos(branchAngleH) * cosV;
       const branchDirY = sinV;
       const branchDirZ = Math.sin(branchAngleH) * cosV;
 
-      // 가지 끝점
       const branchEndX = branchStartX + branchDirX * branchLength;
       const branchEndY = branchY + branchDirY * branchLength;
       const branchEndZ = branchStartZ + branchDirZ * branchLength;
 
-      // 가지 중심점 (실린더 배치용)
       const branchCenterX = (branchStartX + branchEndX) / 2;
       const branchCenterY = (branchY + branchEndY) / 2;
       const branchCenterZ = (branchStartZ + branchEndZ) / 2;
@@ -1208,7 +1227,7 @@ export class ProceduralAsset {
         "branch_" + i,
         {
           height: branchLength,
-          diameterTop: branchThick * 0.5,  // 끝을 더 두껍게 (0.35 -> 0.5)
+          diameterTop: branchThick * 0.5,
           diameterBottom: branchThick,
           tessellation: 6,
           updatable: true,
@@ -1216,174 +1235,124 @@ export class ProceduralAsset {
         this.scene
       );
 
-      // 가지 방향 설정 - Quaternion으로 정확히 정렬
-      // 실린더의 기본 방향은 Y축 (0,1,0), 이를 branchDir로 회전
       const branchDirVec = new Vector3(branchDirX, branchDirY, branchDirZ).normalize();
       const upVec = Vector3.Up();
-
-      // Y축을 branchDir 방향으로 회전하는 Quaternion 계산
       const dot = Vector3.Dot(upVec, branchDirVec);
       if (Math.abs(dot + 1) < 0.0001) {
-        // 반대 방향인 경우 (아래로 향하는 가지)
         branch.rotationQuaternion = Quaternion.RotationAxis(Vector3.Right(), Math.PI);
       } else if (Math.abs(dot - 1) < 0.0001) {
-        // 같은 방향인 경우 (위로 향하는 가지)
         branch.rotationQuaternion = Quaternion.Identity();
       } else {
-        // 일반적인 경우: 두 벡터 사이의 회전
         const axis = Vector3.Cross(upVec, branchDirVec).normalize();
         const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
         branch.rotationQuaternion = Quaternion.RotationAxis(axis, angle);
       }
 
-      // 가지 위치 (정확한 중심점)
       branch.position.x = branchCenterX;
       branch.position.y = branchCenterY;
       branch.position.z = branchCenterZ;
-      setBarkVertexColors(branch, bSeed, true);  // 가지용 나무껍질 색상
-
+      setBarkVertexColors(branch, bSeed, true);
       meshes.push(branch);
 
-      // 가지 끝에 잎사귀 클러스터 (1~2개)
-      const leafClusterCount = 1 + Math.floor(Math.abs(noise3D(bSeed * 5, 0, 0)) * 1.5);
-
+      // Leaf-card clusters at branch ends
+      const leafClusterCount = 1 + Math.floor(Math.abs(noise3D(bSeed * 5, 0, 0)) * 2.2);
       for (let lc = 0; lc < leafClusterCount; lc++) {
         const lcSeed = bSeed + lc * 31.7;
-        const leafSize = (0.1 + Math.abs(noise3D(lcSeed, 0, 0)) * 0.1) * (1.1 - heightRatio * 0.25);
-        const leafScaleX = 0.8 + Math.abs(noise3D(lcSeed * 2, 0, 0)) * 0.4;
-        const leafScaleY = 0.55 + Math.abs(noise3D(0, lcSeed * 2, 0)) * 0.3;
-        const leafScaleZ = 0.8 + Math.abs(noise3D(0, 0, lcSeed * 2)) * 0.4;
+        const clusterRadius =
+          (0.06 + Math.abs(noise3D(lcSeed * 1.3, 0, 0)) * 0.12) *
+          (1.1 - heightRatio * 0.25);
+        const cardCount = 6 + Math.floor(Math.abs(noise3D(0, lcSeed * 1.7, 0)) * 8);
 
-        const leaf = MeshBuilder.CreateIcoSphere(
-          "leaf_" + i + "_" + lc,
-          { radius: leafSize, subdivisions: leafSubdivisions, updatable: true },
-          this.scene
-        );
+        for (let c = 0; c < cardCount; c++) {
+          const cardSeed = lcSeed + c * 19.73;
+          const cardWidth =
+            clusterRadius * (0.45 + Math.abs(noise3D(cardSeed * 2, 0, 0)) * 0.55);
+          const cardHeight =
+            clusterRadius * (0.9 + Math.abs(noise3D(0, cardSeed * 2, 0)) * 1.05);
 
-        // 잎사귀 변형 - 아래쪽을 평평하게 (가지와 자연스럽게 연결)
-        const lPositions = leaf.getVerticesData(VertexBuffer.PositionKind);
-        if (lPositions) {
-          const newLPos = new Float32Array(lPositions.length);
-          for (let j = 0; j < lPositions.length; j += 3) {
-            let lx = lPositions[j] * leafScaleX;
-            let ly = lPositions[j + 1] * leafScaleY;
-            let lz = lPositions[j + 2] * leafScaleZ;
-
-            // 아래쪽 평평하게
-            if (ly < 0) {
-              ly *= 0.4;
+          const card = createLeafCardMesh(
+            `leaf_card_${i}_${lc}_${c}`,
+            this.scene,
+            {
+              width: cardWidth,
+              height: cardHeight,
+              seed: cardSeed,
+              curve: clusterRadius * 0.35,
             }
+          );
 
-            const llen = Math.sqrt(lx * lx + ly * ly + lz * lz);
-            if (llen > 0.001) {
-              const bump = fbm3D(lx * 5 + lcSeed, ly * 5, lz * 5, 2) * 0.05;
-              lx += (lx / llen) * bump;
-              ly += (ly / llen) * bump;
-              lz += (lz / llen) * bump;
-            }
+          const radial =
+            Math.pow(Math.abs(noise3D(cardSeed * 3.1, 0, 0)), 0.7) *
+            clusterRadius *
+            0.95;
+          const theta = (noise3D(0, cardSeed * 4.1, 0) + 0.5) * Math.PI * 2;
+          const lift = Math.abs(noise3D(0, 0, cardSeed * 5.1)) * clusterRadius * 0.7;
 
-            newLPos[j] = lx;
-            newLPos[j + 1] = ly;
-            newLPos[j + 2] = lz;
-          }
-          leaf.updateVerticesData(VertexBuffer.PositionKind, newLPos);
+          card.position.x =
+            branchEndX + Math.cos(theta) * radial + branchDirX * clusterRadius * 0.08;
+          card.position.y = branchEndY + lift + branchDirY * clusterRadius * 0.1;
+          card.position.z =
+            branchEndZ + Math.sin(theta) * radial + branchDirZ * clusterRadius * 0.08;
 
-          const lIndices = leaf.getIndices();
-          const lNormals = leaf.getVerticesData(VertexBuffer.NormalKind);
-          if (lIndices && lNormals) {
-            VertexData.ComputeNormals(newLPos, lIndices, lNormals);
-            leaf.updateVerticesData(VertexBuffer.NormalKind, lNormals);
-          }
+          card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.6;
+          card.rotation.x =
+            -0.12 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.45;
+          card.rotation.z = noise3D(0, 0, cardSeed * 6.5) * 0.25;
+
+          setLeafVertexColors(card, cardSeed, heightRatio > 0.7);
+          meshes.push(card);
         }
-
-        // 잎사귀 위치 - 가지 끝점에 밀착, 클러스터면 약간 퍼지게
-        const leafOffsetAngle = lc * Math.PI + noise3D(lcSeed * 3, 0, 0) * 0.8;
-        const leafOffsetDist = lc === 0 ? 0 : leafSize * 0.25;
-        // Y 오프셋을 줄여서 잎이 가지 끝에 더 밀착되도록 함 (0.35 -> 0.15)
-        // 평평해진 바닥(ly*0.4)과 겹치게 하여 자연스러운 연결
-        leaf.position.x = branchEndX + Math.cos(leafOffsetAngle) * leafOffsetDist;
-        leaf.position.y = branchEndY + leafSize * leafScaleY * 0.15;
-        leaf.position.z = branchEndZ + Math.sin(leafOffsetAngle) * leafOffsetDist;
-
-        // 자연스러운 그라데이션 잎 색상
-        setLeafVertexColors(leaf, lcSeed, false);
-
-        meshes.push(leaf);
       }
     }
 
-    // === 꼭대기 잎사귀 (줄기 끝에서 연속적으로) ===
-    const topLeafCount = 2 + Math.floor(Math.abs(noise3D(seed * 7, seed, 0)) * 2);   // 2~4개
-
-    // 줄기 끝점 (휘어짐 고려)
+    // Top canopy leaf-card clusters
+    const topClusterCount = 2 + Math.floor(Math.abs(noise3D(seed * 7, seed, 0)) * 3);
     const trunkTopX = trunkBendX;
     const trunkTopZ = trunkBendZ;
     const trunkTopY = trunkHeight;
-    const trunkTopRadius = trunkThickness * trunkTaper;  // 줄기 끝 반경
+    const trunkTopRadius = trunkThickness * trunkTaper;
 
-    for (let i = 0; i < topLeafCount; i++) {
+    for (let i = 0; i < topClusterCount; i++) {
       const tSeed = seed + i * 51.7 + 1000;
-      const topLeafSize = 0.12 + Math.abs(noise3D(tSeed, 0, 0)) * 0.15;
-      const topLeafScaleX = 0.75 + Math.abs(noise3D(tSeed * 2, 0, 0)) * 0.4;
-      const topLeafScaleY = 0.55 + Math.abs(noise3D(0, tSeed * 2, 0)) * 0.35;
-      const topLeafScaleZ = 0.75 + Math.abs(noise3D(0, 0, tSeed * 2)) * 0.4;
+      const clusterRadius = 0.08 + Math.abs(noise3D(tSeed * 1.9, 0, 0)) * 0.16;
+      const cardCount = 8 + Math.floor(Math.abs(noise3D(0, tSeed * 2.1, 0)) * 8);
+      const topTheta =
+        i * (Math.PI * 2 / topClusterCount) + noise3D(0, tSeed * 3, 0) * 0.6;
+      const topDist = trunkTopRadius * 0.25 + Math.abs(noise3D(tSeed * 4, 0, 0)) * 0.09;
+      const clusterCenterX = trunkTopX + Math.cos(topTheta) * topDist;
+      const clusterCenterZ = trunkTopZ + Math.sin(topTheta) * topDist;
+      const clusterCenterY = trunkTopY + i * 0.04;
 
-      const topLeaf = MeshBuilder.CreateIcoSphere(
-        "topLeaf_" + i,
-        { radius: topLeafSize, subdivisions: leafSubdivisions, updatable: true },
-        this.scene
-      );
+      for (let c = 0; c < cardCount; c++) {
+        const cardSeed = tSeed + c * 17.11;
+        const cardWidth =
+          clusterRadius * (0.45 + Math.abs(noise3D(cardSeed * 2.4, 0, 0)) * 0.55);
+        const cardHeight =
+          clusterRadius * (0.95 + Math.abs(noise3D(0, cardSeed * 2.4, 0)) * 1.1);
 
-      // 꼭대기 잎사귀 변형 - 아래 평평하게
-      const tlPositions = topLeaf.getVerticesData(VertexBuffer.PositionKind);
-      if (tlPositions) {
-        const newTLPos = new Float32Array(tlPositions.length);
-        for (let j = 0; j < tlPositions.length; j += 3) {
-          let tlx = tlPositions[j] * topLeafScaleX;
-          let tly = tlPositions[j + 1] * topLeafScaleY;
-          let tlz = tlPositions[j + 2] * topLeafScaleZ;
+        const card = createLeafCardMesh(`top_leaf_card_${i}_${c}`, this.scene, {
+          width: cardWidth,
+          height: cardHeight,
+          seed: cardSeed,
+          curve: clusterRadius * 0.4,
+        });
 
-          // 아래 평평하게 (줄기와 연결)
-          if (tly < 0) {
-            tly *= 0.35;
-          }
+        const radial =
+          Math.pow(Math.abs(noise3D(cardSeed * 3.3, 0, 0)), 0.72) *
+          clusterRadius *
+          1.05;
+        const theta = (noise3D(0, cardSeed * 4.7, 0) + 0.5) * Math.PI * 2;
+        card.position.x = clusterCenterX + Math.cos(theta) * radial;
+        card.position.y =
+          clusterCenterY + Math.abs(noise3D(0, 0, cardSeed * 5.2)) * clusterRadius * 0.85;
+        card.position.z = clusterCenterZ + Math.sin(theta) * radial;
+        card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.8;
+        card.rotation.x = -0.08 + Math.abs(noise3D(0, cardSeed * 6.7, 0)) * 0.4;
+        card.rotation.z = noise3D(0, 0, cardSeed * 6.9) * 0.28;
 
-          const tllen = Math.sqrt(tlx * tlx + tly * tly + tlz * tlz);
-          if (tllen > 0.001) {
-            const bump = fbm3D(tlx * 5 + tSeed, tly * 5, tlz * 5, 2) * 0.07;
-            tlx += (tlx / tllen) * bump;
-            tly += (tly / tllen) * bump;
-            tlz += (tlz / tllen) * bump;
-          }
-
-          newTLPos[j] = tlx;
-          newTLPos[j + 1] = tly;
-          newTLPos[j + 2] = tlz;
-        }
-        topLeaf.updateVerticesData(VertexBuffer.PositionKind, newTLPos);
-
-        const tlIndices = topLeaf.getIndices();
-        const tlNormals = topLeaf.getVerticesData(VertexBuffer.NormalKind);
-        if (tlIndices && tlNormals) {
-          VertexData.ComputeNormals(newTLPos, tlIndices, tlNormals);
-          topLeaf.updateVerticesData(VertexBuffer.NormalKind, tlNormals);
-        }
+        setLeafVertexColors(card, cardSeed, true);
+        meshes.push(card);
       }
-
-      // 꼭대기 위치 - 줄기 끝에 밀착, 층층이 쌓임
-      const topTheta = i * (Math.PI * 2 / topLeafCount) + noise3D(0, tSeed * 3, 0) * 0.6;
-      const topDist = trunkTopRadius * 0.3 + Math.abs(noise3D(tSeed * 4, 0, 0)) * 0.08;
-      const layerHeight = i * 0.03;  // 층층이 쌓임 (간격 줄임)
-
-      topLeaf.position.x = trunkTopX + Math.cos(topTheta) * topDist;
-      topLeaf.position.z = trunkTopZ + Math.sin(topTheta) * topDist;
-      // Y 오프셋을 줄여서 줄기 끝에 밀착 (0.4 -> 0.15)
-      topLeaf.position.y = trunkTopY + topLeafSize * topLeafScaleY * 0.15 + layerHeight;
-
-      // 자연스러운 그라데이션 잎 색상 (꼭대기용)
-      setLeafVertexColors(topLeaf, tSeed, true);
-
-      meshes.push(topLeaf);
     }
 
     const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true);
@@ -1396,104 +1365,85 @@ export class ProceduralAsset {
     return new Mesh("tree_" + seed, this.scene);
   }
 
-  /**
-   * 덤불 생성 - 땅에 붙어서 옆으로 퍼지는 형태
-   *
-   * - 가지들이 다양한 방향으로 뻗어나감
-   * - 두께와 길이의 다양성
-   * - 위로 뜨지 않고 땅에 밀착
-   */
   private generateBush(): Mesh {
     const seed = this.params.seed;
     const meshes: Mesh[] = [];
-    const bushSubdivisions = calcSubdivision(this.params.size, 3, this.params.subdivisionOverride);
 
-    // === 전체 형태 파라미터 ===
-    const overallSpread = 0.25 + Math.abs(noise3D(0, seed, 0)) * 0.35;        // 0.25 ~ 0.6 퍼짐 반경
-    const branchCount = 6 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 6);  // 6~12개 가지
+    const overallSpread = 0.25 + Math.abs(noise3D(0, seed, 0)) * 0.35;
+    const clusterCount = 6 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 7);
 
-    for (let i = 0; i < branchCount; i++) {
-      const iSeed = seed + i * 97.3;
-
-      // === 가지 파라미터 ===
-      const branchLength = 0.08 + Math.abs(noise3D(iSeed, 0, 0)) * 0.12;      // 0.08 ~ 0.2 길이
-      const branchThickness = 0.04 + Math.abs(noise3D(0, iSeed, 0)) * 0.06;   // 0.04 ~ 0.1 두께
-      const branchFlatness = 0.4 + Math.abs(noise3D(0, 0, iSeed)) * 0.5;      // 0.4 ~ 0.9 납작함
-
-      // 뻗어가는 방향 (주로 옆으로, 약간 위로)
-      const theta = (noise3D(0, iSeed * 2, 0) + 0.5) * Math.PI * 2;           // 수평 방향
-      const elevationAngle = Math.abs(noise3D(iSeed * 2.5, 0, 0)) * 0.4;      // 0 ~ 0.4 rad (0~23도, 낮게)
-
-      const sphere = MeshBuilder.CreateIcoSphere(
-        "bush_" + i,
-        { radius: branchLength, subdivisions: bushSubdivisions, updatable: true },
+    // Add a few low twigs for structure before leaves.
+    const twigCount = 2 + Math.floor(Math.abs(noise3D(seed * 2.2, 0, 0)) * 3);
+    for (let i = 0; i < twigCount; i++) {
+      const twigSeed = seed + i * 37.13;
+      const twigLength = 0.11 + Math.abs(noise3D(twigSeed, 0, 0)) * 0.16;
+      const twigRadius = 0.01 + Math.abs(noise3D(0, twigSeed, 0)) * 0.015;
+      const twig = MeshBuilder.CreateCylinder(
+        `bush_twig_${i}`,
+        {
+          height: twigLength,
+          diameterTop: twigRadius * 0.6,
+          diameterBottom: twigRadius,
+          tessellation: 5,
+        },
         this.scene
       );
 
-      // 가지 변형 적용
-      const positions = sphere.getVerticesData(VertexBuffer.PositionKind);
-      if (positions) {
-        const newPositions = new Float32Array(positions.length);
+      const yaw = (noise3D(0, twigSeed * 2.1, 0) + 0.5) * Math.PI * 2;
+      const pitch = 0.2 + Math.abs(noise3D(twigSeed * 2.3, 0, 0)) * 0.45;
+      twig.rotation.y = yaw;
+      twig.rotation.z = pitch;
+      twig.position.x = Math.cos(yaw) * 0.04;
+      twig.position.z = Math.sin(yaw) * 0.04;
+      twig.position.y = twigLength * 0.35;
+      setBarkVertexColors(twig, twigSeed, true);
+      meshes.push(twig);
+    }
 
-        for (let j = 0; j < positions.length; j += 3) {
-          let x = positions[j];
-          let y = positions[j + 1];
-          let z = positions[j + 2];
+    for (let i = 0; i < clusterCount; i++) {
+      const iSeed = seed + i * 97.3;
+      const radialDist =
+        Math.pow(Math.abs(noise3D(iSeed * 3.1, 0, 0)), 0.9) * overallSpread;
+      const centerTheta = (noise3D(iSeed * 3.5, 0, 0) + 0.5) * Math.PI * 2;
+      const centerX = Math.cos(centerTheta) * radialDist;
+      const centerZ = Math.sin(centerTheta) * radialDist;
+      const centerY = 0.03 + Math.abs(noise3D(0, iSeed * 3.9, 0)) * 0.16;
 
-          // 뻗어가는 방향으로 늘리기
-          const dirX = Math.cos(theta) * Math.cos(elevationAngle);
-          const dirY = Math.sin(elevationAngle);
-          const dirZ = Math.sin(theta) * Math.cos(elevationAngle);
+      const clusterRadius = 0.08 + Math.abs(noise3D(iSeed * 4.1, 0, 0)) * 0.12;
+      const cardCount = 8 + Math.floor(Math.abs(noise3D(0, iSeed * 4.3, 0)) * 11);
 
-          // 방향 기준 변형 (해당 방향으로 길게)
-          const dot = (x * dirX + y * dirY + z * dirZ) / branchLength;
-          const stretch = 1.0 + Math.max(0, dot) * 1.5;  // 뻗어가는 방향으로 늘림
+      for (let c = 0; c < cardCount; c++) {
+        const cardSeed = iSeed + c * 29.17;
+        const cardWidth =
+          clusterRadius * (0.5 + Math.abs(noise3D(cardSeed * 2.2, 0, 0)) * 0.55);
+        const cardHeight =
+          clusterRadius * (0.95 + Math.abs(noise3D(0, cardSeed * 2.2, 0)) * 1.0);
 
-          // 두께 적용 (수직 방향은 납작하게)
-          x *= branchThickness / branchLength * stretch;
-          y *= branchThickness / branchLength * branchFlatness * stretch;
-          z *= branchThickness / branchLength * stretch;
+        const card = createLeafCardMesh(`bush_leaf_card_${i}_${c}`, this.scene, {
+          width: cardWidth,
+          height: cardHeight,
+          seed: cardSeed,
+          curve: clusterRadius * 0.35,
+        });
 
-          // 뻗어가는 방향으로 이동
-          x += dirX * branchLength * 0.5;
-          y += dirY * branchLength * 0.3;
-          z += dirZ * branchLength * 0.5;
+        const radial =
+          Math.pow(Math.abs(noise3D(cardSeed * 3.4, 0, 0)), 0.75) *
+          clusterRadius *
+          1.05;
+        const theta = (noise3D(0, cardSeed * 4.6, 0) + 0.5) * Math.PI * 2;
+        const lift = Math.abs(noise3D(0, 0, cardSeed * 5.3)) * clusterRadius * 0.85;
 
-          // 표면 울퉁불퉁
-          const len = Math.sqrt(x * x + y * y + z * z);
-          if (len > 0.001) {
-            const bump = fbm3D(x * 8 + iSeed, y * 8, z * 8 + iSeed * 0.5, 2) * 0.02;
-            x += (x / len) * bump;
-            y += (y / len) * bump;
-            z += (z / len) * bump;
-          }
+        card.position.x = centerX + Math.cos(theta) * radial;
+        card.position.y = centerY + lift;
+        card.position.z = centerZ + Math.sin(theta) * radial;
 
-          newPositions[j] = x;
-          newPositions[j + 1] = y;
-          newPositions[j + 2] = z;
-        }
+        card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.7;
+        card.rotation.x = -0.1 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.5;
+        card.rotation.z = noise3D(0, 0, cardSeed * 6.5) * 0.3;
 
-        sphere.updateVerticesData(VertexBuffer.PositionKind, newPositions);
-
-        const indices = sphere.getIndices();
-        const normals = sphere.getVerticesData(VertexBuffer.NormalKind);
-        if (indices && normals) {
-          VertexData.ComputeNormals(newPositions, indices, normals);
-          sphere.updateVerticesData(VertexBuffer.NormalKind, normals);
-        }
+        setLeafVertexColors(card, cardSeed, false);
+        meshes.push(card);
       }
-
-      // 배치: 중심 근처에서 시작, 땅에 붙임
-      const radialDist = Math.abs(noise3D(iSeed * 3, 0, 0)) * overallSpread * 0.3;
-      const posTheta = (noise3D(iSeed * 3.5, 0, 0) + 0.5) * Math.PI * 2;
-      sphere.position.x = Math.cos(posTheta) * radialDist;
-      sphere.position.z = Math.sin(posTheta) * radialDist;
-      sphere.position.y = branchThickness * 0.3;  // 땅에 붙임
-
-      // 자연스러운 그라데이션 색상 적용
-      setBushVertexColors(sphere, iSeed);
-
-      meshes.push(sphere);
     }
 
     const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true);
@@ -1506,14 +1456,6 @@ export class ProceduralAsset {
     return new Mesh("bush_" + seed, this.scene);
   }
 
-  /**
-   * 잔디 뭉치 생성 - 다양성 강화:
-   * - 높낮이: 짧은 잔디 ~ 긴 잔디
-   * - 두께: 가는 잎 ~ 두꺼운 잎
-   * - 분포 밀도: 밀집 ~ 퍼짐
-   * - 휘어짐: 직선 ~ 강하게 휘어짐
-   * - 기울기: 다양한 방향
-   */
   private generateGrassClump(): Mesh {
     const seed = this.params.seed;
     const blades: Mesh[] = [];
@@ -1658,33 +1600,38 @@ export class ProceduralAsset {
             "fogColor",
             "fogDensity",
             "dirtTextureScale",
+            "uLeafAlphaCutoff",
+            "uLeafFadeStart",
+            "uLeafFadeEnd",
+            "uUseLeafAtlas",
+            "uLeafMaskFromLuma",
           ],
-          samplers: ["dirtTexture"],
+          samplers: ["dirtTexture", "leafAtlas"],
         }
       );
 
       // Wind settings
-      const windAngle = Math.PI * 0.25;  // 45 degrees
+      const windAngle = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians;
       this.material.setVector2("uWindDirection", new Vector2(
         Math.cos(windAngle),
         Math.sin(windAngle)
       ));
 
       // Wind settings vary by type
-      let windStrength = 0.5;
+      let windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength;
       let minWindHeight = 0.0;
       let maxWindHeight = 0.8;
 
       if (this.params.type === "grass_clump") {
-        windStrength = 0.8;   // Grass sways more
+        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassClumpStrength;
         minWindHeight = 0.0;  // Wind starts at ground
         maxWindHeight = 0.7;  // Full effect at tip
       } else if (this.params.type === "bush") {
-        windStrength = 0.4;   // Bush sways moderately
+        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.bushStrength;
         minWindHeight = 0.0;  // Wind starts at ground
         maxWindHeight = 0.3;  // Bush is low, full effect at top
       } else if (this.params.type === "tree") {
-        windStrength = 0.35;  // Tree leaves sway gently
+        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength;
         minWindHeight = 0.5;  // Wind only affects parts above trunk base
         maxWindHeight = 2.0;  // Leaves are at various heights
       }
@@ -1695,12 +1642,47 @@ export class ProceduralAsset {
       this.material.setFloat("uTime", 0);
 
       // Load dirt texture for bark triplanar mapping
-      const dirtTex = new BABYLON.Texture("/textures/dirt_diffuse.jpg", this.scene);
-      dirtTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
-      dirtTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
-      dirtTex.anisotropicFilteringLevel = 8;
+      const dirtTex = loadTextureWithFallback(
+        this.scene,
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.dirt,
+        {
+          preferredExtensions: ["ktx2", "jpg", "png"],
+          wrapU: BABYLON.Texture.WRAP_ADDRESSMODE,
+          wrapV: BABYLON.Texture.WRAP_ADDRESSMODE,
+          anisotropicFilteringLevel: 8,
+        }
+      );
       this.material.setTexture("dirtTexture", dirtTex);
       this.material.setFloat("dirtTextureScale", 0.5);
+
+      const leafAtlas = loadTextureWithFallback(
+        this.scene,
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.leafAtlas,
+        {
+          preferredExtensions: ["png", "ktx2", "jpg"],
+          wrapU: BABYLON.Texture.CLAMP_ADDRESSMODE,
+          wrapV: BABYLON.Texture.CLAMP_ADDRESSMODE,
+          anisotropicFilteringLevel: 4,
+        }
+      );
+      this.material.setTexture("leafAtlas", leafAtlas);
+      this.material.setFloat(
+        "uLeafAlphaCutoff",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff
+      );
+      this.material.setFloat(
+        "uLeafFadeStart",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart
+      );
+      this.material.setFloat(
+        "uLeafFadeEnd",
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd
+      );
+      this.material.setFloat(
+        "uUseLeafAtlas",
+        this.params.type === "tree" || this.params.type === "bush" ? 1.0 : 0.0
+      );
+      this.material.setFloat("uLeafMaskFromLuma", 1.0);
 
     } else {
       // Rock uses the static shader with triplanar texture
@@ -1730,10 +1712,16 @@ export class ProceduralAsset {
       );
 
       // Load rock diffuse texture for triplanar mapping
-      const rockTex = new BABYLON.Texture("/textures/rock_diff.jpg", this.scene);
-      rockTex.wrapU = BABYLON.Texture.WRAP_ADDRESSMODE;
-      rockTex.wrapV = BABYLON.Texture.WRAP_ADDRESSMODE;
-      rockTex.anisotropicFilteringLevel = 8;
+      const rockTex = loadTextureWithFallback(
+        this.scene,
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
+        {
+          preferredExtensions: ["ktx2", "jpg", "png"],
+          wrapU: BABYLON.Texture.WRAP_ADDRESSMODE,
+          wrapV: BABYLON.Texture.WRAP_ADDRESSMODE,
+          anisotropicFilteringLevel: 8,
+        }
+      );
       this.material.setTexture("rockTexture", rockTex);
       this.material.setFloat("textureScale", 1.0);
     }

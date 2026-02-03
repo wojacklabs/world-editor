@@ -1,56 +1,92 @@
 import { KhronosTextureContainer2 } from "@babylonjs/core/Misc/khronosTextureContainer2";
+import { setKTX2Enabled } from "../../shared/rendering/KTX2State";
 
-/**
- * Initialize KTX2 texture support for Babylon.js
- * 
- * KTX2 (Khronos Texture Format 2.0) provides GPU-compressed textures that:
- * - Reduce VRAM usage by 50-75%
- * - Decrease loading times
- * - Support multiple GPU compression formats (BC, ASTC, ETC)
- * 
- * The decoder files are loaded from a CDN by default.
- * For production, consider self-hosting these files.
- */
-export function initializeKTX2Support(): void {
-  // Configure KTX2 decoder URL
-  // Uses Babylon.js preview CDN for decoder files (compatible with Babylon.js 8.x)
-  const cdnBase = "https://preview.babylonjs.com/ktx2Decoder";
+function normalizeBasePath(basePath: string): string {
+  return basePath.replace(/\/+$/, "");
+}
 
+function applyKTX2UrlConfig(basePath: string): void {
+  const base = normalizeBasePath(basePath);
   KhronosTextureContainer2.URLConfig = {
-    jsDecoderModule: `${cdnBase}/ktx2Decoder.js`,
-    wasmUASTCToASTC: `${cdnBase}/uastc_astc.wasm`,
-    wasmUASTCToBC7: `${cdnBase}/uastc_bc7.wasm`,
-    wasmUASTCToRGBA_UNORM: `${cdnBase}/uastc_rgba32_unorm.wasm`,
-    wasmUASTCToRGBA_SRGB: `${cdnBase}/uastc_rgba32_srgb.wasm`,
-    wasmUASTCToR8_UNORM: null,
-    wasmUASTCToRG8_UNORM: null,
-    wasmZSTDDecoder: `${cdnBase}/zstddec.wasm`,
-    // ETC1S/Basis Universal transcoder for ETC1S encoded textures
-    jsMSCTranscoder: `${cdnBase}/msc_basis_transcoder.js`,
-    wasmMSCTranscoder: `${cdnBase}/msc_basis_transcoder.wasm`,
+    jsDecoderModule: `${base}/babylon.ktx2Decoder.js`,
+    wasmUASTCToASTC: `${base}/uastc_astc.wasm`,
+    wasmUASTCToBC7: `${base}/uastc_bc7.wasm`,
+    wasmUASTCToRGBA_UNORM: `${base}/uastc_rgba8_unorm_v2.wasm`,
+    wasmUASTCToRGBA_SRGB: `${base}/uastc_rgba8_srgb_v2.wasm`,
+    wasmUASTCToR8_UNORM: `${base}/uastc_r8_unorm.wasm`,
+    wasmUASTCToRG8_UNORM: `${base}/uastc_rg8_unorm.wasm`,
+    wasmZSTDDecoder: `${base}/zstddec.wasm`,
+    jsMSCTranscoder: `${base}/msc_basis_transcoder.js`,
+    wasmMSCTranscoder: `${base}/msc_basis_transcoder.wasm`,
   };
+}
 
-  console.log("[KTX2Setup] KTX2 texture support initialized");
+async function canReachDecoder(basePath: string): Promise<boolean> {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const base = normalizeBasePath(basePath);
+  const decoderUrl = `${base}/babylon.ktx2Decoder.js`;
+
+  try {
+    const head = await fetch(decoderUrl, {
+      method: "HEAD",
+      cache: "no-store",
+    });
+    if (head.ok) {
+      return true;
+    }
+
+    // Some setups block HEAD; fall back to GET probe.
+    if (head.status === 405 || head.status === 501) {
+      const get = await fetch(decoderUrl, {
+        method: "GET",
+        cache: "no-store",
+      });
+      return get.ok;
+    }
+  } catch {
+    // Ignore and report unavailable.
+  }
+
+  return false;
 }
 
 /**
- * Self-hosted configuration for production
- * Copy decoder files to public/ktx2/ and use this config
+ * Initialize KTX2 texture support for Babylon.js.
+ *
+ * Default behavior is self-hosted decoder lookup at /ktx2.
+ * You can override with NEXT_PUBLIC_KTX2_DECODER_BASE_URL.
  */
-export function initializeKTX2SupportSelfHosted(basePath: string = "/ktx2"): void {
-  KhronosTextureContainer2.URLConfig = {
-    jsDecoderModule: `${basePath}/ktx2Decoder.js`,
-    wasmUASTCToASTC: `${basePath}/uastc_astc.wasm`,
-    wasmUASTCToBC7: `${basePath}/uastc_bc7.wasm`,
-    wasmUASTCToRGBA_UNORM: `${basePath}/uastc_rgba32_unorm.wasm`,
-    wasmUASTCToRGBA_SRGB: `${basePath}/uastc_rgba32_srgb.wasm`,
-    wasmUASTCToR8_UNORM: null,
-    wasmUASTCToRG8_UNORM: null,
-    wasmZSTDDecoder: `${basePath}/zstddec.wasm`,
-    // ETC1S/Basis Universal transcoder for ETC1S encoded textures
-    jsMSCTranscoder: `${basePath}/msc_basis_transcoder.js`,
-    wasmMSCTranscoder: `${basePath}/msc_basis_transcoder.wasm`,
-  };
+export async function initializeKTX2Support(): Promise<boolean> {
+  const configuredBase = process.env.NEXT_PUBLIC_KTX2_DECODER_BASE_URL?.trim();
+  const candidates = configuredBase ? [configuredBase] : ["/ktx2"];
 
+  for (const basePath of candidates) {
+    if (await canReachDecoder(basePath)) {
+      applyKTX2UrlConfig(basePath);
+      setKTX2Enabled(true);
+      console.log(`[KTX2Setup] KTX2 texture support initialized (${basePath})`);
+      return true;
+    }
+  }
+
+  setKTX2Enabled(false);
+  console.warn(
+    "[KTX2Setup] KTX2 decoder unavailable. Falling back to jpg/png textures."
+  );
+  return false;
+}
+
+/**
+ * Force self-hosted configuration for production.
+ * Copy decoder files to public/ktx2/ and use this config.
+ */
+export function initializeKTX2SupportSelfHosted(
+  basePath: string = "/ktx2"
+): void {
+  applyKTX2UrlConfig(basePath);
+  setKTX2Enabled(true);
   console.log("[KTX2Setup] KTX2 texture support initialized (self-hosted)");
 }

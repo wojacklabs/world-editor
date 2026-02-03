@@ -3,6 +3,7 @@ import {
   Mesh,
   MeshBuilder,
   Vector3,
+  Vector2,
   Matrix,
   Quaternion,
   Color3,
@@ -18,6 +19,8 @@ import { Heightmap } from "../terrain/Heightmap";
 import { SplatMap } from "../terrain/SplatMap";
 import { MathPools } from "../utils/ObjectPool";
 import { DataCodec } from "../../loader";
+import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
+import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
 
 // ============================================
 // Noise functions for procedural rock generation (copied from ProceduralAsset)
@@ -140,13 +143,47 @@ attribute vec4 world3;
 uniform mat4 viewProjection;
 uniform float uTime;
 uniform float uWindStrength;
+uniform float uWindScale;
+uniform float uWindSecondaryStrength;
+uniform float uBladeThickness;
+uniform vec2 uWindDirection;
 uniform vec3 uCameraPosition;
 uniform float uLodFar;
+uniform float uVariationStrength;
 
 varying vec3 vNormal;
 varying vec4 vColor;
 varying float vHeight;
 varying vec3 vWorldPosition;
+varying float vVariation;
+
+float hash2D(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float noise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float a = hash2D(i);
+    float b = hash2D(i + vec2(1.0, 0.0));
+    float c = hash2D(i + vec2(0.0, 1.0));
+    float d = hash2D(i + vec2(1.0, 1.0));
+
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float fbm2D(vec2 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    for (int i = 0; i < 3; i++) {
+        value += amplitude * noise2D(p);
+        p = p * 2.02 + vec2(13.1, 7.7);
+        amplitude *= 0.5;
+    }
+    return value;
+}
 
 void main() {
     mat4 worldMatrix = mat4(world0, world1, world2, world3);
@@ -161,28 +198,48 @@ void main() {
     float distanceToCamera = length(worldPos.xz - uCameraPosition.xz);
     float distanceRatio = distanceToCamera / effectiveLodFar;
     float lodScale = 1.0 - smoothstep(0.7, 1.0, distanceRatio);
+    float variation = (hash2D(worldPos.xz * 0.12) - 0.5) * uVariationStrength;
 
     // Grass base position (y=0 point)
     vec3 grassBase = vec3(worldPos.x, worldPos.y - position.y, worldPos.z);
 
     // Wind attenuation: separate from lodScale, starts much earlier
-    // Wind 100%: 0~20% of effectiveLodFar, fade: 20%~50%, 0%: beyond 50%
-    float windScale = 1.0 - smoothstep(0.2, 0.5, distanceRatio);
+    // Wind 100%: 0~20% of effectiveLodFar, fade: 20%~55%, 0%: beyond 55%
+    float windScale = 1.0 - smoothstep(0.2, 0.55, distanceRatio);
     float heightWindAtten = 1.0 / (1.0 + cameraHeight * 0.03);
-    float windFactor = position.y * uWindStrength * windScale * heightWindAtten;
-    float windX = sin(uTime * 2.0 + worldPos.x * 0.5 + worldPos.z * 0.3) * windFactor;
-    float windZ = cos(uTime * 1.5 + worldPos.x * 0.3 + worldPos.z * 0.5) * windFactor * 0.5;
+    vec2 windDir = normalize(uWindDirection);
+    vec2 windUV = worldPos.xz * uWindScale + windDir * (uTime * 0.35);
+    float macroWind = fbm2D(windUV) * 2.0 - 1.0;
+    float microWind = fbm2D(windUV * 2.7 + vec2(31.7, 19.1) + uTime * 0.75) * 2.0 - 1.0;
+    float combinedWind = macroWind + microWind * uWindSecondaryStrength;
+    float windFactor = position.y * uWindStrength * (1.0 + variation * 0.45) * windScale * heightWindAtten;
+    vec2 windOffset = windDir * (combinedWind * windFactor);
 
     // Apply scale: shrink toward base
     vec3 finalPos = mix(grassBase, worldPos.xyz, lodScale);
-    finalPos.x += windX;
-    finalPos.z += windZ;
+    finalPos.x += windOffset.x;
+    finalPos.z += windOffset.y;
+
+    // View-space thickening: helps avoid thin "wire" appearance at grazing angles
+    vec3 worldNormal = normalize(mat3(worldMatrix) * normal);
+    vec3 viewDir = normalize(uCameraPosition - finalPos);
+    vec3 viewRight = cross(vec3(0.0, 1.0, 0.0), viewDir);
+    if (length(viewRight) < 0.0001) {
+        viewRight = vec3(1.0, 0.0, 0.0);
+    } else {
+        viewRight = normalize(viewRight);
+    }
+    float sideSign = sign(position.x + 0.0001);
+    float facing = 1.0 - abs(dot(worldNormal, viewDir));
+    float thicknessMask = smoothstep(0.15, 1.0, facing) * smoothstep(0.0, 0.35, abs(position.x));
+    finalPos += viewRight * sideSign * (uBladeThickness * thicknessMask * lodScale);
 
     vWorldPosition = finalPos;
-    vHeight = position.y * lodScale;
+    vHeight = position.y * lodScale * (1.0 + variation * 0.15);
+    vVariation = variation;
 
     gl_Position = viewProjection * vec4(finalPos, 1.0);
-    vNormal = normalize(mat3(worldMatrix) * normal);
+    vNormal = worldNormal;
     vColor = color;
 }
 `;
@@ -381,6 +438,7 @@ varying vec3 vNormal;
 varying vec4 vColor;
 varying float vHeight;
 varying vec3 vWorldPosition;
+varying float vVariation;
 
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
@@ -390,6 +448,10 @@ uniform vec3 uCameraPosition;
 // Fog uniforms
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform float uFadeStart;
+uniform float uFadeEnd;
+uniform float uDitherPixelSize;
+uniform int uDitherMode;
 
 // Noise functions (matching propThinWindFragmentShader)
 float hash3D(vec3 p) {
@@ -426,6 +488,58 @@ float fbm(vec3 p) {
     return value;
 }
 
+float hash2D(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float getDiamondThreshold(vec2 fragCoord, float pixelSize) {
+    vec2 uv = mod(fragCoord + 0.01, pixelSize);
+    vec2 centered = (uv / pixelSize) * 2.0 - 1.0;
+    float dist = abs(centered.x) + abs(centered.y);
+    return clamp(dist * 0.5, 0.0, 1.0);
+}
+
+float getBayer4Threshold(vec2 fragCoord, float pixelSize) {
+    vec2 pixelCoord = floor(fragCoord / max(pixelSize, 1.0));
+    float x = mod(pixelCoord.x, 4.0);
+    float y = mod(pixelCoord.y, 4.0);
+
+    float idx = 0.0;
+    if (y < 0.5) {
+        if (x < 0.5) idx = 0.0;
+        else if (x < 1.5) idx = 8.0;
+        else if (x < 2.5) idx = 2.0;
+        else idx = 10.0;
+    } else if (y < 1.5) {
+        if (x < 0.5) idx = 12.0;
+        else if (x < 1.5) idx = 4.0;
+        else if (x < 2.5) idx = 14.0;
+        else idx = 6.0;
+    } else if (y < 2.5) {
+        if (x < 0.5) idx = 3.0;
+        else if (x < 1.5) idx = 11.0;
+        else if (x < 2.5) idx = 1.0;
+        else idx = 9.0;
+    } else {
+        if (x < 0.5) idx = 15.0;
+        else if (x < 1.5) idx = 7.0;
+        else if (x < 2.5) idx = 13.0;
+        else idx = 5.0;
+    }
+
+    return (idx + 0.5) / 16.0;
+}
+
+float sampleDitherThreshold(vec2 fragCoord) {
+    if (uDitherMode == 0) {
+        return getDiamondThreshold(fragCoord, max(uDitherPixelSize, 1.0));
+    }
+    if (uDitherMode == 1) {
+        return getBayer4Threshold(fragCoord, max(uDitherPixelSize, 1.0));
+    }
+    return hash2D(fragCoord + vWorldPosition.xz * 2.7);
+}
+
 void main() {
     vec3 normal = normalize(vNormal);
     vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
@@ -436,6 +550,7 @@ void main() {
     // Color variation via FBM noise (matching propThinWindFragmentShader)
     float colorNoise = fbm(vWorldPosition * 2.0);
     vec3 color = mix(meshColor, meshColor * 0.8, colorNoise * 0.3);
+    color *= 1.0 + vVariation * 0.2;
 
     // Height-based color: tips lighter (matching propThinWindFragmentShader)
     float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;
@@ -460,8 +575,12 @@ void main() {
 
     color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
 
-    // Fog (simple distance fog, matching props shader)
     float distanceToCamera = length(vWorldPosition - uCameraPosition);
+    float fadeAlpha = 1.0 - smoothstep(uFadeStart, uFadeEnd, distanceToCamera);
+    float dither = sampleDitherThreshold(gl_FragCoord.xy);
+    if (dither > clamp(fadeAlpha, 0.0, 1.0)) discard;
+
+    // Fog (simple distance fog, matching props shader)
     float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
     color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
@@ -1031,10 +1150,16 @@ export class FoliageSystem {
     this.rockMaterial.setColor3("uSpecularColor", new Color3(0.1, 0.1, 0.1));
 
     // Rock diffuse texture for triplanar mapping
-    const rockTex = new Texture("/textures/rock_diff.jpg", this.scene);
-    rockTex.wrapU = Texture.WRAP_ADDRESSMODE;
-    rockTex.wrapV = Texture.WRAP_ADDRESSMODE;
-    rockTex.anisotropicFilteringLevel = 8;
+    const rockTex = loadTextureWithFallback(
+      this.scene,
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
+      {
+        preferredExtensions: ["ktx2", "jpg", "png"],
+        wrapU: Texture.WRAP_ADDRESSMODE,
+        wrapV: Texture.WRAP_ADDRESSMODE,
+        anisotropicFilteringLevel: 8,
+      }
+    );
     this.rockMaterial.setTexture("rockTexture", rockTex);
     this.rockMaterial.setFloat("textureScale", 1.0);
 
@@ -1067,8 +1192,17 @@ export class FoliageSystem {
           "viewProjection",
           "uTime",
           "uWindStrength",
+          "uWindScale",
+          "uWindSecondaryStrength",
+          "uBladeThickness",
+          "uWindDirection",
           "uCameraPosition",
           "uLodFar",
+          "uVariationStrength",
+          "uFadeStart",
+          "uFadeEnd",
+          "uDitherPixelSize",
+          "uDitherMode",
           "uSunDirection",
           "uSunColor",
           "uAmbient",
@@ -1081,7 +1215,29 @@ export class FoliageSystem {
 
     // Set default uniform values
     this.grassMaterial.setFloat("uTime", 0);
-    this.grassMaterial.setFloat("uWindStrength", 0.15);
+    this.grassMaterial.setFloat(
+      "uWindStrength",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.biomeGrassStrength
+    );
+    this.grassMaterial.setFloat(
+      "uWindScale",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.windScale
+    );
+    this.grassMaterial.setFloat(
+      "uWindSecondaryStrength",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.windSecondaryStrength
+    );
+    this.grassMaterial.setFloat(
+      "uBladeThickness",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.bladeThickness
+    );
+    this.grassMaterial.setVector2(
+      "uWindDirection",
+      new Vector2(
+        Math.cos(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians),
+        Math.sin(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians)
+      )
+    );
     this.grassMaterial.setVector3("uCameraPosition", new Vector3(0, 0, 0));
     this.grassMaterial.setVector3("uSunDirection", new Vector3(0.5, 1, 0.5).normalize());
     this.grassMaterial.setColor3("uSunColor", new Color3(1, 0.95, 0.8));
@@ -1093,6 +1249,26 @@ export class FoliageSystem {
 
     // LOD far distance
     this.grassMaterial.setFloat("uLodFar", this.lodDistances.far);
+    this.grassMaterial.setFloat(
+      "uVariationStrength",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeVariationStrength
+    );
+    this.grassMaterial.setFloat(
+      "uFadeStart",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeGrassFadeStart
+    );
+    this.grassMaterial.setFloat(
+      "uFadeEnd",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeGrassFadeEnd
+    );
+    this.grassMaterial.setFloat(
+      "uDitherPixelSize",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.ditherPixelSize
+    );
+    this.grassMaterial.setInt(
+      "uDitherMode",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.ditherMode
+    );
 
     // Grass needs both sides rendered (thin blades)
     this.grassMaterial.backFaceCulling = false;
@@ -1638,6 +1814,8 @@ export class FoliageSystem {
       );
 
       const biomeWeight = weights[config.biomeChannel];
+      const rockWeight = weights[2] ?? 0;
+      const pebbleWeight = weights[1] ?? 0;
 
       // Skip if biome weight is below threshold
       if (biomeWeight < config.biomeThreshold) continue;
@@ -1648,6 +1826,18 @@ export class FoliageSystem {
         Math.max(0, Math.min(resolution - 1, splatZ))
       );
       if (waterWeight > 0.1) continue;
+
+      const stoneWeight = Math.max(rockWeight, pebbleWeight * 0.35);
+      const stoneStart = DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppressionStartWeight;
+      const stoneInfluence = Math.max(
+        0,
+        (stoneWeight - stoneStart) / Math.max(0.0001, 1.0 - stoneStart)
+      );
+      if (stoneInfluence > 0) {
+        const suppressionChance =
+          stoneInfluence * DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression;
+        if (this.seededRandom() < suppressionChance) continue;
+      }
 
       // Probability based on biome weight
       if (this.seededRandom() > biomeWeight) continue;
@@ -1661,7 +1851,8 @@ export class FoliageSystem {
 
       // Calculate scale with variation
       const scaleBase = config.minScale + this.seededRandom() * (config.maxScale - config.minScale);
-      const scale = scaleBase * (0.8 + this.seededRandom() * 0.4);
+      const suppressionScale = 1.0 - stoneInfluence * (DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression * 0.55);
+      const scale = Math.max(0.05, scaleBase * (0.8 + this.seededRandom() * 0.4) * suppressionScale);
 
       // Random rotation (Y axis only for grass)
       const rotationY = this.seededRandom() * Math.PI * 2;
@@ -1737,6 +1928,23 @@ export class FoliageSystem {
       );
       if (waterWeight > 0.1) continue;
 
+      const rockWeight = weights[2] ?? 0;
+      const pebbleWeight = weights[1] ?? 0;
+      let stoneInfluence = 0;
+      if (typeName === "grass") {
+        const stoneWeight = Math.max(rockWeight, pebbleWeight * 0.35);
+        const stoneStart = DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppressionStartWeight;
+        stoneInfluence = Math.max(
+          0,
+          (stoneWeight - stoneStart) / Math.max(0.0001, 1.0 - stoneStart)
+        );
+        if (stoneInfluence > 0) {
+          const suppressionChance =
+            stoneInfluence * DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression;
+          if (this.seededRandom() < suppressionChance) continue;
+        }
+      }
+
       // Probability based on biome weight
       if (this.seededRandom() > biomeWeight) continue;
 
@@ -1751,7 +1959,13 @@ export class FoliageSystem {
       // Use power distribution to bias toward smaller rocks (power > 1 = more small rocks)
       const sizeRandom = Math.pow(this.seededRandom(), 2.5);  // Bias heavily toward small values
       const scaleBase = config.minScale + sizeRandom * (config.maxScale - config.minScale);
-      const scale = scaleBase * (0.8 + this.seededRandom() * 0.4);
+      let scale = scaleBase * (0.8 + this.seededRandom() * 0.4);
+      if (typeName === "grass" && stoneInfluence > 0) {
+        const suppressionScale =
+          1.0 -
+          stoneInfluence * (DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression * 0.55);
+        scale = Math.max(0.05, scale * suppressionScale);
+      }
 
       // Random rotation
       const rotationY = this.seededRandom() * Math.PI * 2;
