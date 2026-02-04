@@ -26,6 +26,7 @@ import "@babylonjs/loaders/glTF";
 import { loadTextureWithFallback } from "../shared/rendering/TextureLoader";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../shared/foliage/FoliageQualityProfile";
 import { createLeafCardMesh } from "../shared/foliage/LeafCards";
+import { fbm3D, noise3D } from "../shared/math/NoiseUtils";
 
 const REFERENCE_TREE_ROOT_URL = "/assets/references/infinite-terrain/";
 const REFERENCE_TREE_FILE_NAME = "tree.glb";
@@ -51,6 +52,9 @@ uniform vec2 uWindDirection;
 uniform float uWindStrength;
 uniform float uMinWindHeight;
 uniform float uMaxWindHeight;
+uniform float uPropsPrimarySpeed;
+uniform float uPropsSecondarySpeed;
+uniform float uPropsNoiseSpeed;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -85,11 +89,11 @@ void main() {
     heightFactor = heightFactor * heightFactor;
 
     vec2 worldPosXZ = worldPos.xz;
-    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * 2.0;
+    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
     float primaryWave = sin(windPhase) * 0.5 + 0.5;
-    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * 5.0;
+    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * uPropsSecondarySpeed;
     float secondaryWave = sin(secondaryPhase) * 0.3 + 0.5;
-    float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * 0.2);
+    float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * uPropsNoiseSpeed);
     float windAmount = (primaryWave * 0.7 + secondaryWave * 0.3 + noiseVal * 0.2) * heightFactor * uWindStrength;
 
     localPos.x += uWindDirection.x * windAmount * 0.15;
@@ -126,6 +130,9 @@ uniform float uLeafFadeStart;
 uniform float uLeafFadeEnd;
 uniform float uUseLeafAtlas;
 uniform float uLeafMaskFromLuma;
+uniform float uFresnelPower;
+uniform float uFresnelStrength;
+uniform vec3 uFresnelColor;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -217,6 +224,10 @@ void main() {
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
     rimFactor = pow(rimFactor, 3.0) * 0.08;
 
+    // Fresnel rim light for leaves
+    float ndv = clamp(dot(normal, vViewDirection), 0.0, 1.0);
+    float fresnel = pow(1.0 - ndv, uFresnelPower) * uFresnelStrength;
+
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
 
     float diffuse = halfLambert * 0.6 + 0.4;
@@ -224,6 +235,9 @@ void main() {
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
 
     color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
+
+    // Fresnel: mix blend for softer rim
+    color = mix(color, uFresnelColor, clamp(fresnel * leafMask, 0.0, 1.0));
 
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
@@ -397,61 +411,6 @@ void main() {
     gl_FragColor = vec4(color, 1.0);
 }
 `;
-
-// ============================================
-// Noise Functions (CPU-side)
-// ============================================
-
-function hash3D(x: number, y: number, z: number): number {
-  const n = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
-  return n - Math.floor(n);
-}
-
-function noise3D(x: number, y: number, z: number): number {
-  const ix = Math.floor(x);
-  const iy = Math.floor(y);
-  const iz = Math.floor(z);
-  const fx = x - ix;
-  const fy = y - iy;
-  const fz = z - iz;
-
-  const ux = fx * fx * (3 - 2 * fx);
-  const uy = fy * fy * (3 - 2 * fy);
-  const uz = fz * fz * (3 - 2 * fz);
-
-  const n000 = hash3D(ix, iy, iz);
-  const n100 = hash3D(ix + 1, iy, iz);
-  const n010 = hash3D(ix, iy + 1, iz);
-  const n110 = hash3D(ix + 1, iy + 1, iz);
-  const n001 = hash3D(ix, iy, iz + 1);
-  const n101 = hash3D(ix + 1, iy, iz + 1);
-  const n011 = hash3D(ix, iy + 1, iz + 1);
-  const n111 = hash3D(ix + 1, iy + 1, iz + 1);
-
-  const n00 = n000 * (1 - ux) + n100 * ux;
-  const n01 = n001 * (1 - ux) + n101 * ux;
-  const n10 = n010 * (1 - ux) + n110 * ux;
-  const n11 = n011 * (1 - ux) + n111 * ux;
-
-  const n0 = n00 * (1 - uy) + n10 * uy;
-  const n1 = n01 * (1 - uy) + n11 * uy;
-
-  return (n0 * (1 - uz) + n1 * uz) * 2 - 1;
-}
-
-function fbm3D(x: number, y: number, z: number, octaves: number = 4): number {
-  let value = 0;
-  let amplitude = 0.5;
-  let frequency = 1;
-
-  for (let i = 0; i < octaves; i++) {
-    value += amplitude * noise3D(x * frequency, y * frequency, z * frequency);
-    frequency *= 2;
-    amplitude *= 0.5;
-  }
-
-  return value;
-}
 
 function calcSubdivision(size: number, base: number = 4, override?: number): number {
   if (override !== undefined) {
@@ -1246,6 +1205,7 @@ export class ProceduralAssetGenerator {
             "worldViewProjection", "world", "cameraPosition",
             "uTime", "uWindDirection", "uWindStrength",
             "uMinWindHeight", "uMaxWindHeight",
+            "uPropsPrimarySpeed", "uPropsSecondarySpeed", "uPropsNoiseSpeed",
             "baseColor", "detailColor", "sunDirection",
             "ambientIntensity", "fogColor", "fogDensity",
             "dirtTextureScale",
@@ -1254,6 +1214,9 @@ export class ProceduralAssetGenerator {
             "uLeafFadeEnd",
             "uUseLeafAtlas",
             "uLeafMaskFromLuma",
+            "uFresnelPower",
+            "uFresnelStrength",
+            "uFresnelColor",
           ],
           samplers: ["dirtTexture", "leafAtlas"],
         }
@@ -1279,6 +1242,9 @@ export class ProceduralAssetGenerator {
       material.setFloat("uWindStrength", windStr * this.windStrength);
       material.setFloat("uMinWindHeight", minHeight);
       material.setFloat("uMaxWindHeight", maxHeight);
+      material.setFloat("uPropsPrimarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed);
+      material.setFloat("uPropsSecondarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed);
+      material.setFloat("uPropsNoiseSpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed);
       material.setFloat("uTime", this.time);
 
       material.setColor3("baseColor", new Color3(params.colorBase.r, params.colorBase.g, params.colorBase.b));
@@ -1322,6 +1288,11 @@ export class ProceduralAssetGenerator {
         params.type === "tree" || params.type === "bush" ? 1.0 : 0.0
       );
       material.setFloat("uLeafMaskFromLuma", 1.0);
+
+      // Fresnel rim light settings
+      material.setFloat("uFresnelPower", 3.0);
+      material.setFloat("uFresnelStrength", 0.4);
+      material.setColor3("uFresnelColor", new Color3(0.8, 0.95, 0.7));
 
       // Register update for wind animation
       this.scene.registerBeforeRender(() => {

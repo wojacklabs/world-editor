@@ -215,6 +215,9 @@ uniform vec2 uWindDirection;
 uniform float uWindStrength;
 uniform float uMinWindHeight;
 uniform float uMaxWindHeight;
+uniform float uPropsPrimarySpeed;
+uniform float uPropsSecondarySpeed;
+uniform float uPropsNoiseSpeed;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -255,11 +258,11 @@ void main() {
 
     // Wind wave
     vec2 worldPosXZ = worldPos.xz;
-    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * 2.0;
+    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
     float primaryWave = sin(windPhase) * 0.5 + 0.5;
-    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * 5.0;
+    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * uPropsSecondarySpeed;
     float secondaryWave = sin(secondaryPhase) * 0.3 + 0.5;
-    float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * 0.2);
+    float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * uPropsNoiseSpeed);
     float windAmount = (primaryWave * 0.7 + secondaryWave * 0.3 + noiseVal * 0.2) * heightFactor * uWindStrength;
 
     // Apply wind displacement
@@ -297,6 +300,9 @@ uniform float uLeafFadeStart;
 uniform float uLeafFadeEnd;
 uniform float uUseLeafAtlas;
 uniform float uLeafMaskFromLuma;
+uniform float uFresnelPower;
+uniform float uFresnelStrength;
+uniform vec3 uFresnelColor;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -395,6 +401,10 @@ void main() {
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
     rimFactor = pow(rimFactor, 3.0) * 0.08;
 
+    // Fresnel rim light for leaves
+    float ndv = clamp(dot(normal, vViewDirection), 0.0, 1.0);
+    float fresnel = pow(1.0 - ndv, uFresnelPower) * uFresnelStrength;
+
     // Subsurface scattering approximation
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
 
@@ -404,6 +414,9 @@ void main() {
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
 
     color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
+
+    // Fresnel: mix blend for softer rim
+    color = mix(color, uFresnelColor, clamp(fresnel * leafMask, 0.0, 1.0));
 
     // Fog
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
@@ -1065,6 +1078,9 @@ export class PropManager {
             "uWindStrength",
             "uMinWindHeight",
             "uMaxWindHeight",
+            "uPropsPrimarySpeed",
+            "uPropsSecondarySpeed",
+            "uPropsNoiseSpeed",
             "baseColor",
             "detailColor",
             "sunDirection",
@@ -1077,6 +1093,9 @@ export class PropManager {
             "uLeafFadeEnd",
             "uUseLeafAtlas",
             "uLeafMaskFromLuma",
+            "uFresnelPower",
+            "uFresnelStrength",
+            "uFresnelColor",
           ],
           samplers: ["dirtTexture", "leafAtlas"],
         }
@@ -1111,6 +1130,9 @@ export class PropManager {
       material.setFloat("uWindStrength", windStrength);
       material.setFloat("uMinWindHeight", minWindHeight);
       material.setFloat("uMaxWindHeight", maxWindHeight);
+      material.setFloat("uPropsPrimarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed);
+      material.setFloat("uPropsSecondarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed);
+      material.setFloat("uPropsNoiseSpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed);
       material.setFloat("uTime", 0);
 
       // Load dirt texture for bark triplanar mapping
@@ -1155,6 +1177,11 @@ export class PropManager {
         assetType === "tree" || assetType === "bush" ? 1.0 : 0.0
       );
       material.setFloat("uLeafMaskFromLuma", 1.0);
+
+      // Fresnel rim light settings
+      material.setFloat("uFresnelPower", 3.0);
+      material.setFloat("uFresnelStrength", 0.4);
+      material.setColor3("uFresnelColor", new Color3(0.8, 0.95, 0.7));
     } else {
       // Rock uses thin instance static shader with triplanar texture
       // NOTE: Do NOT include world0-world3 in attributes - Babylon.js adds them

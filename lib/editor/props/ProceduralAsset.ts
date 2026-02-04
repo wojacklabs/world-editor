@@ -15,6 +15,7 @@ import * as BABYLON from "@babylonjs/core";
 import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
 import { createLeafCardMesh } from "../../shared/foliage/LeafCards";
+import { fbm3D, noise3D } from "../../shared/math/NoiseUtils";
 
 // ============================================
 // Wind-enabled vertex shader for foliage (grass, bush, tree leaves)
@@ -35,6 +36,9 @@ uniform vec2 uWindDirection;  // Normalized XZ direction
 uniform float uWindStrength;  // 0.0 ~ 1.0
 uniform float uMinWindHeight; // Y threshold where wind starts
 uniform float uMaxWindHeight; // Y where wind is at full strength
+uniform float uPropsPrimarySpeed;
+uniform float uPropsSecondarySpeed;
+uniform float uPropsNoiseSpeed;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -75,17 +79,17 @@ void main() {
 
     // Wind wave: travels through space over time
     vec2 worldPosXZ = worldPos.xz;
-    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * 2.0;
+    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
 
     // Primary wave (slow, large movement)
     float primaryWave = sin(windPhase) * 0.5 + 0.5;
 
     // Secondary wave (faster, smaller, gives rustling effect)
-    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * 5.0;
+    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * uPropsSecondarySpeed;
     float secondaryWave = sin(secondaryPhase) * 0.3 + 0.5;
 
     // Noise for variation (so not all grass moves identically)
-    float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * 0.2);
+    float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * uPropsNoiseSpeed);
 
     // Combined wind displacement
     float windAmount = (primaryWave * 0.7 + secondaryWave * 0.3 + noiseVal * 0.2) * heightFactor * uWindStrength;
@@ -484,58 +488,6 @@ function calcSubdivision(size: number, base: number = 4, override?: number): num
   // size 1.0 → base, size 2.0 → base+1, size 4.0 → base+2
   const subdiv = Math.floor(base + Math.log2(Math.max(size, 0.25)));
   return Math.max(3, Math.min(6, subdiv));  // clamp 3~6
-}
-
-// 3D noise functions for mesh generation
-function hash3D(x: number, y: number, z: number): number {
-  const n = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
-  return n - Math.floor(n);
-}
-
-function noise3D(x: number, y: number, z: number): number {
-  const ix = Math.floor(x);
-  const iy = Math.floor(y);
-  const iz = Math.floor(z);
-  const fx = x - ix;
-  const fy = y - iy;
-  const fz = z - iz;
-
-  const ux = fx * fx * (3 - 2 * fx);
-  const uy = fy * fy * (3 - 2 * fy);
-  const uz = fz * fz * (3 - 2 * fz);
-
-  const n000 = hash3D(ix, iy, iz);
-  const n100 = hash3D(ix + 1, iy, iz);
-  const n010 = hash3D(ix, iy + 1, iz);
-  const n110 = hash3D(ix + 1, iy + 1, iz);
-  const n001 = hash3D(ix, iy, iz + 1);
-  const n101 = hash3D(ix + 1, iy, iz + 1);
-  const n011 = hash3D(ix, iy + 1, iz + 1);
-  const n111 = hash3D(ix + 1, iy + 1, iz + 1);
-
-  const n00 = n000 * (1 - ux) + n100 * ux;
-  const n01 = n001 * (1 - ux) + n101 * ux;
-  const n10 = n010 * (1 - ux) + n110 * ux;
-  const n11 = n011 * (1 - ux) + n111 * ux;
-
-  const n0 = n00 * (1 - uy) + n10 * uy;
-  const n1 = n01 * (1 - uy) + n11 * uy;
-
-  return (n0 * (1 - uz) + n1 * uz) * 2 - 1;
-}
-
-function fbm3D(x: number, y: number, z: number, octaves: number = 4): number {
-  let value = 0;
-  let amplitude = 0.5;
-  let frequency = 1;
-
-  for (let i = 0; i < octaves; i++) {
-    value += amplitude * noise3D(x * frequency, y * frequency, z * frequency);
-    frequency *= 2;
-    amplitude *= 0.5;
-  }
-
-  return value;
 }
 
 // Helper to add vertex colors to a mesh
@@ -1593,6 +1545,9 @@ export class ProceduralAsset {
             "uWindStrength",
             "uMinWindHeight",
             "uMaxWindHeight",
+            "uPropsPrimarySpeed",
+            "uPropsSecondarySpeed",
+            "uPropsNoiseSpeed",
             "baseColor",
             "detailColor",
             "sunDirection",
@@ -1639,6 +1594,9 @@ export class ProceduralAsset {
       this.material.setFloat("uWindStrength", windStrength);
       this.material.setFloat("uMinWindHeight", minWindHeight);
       this.material.setFloat("uMaxWindHeight", maxWindHeight);
+      this.material.setFloat("uPropsPrimarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed);
+      this.material.setFloat("uPropsSecondarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed);
+      this.material.setFloat("uPropsNoiseSpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed);
       this.material.setFloat("uTime", 0);
 
       // Load dirt texture for bark triplanar mapping

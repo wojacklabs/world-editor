@@ -21,60 +21,7 @@ import { MathPools } from "../utils/ObjectPool";
 import { DataCodec } from "../../loader";
 import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
-
-// ============================================
-// Noise functions for procedural rock generation (copied from ProceduralAsset)
-// ============================================
-function hash3D(x: number, y: number, z: number): number {
-  const n = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
-  return n - Math.floor(n);
-}
-
-function noise3D(x: number, y: number, z: number): number {
-  const ix = Math.floor(x);
-  const iy = Math.floor(y);
-  const iz = Math.floor(z);
-  const fx = x - ix;
-  const fy = y - iy;
-  const fz = z - iz;
-
-  const ux = fx * fx * (3 - 2 * fx);
-  const uy = fy * fy * (3 - 2 * fy);
-  const uz = fz * fz * (3 - 2 * fz);
-
-  const n000 = hash3D(ix, iy, iz);
-  const n100 = hash3D(ix + 1, iy, iz);
-  const n010 = hash3D(ix, iy + 1, iz);
-  const n110 = hash3D(ix + 1, iy + 1, iz);
-  const n001 = hash3D(ix, iy, iz + 1);
-  const n101 = hash3D(ix + 1, iy, iz + 1);
-  const n011 = hash3D(ix, iy + 1, iz + 1);
-  const n111 = hash3D(ix + 1, iy + 1, iz + 1);
-
-  const n00 = n000 * (1 - ux) + n100 * ux;
-  const n01 = n001 * (1 - ux) + n101 * ux;
-  const n10 = n010 * (1 - ux) + n110 * ux;
-  const n11 = n011 * (1 - ux) + n111 * ux;
-
-  const n0 = n00 * (1 - uy) + n10 * uy;
-  const n1 = n01 * (1 - uy) + n11 * uy;
-
-  return (n0 * (1 - uz) + n1 * uz) * 2 - 1;
-}
-
-function fbm3D(x: number, y: number, z: number, octaves: number = 4): number {
-  let value = 0;
-  let amplitude = 0.5;
-  let frequency = 1;
-
-  for (let i = 0; i < octaves; i++) {
-    value += amplitude * noise3D(x * frequency, y * frequency, z * frequency);
-    frequency *= 2;
-    amplitude *= 0.5;
-  }
-
-  return value;
-}
+import { fbm3D, noise3D } from "../../shared/math/NoiseUtils";
 
 // Helper to set vertex colors on a mesh
 function setMeshVertexColor(mesh: Mesh, r: number, g: number, b: number): void {
@@ -145,17 +92,47 @@ uniform float uTime;
 uniform float uWindStrength;
 uniform float uWindScale;
 uniform float uWindSecondaryStrength;
+uniform float uWindMacroSpeed;
+uniform float uWindMicroSpeed;
 uniform float uBladeThickness;
 uniform vec2 uWindDirection;
 uniform vec3 uCameraPosition;
 uniform float uLodFar;
 uniform float uVariationStrength;
+uniform float uFlowersEnabled;
+uniform float uFlowerDensity;
+uniform float uFlowerNoiseScale;
+uniform float uFlowerHeightBoost;
+uniform float uFlowerTipStart;
+uniform float uFlowerBaseScale;
+uniform float uFlowerExpand;
+
+// Grass color uniforms (matching original infinite-terrain)
+uniform vec3 uGrassBaseColor;
+uniform vec3 uGrassTopColor;
+
+// Grass blade constants (matching original infinite-terrain)
+#define GRASS_SEGMENTS 4
+#define GRASS_VERTICES 10
+#define GRASS_WIDTH 0.15
+#define GRASS_HEIGHT 1.15
 
 varying vec3 vNormal;
-varying vec4 vColor;
+varying vec3 vColor;
 varying float vHeight;
 varying vec3 vWorldPosition;
 varying float vVariation;
+varying float vIsFlower;
+varying float vFlowerColorIndex;
+varying float vGrassX;
+varying float vHeightPercent;
+
+// EaseOut function for blade width tapering (isosceles triangle shape)
+// Clamp input to avoid undefined pow(negative, float) behavior
+float easeOut(float x, float t) {
+    float clamped = clamp(1.0 - x, 0.0, 1.0);
+    return 1.0 - pow(clamped, t);
+}
 
 float hash2D(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -185,9 +162,47 @@ float fbm2D(vec2 p) {
     return value;
 }
 
+// Bezier curve functions for natural blade bending
+vec3 bezier(vec3 P0, vec3 P1, vec3 P2, vec3 P3, float t) {
+    float mt = 1.0 - t;
+    return mt*mt*mt*P0 + 3.0*mt*mt*t*P1 + 3.0*mt*t*t*P2 + t*t*t*P3;
+}
+
+vec3 bezierGrad(vec3 P0, vec3 P1, vec3 P2, vec3 P3, float t) {
+    float mt = 1.0 - t;
+    return 3.0*mt*mt*(P1-P0) + 6.0*mt*t*(P2-P1) + 3.0*t*t*(P3-P2);
+}
+
+// Rotation matrix around Y axis
+mat3 rotateY(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat3(vec3(c, 0, s), vec3(0, 1, 0), vec3(-s, 0, c));
+}
+
+// Rotation matrix around arbitrary axis
+mat3 rotateAxis(vec3 axis, float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    float oc = 1.0 - c;
+    return mat3(
+        oc*axis.x*axis.x+c,         oc*axis.x*axis.y-axis.z*s, oc*axis.z*axis.x+axis.y*s,
+        oc*axis.x*axis.y+axis.z*s,  oc*axis.y*axis.y+c,        oc*axis.y*axis.z-axis.x*s,
+        oc*axis.z*axis.x-axis.y*s,  oc*axis.y*axis.z+axis.x*s, oc*axis.z*axis.z+c
+    );
+}
+
 void main() {
     mat4 worldMatrix = mat4(world0, world1, world2, world3);
-    vec4 worldPos = worldMatrix * vec4(position, 1.0);
+    // worldPos is the blade base position (from instance matrix position)
+    vec4 worldPos = worldMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 grassBase = worldPos.xyz;
+
+    // Blade geometry from pre-calculated position (WebGPU compatible)
+    // position.x: -halfWidth to +halfWidth, position.y: 0 to bladeHeight
+    float heightPercent = position.y / GRASS_HEIGHT;
+    float xSide = step(0.0, position.x);  // 0 = left, 1 = right
+    float zSide = -1.0;  // front face only (backFaceCulling = false)
 
     // Camera height extends LOD distance (higher view = see further)
     float cameraHeight = max(0.0, uCameraPosition.y - 10.0);
@@ -195,52 +210,126 @@ void main() {
     float effectiveLodFar = uLodFar + heightBonus;
 
     // Distance-based LOD scale (shrinks grass at distance)
-    float distanceToCamera = length(worldPos.xz - uCameraPosition.xz);
+    float distanceToCamera = length(grassBase.xz - uCameraPosition.xz);
     float distanceRatio = distanceToCamera / effectiveLodFar;
     float lodScale = 1.0 - smoothstep(0.7, 1.0, distanceRatio);
-    float variation = (hash2D(worldPos.xz * 0.12) - 0.5) * uVariationStrength;
+    float variation = (hash2D(grassBase.xz * 0.12) - 0.5) * uVariationStrength;
 
-    // Grass base position (y=0 point)
-    vec3 grassBase = vec3(worldPos.x, worldPos.y - position.y, worldPos.z);
+    // Per-blade random height variation
+    float randomHeight = (hash2D(grassBase.xz * 0.19) * 2.0 - 1.0) * 0.2;
+
+    // Flower detection (noise-based clustering)
+    float hFlower = hash2D(grassBase.xz * 0.17);
+    float flowerNoise = noise2D(grassBase.xz * uFlowerNoiseScale);
+    float isFlower = uFlowersEnabled * step(1.0 - uFlowerDensity * flowerNoise, hFlower);
+
+    // 4-color selection based on spatial noise
+    float colorNoiseSample = noise2D(grassBase.xz * uFlowerNoiseScale * 0.5 + vec2(123.4, 567.8));
+    float flowerColorIdx = floor(colorNoiseSample * 4.0);
+
+    // Tip mask for flower shape
+    float tipMask = smoothstep(uFlowerTipStart, 1.0, heightPercent);
+
+    // Flower shape modification (taller, wider tip)
+    float heightMod = mix(1.0, 1.0 + uFlowerHeightBoost, isFlower);
+    float baseMod = mix(1.0, uFlowerBaseScale, isFlower);
+    float tipExpand = mix(1.0, 1.0 + uFlowerExpand, isFlower * tipMask);
+
+    // Blade dimensions
+    float grassHeight = 1.0;  // base height multiplier
+    float bladeWidth = GRASS_WIDTH * easeOut(1.08 - heightPercent, 2.0) * grassHeight;
+    float bladeHeight = (GRASS_HEIGHT * grassHeight + randomHeight) * heightMod;
+
+    // Apply flower width modification
+    bladeWidth *= baseMod * tipExpand;
+
+    // Local x position - use pre-calculated position.x (already has easeOut taper)
+    // Apply flower modifications to pre-calculated width
+    float x = position.x * baseMod * tipExpand;
 
     // Wind attenuation: separate from lodScale, starts much earlier
-    // Wind 100%: 0~20% of effectiveLodFar, fade: 20%~55%, 0%: beyond 55%
-    float windScale = 1.0 - smoothstep(0.2, 0.55, distanceRatio);
+    float windScaleAtten = 1.0 - smoothstep(0.2, 0.55, distanceRatio);
     float heightWindAtten = 1.0 / (1.0 + cameraHeight * 0.03);
     vec2 windDir = normalize(uWindDirection);
-    vec2 windUV = worldPos.xz * uWindScale + windDir * (uTime * 0.35);
+    vec2 windUV = grassBase.xz * uWindScale + windDir * (uTime * uWindMacroSpeed);
     float macroWind = fbm2D(windUV) * 2.0 - 1.0;
-    float microWind = fbm2D(windUV * 2.7 + vec2(31.7, 19.1) + uTime * 0.75) * 2.0 - 1.0;
+    float microWind = fbm2D(windUV * 2.7 + vec2(31.7, 19.1) + uTime * uWindMicroSpeed) * 2.0 - 1.0;
     float combinedWind = macroWind + microWind * uWindSecondaryStrength;
-    float windFactor = position.y * uWindStrength * (1.0 + variation * 0.45) * windScale * heightWindAtten;
-    vec2 windOffset = windDir * (combinedWind * windFactor);
 
-    // Apply scale: shrink toward base
-    vec3 finalPos = mix(grassBase, worldPos.xyz, lodScale);
-    finalPos.x += windOffset.x;
-    finalPos.z += windOffset.y;
+    // Base lean factor (random per blade, range ±0.2 like original)
+    float baseLean = (hash2D(grassBase.xz * 0.31) - 0.5) * 0.4;
 
-    // View-space thickening: helps avoid thin "wire" appearance at grazing angles
-    vec3 worldNormal = normalize(mat3(worldMatrix) * normal);
-    vec3 viewDir = normalize(uCameraPosition - finalPos);
+    // Wind animation
+    float windStrengthNorm = combinedWind * uWindStrength * windScaleAtten * heightWindAtten;
+    float leanAnimation = windStrengthNorm * 0.15;
+    float leanFactor = baseLean + leanAnimation;
+
+    // Random rotation angle for each blade (range -PI/4 to PI/4)
+    float angle = (hash2D(grassBase.xz * 0.23) - 0.5) * 1.5708;
+
+    // Wind axis and lean angle
+    float windAngle = 0.6;
+    vec3 windAxis = vec3(cos(windAngle), 0.0, sin(windAngle));
+    float windLeanAngle = windStrengthNorm * heightPercent;
+
+    // Bezier control points with cos/sin curve for natural drooping
+    vec3 p0 = vec3(0.0, 0.0, 0.0);
+    vec3 p1 = vec3(0.0, 0.33, 0.0);
+    vec3 p2 = vec3(0.0, 0.66, 0.0);
+    vec3 p3 = vec3(0.0, cos(leanFactor), sin(leanFactor));
+
+    // Sample bezier curve
+    vec3 curvePoint = bezier(p0, p1, p2, p3, heightPercent);
+    vec3 curveGrad = bezierGrad(p0, p1, p2, p3, heightPercent);
+
+    // y and z from bezier curve
+    float y = curvePoint.y * bladeHeight;
+    float z = curvePoint.z * bladeHeight;
+
+    // Apply rotation matrices: wind lean + random Y rotation
+    mat3 grassMat = rotateAxis(windAxis, windLeanAngle) * rotateY(angle);
+    vec3 grassLocalPosition = grassMat * vec3(x, y, z);
+
+    // Normal from bezier gradient (rotate 90 degrees in YZ plane)
+    mat2 curveRot90 = mat2(0.0, 1.0, -1.0, 0.0) * -zSide;
+    vec3 grassLocalNormal = grassMat * vec3(0.0, curveRot90 * curveGrad.yz);
+
+    // Final world position
+    vec3 finalPos = grassBase + grassLocalPosition * lodScale;
+
+    // View-space thickening for grazing angles
+    // Use grassBase (blade base position) for viewDir, not finalPos (like original)
+    vec3 viewDir = normalize(uCameraPosition - grassBase);
+    vec3 grassFaceNormal = grassMat * vec3(0.0, 0.0, -zSide);
+    float viewDotNormal = clamp(dot(grassFaceNormal, viewDir), 0.0, 1.0);
+    float viewSpaceThickenFactor = easeOut(1.0 - viewDotNormal, 4.0) * smoothstep(0.0, 0.2, viewDotNormal);
+
     vec3 viewRight = cross(vec3(0.0, 1.0, 0.0), viewDir);
     if (length(viewRight) < 0.0001) {
         viewRight = vec3(1.0, 0.0, 0.0);
     } else {
         viewRight = normalize(viewRight);
     }
-    float sideSign = sign(position.x + 0.0001);
-    float facing = 1.0 - abs(dot(worldNormal, viewDir));
-    float thicknessMask = smoothstep(0.15, 1.0, facing) * smoothstep(0.0, 0.35, abs(position.x));
-    finalPos += viewRight * sideSign * (uBladeThickness * thicknessMask * lodScale);
+    // Apply thickening along viewRight direction (camera-aligned, like original)
+    finalPos += viewRight * viewSpaceThickenFactor * (xSide - 0.5) * bladeWidth * 0.5 * -zSide * lodScale;
 
     vWorldPosition = finalPos;
-    vHeight = position.y * lodScale * (1.0 + variation * 0.15);
+    vHeight = heightPercent * bladeHeight * lodScale * (1.0 + variation * 0.15);
     vVariation = variation;
+    vIsFlower = isFlower;
+    vFlowerColorIndex = flowerColorIdx;
 
     gl_Position = viewProjection * vec4(finalPos, 1.0);
-    vNormal = worldNormal;
-    vColor = color;
+
+    // Distance normal blend: fade curve normal to up vector at distance
+    float distanceBlend = smoothstep(0.0, 10.0, distanceToCamera);
+    vec3 blendedNormal = mix(grassLocalNormal, vec3(0.0, 1.0, 0.0), distanceBlend * 0.5);
+    vNormal = normalize(blendedNormal);
+
+    // Color gradient from base to top (matching original infinite-terrain)
+    vColor = mix(uGrassBaseColor, uGrassTopColor, heightPercent);
+    vGrassX = x;  // Local x position for edge darkening in fragment shader
+    vHeightPercent = heightPercent;
 }
 `;
 
@@ -435,10 +524,14 @@ Effect.ShadersStore["grassFragmentShader"] = `
 precision highp float;
 
 varying vec3 vNormal;
-varying vec4 vColor;
+varying vec3 vColor;
 varying float vHeight;
 varying vec3 vWorldPosition;
 varying float vVariation;
+varying float vIsFlower;
+varying float vFlowerColorIndex;
+varying float vGrassX;
+varying float vHeightPercent;
 
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
@@ -452,6 +545,12 @@ uniform float uFadeStart;
 uniform float uFadeEnd;
 uniform float uDitherPixelSize;
 uniform int uDitherMode;
+
+// Flower color uniforms
+uniform vec3 uFlowerColorA;
+uniform vec3 uFlowerColorB;
+uniform vec3 uFlowerColorC;
+uniform vec3 uFlowerColorD;
 
 // Noise functions (matching propThinWindFragmentShader)
 float hash3D(vec3 p) {
@@ -486,6 +585,11 @@ float fbm(vec3 p) {
         amplitude *= 0.5;
     }
     return value;
+}
+
+// Hemisphere lighting: blend between ground and sky color based on normal Y
+vec3 hemiLight(vec3 normal, vec3 groundColor, vec3 skyColor) {
+    return mix(groundColor, skyColor, 0.5 * normal.y + 0.5);
 }
 
 float hash2D(vec2 p) {
@@ -544,52 +648,52 @@ void main() {
     vec3 normal = normalize(vNormal);
     vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
 
-    // Use vertex color (matching propThinWindFragmentShader)
-    vec3 meshColor = vColor.rgb;
+    // Hemisphere ambient lighting
+    vec3 skyColor = vec3(1.0, 1.0, 0.75);
+    vec3 groundColor = vec3(0.05, 0.05, 0.25);
+    vec3 ambientLighting = hemiLight(normal, groundColor, skyColor);
 
-    // Color variation via FBM noise (matching propThinWindFragmentShader)
-    float colorNoise = fbm(vWorldPosition * 2.0);
-    vec3 color = mix(meshColor, meshColor * 0.8, colorNoise * 0.3);
-    color *= 1.0 + vVariation * 0.2;
+    // Directional light (wrapped Lambert with backlight scatter)
+    vec3 lightDir = normalize(vec3(1.0, 0.5, 1.0));
+    float wrap = 0.5;
+    float dotNL = clamp((dot(normal, lightDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
+    float backlight = clamp((dot(viewDir, -lightDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
+    vec3 scatter = vec3(pow(backlight, 2.0));
+    vec3 diffuseLighting = (vec3(dotNL) + scatter) * vec3(1.0);
 
-    // Height-based color: tips lighter (matching propThinWindFragmentShader)
-    float isLeaf = vColor.g > vColor.r ? 1.0 : 0.3;
-    color = mix(color * 0.85, color * 1.1, vHeight * isLeaf);
+    // Final lighting mix (matching original: 20% diffuse, 80% ambient)
+    vec3 lighting = diffuseLighting * 0.2 + ambientLighting * 0.8;
 
-    // Half-Lambert diffuse (matching propThinWindFragmentShader)
-    float NdotL = dot(normal, uSunDirection);
-    float halfLambert = NdotL * 0.5 + 0.5;
-    halfLambert = halfLambert * halfLambert;
+    // Apply lighting to grass color (matching original infinite-terrain)
+    vec3 color = vColor * lighting;
 
-    // Rim lighting (matching propThinWindFragmentShader)
-    float rimFactor = 1.0 - max(dot(normal, viewDir), 0.0);
-    rimFactor = pow(rimFactor, 3.0) * 0.08;
-
-    // Subsurface scattering approximation (matching propThinWindFragmentShader)
-    float sss = max(0.0, dot(-viewDir, uSunDirection)) * vHeight * 0.15;
-
-    // Final lighting (matching propThinWindFragmentShader)
-    float diffuse = halfLambert * 0.6 + 0.4;
-    vec3 ambient = vec3(uAmbient);
-    vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
-
-    color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
+    // Apply flower color at tips (with lighting)
+    if (vIsFlower > 0.5) {
+        vec3 flowerColor = uFlowerColorA;
+        if (vFlowerColorIndex > 2.5) {
+            flowerColor = uFlowerColorD;
+        } else if (vFlowerColorIndex > 1.5) {
+            flowerColor = uFlowerColorC;
+        } else if (vFlowerColorIndex > 0.5) {
+            flowerColor = uFlowerColorB;
+        }
+        vec3 blossomColor = flowerColor * lighting;
+        float tipBlend = smoothstep(0.5, 0.9, vHeightPercent);
+        color = mix(color, blossomColor, tipBlend);
+    }
 
     float distanceToCamera = length(vWorldPosition - uCameraPosition);
     float fadeAlpha = 1.0 - smoothstep(uFadeStart, uFadeEnd, distanceToCamera);
     float dither = sampleDitherThreshold(gl_FragCoord.xy);
     if (dither > clamp(fadeAlpha, 0.0, 1.0)) discard;
 
-    // Fog (simple distance fog, matching props shader)
+    // Fog (simple distance fog)
     float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
     color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping and gamma (matching terrain/props shaders)
+    // Tone mapping and gamma (matching original infinite-terrain)
     color = color / (color + vec3(1.0)) * 1.1;
     color = pow(color, vec3(0.95));
-
-    // Alpha test for grass edges
-    if (vColor.a < 0.1) discard;
 
     gl_FragColor = vec4(color, 1.0);
 }
@@ -918,14 +1022,14 @@ export class FoliageSystem {
   }
 
   /**
-   * Create multiple grass mesh variations using ProceduralAsset-style generation
+   * Create grass mesh variations with isosceles triangle shape (like original infinite-terrain)
    */
   private createGrassVariations(): void {
-    console.log("[FoliageSystem] Creating grass variations...");
+    console.log("[FoliageSystem] Creating grass variations (isosceles triangle shape)...");
 
     for (let i = 0; i < this.GRASS_VARIATION_COUNT; i++) {
-      const seed = 2000 + i * 333;  // Different seed for each variation
-      const mesh = this.generateProceduralGrassClump(seed);
+      const seed = 2000 + i * 333;
+      const mesh = this.generateIsoscelesGrassBlade(seed);
 
       if (mesh) {
         mesh.name = `grass_variation_${i}`;
@@ -935,6 +1039,79 @@ export class FoliageSystem {
     }
 
     console.log(`[FoliageSystem] Created ${this.grassVariations.length} grass variations`);
+  }
+
+  /**
+   * Generate a single grass blade with isosceles triangle shape (matching original infinite-terrain)
+   * Uses easeOut taper like original: width = GRASS_WIDTH * easeOut(1.08 - heightPercent, 2.0)
+   */
+  private generateIsoscelesGrassBlade(seed: number): Mesh {
+    // EaseOut function: 1 - pow(1 - x, t)
+    const easeOut = (x: number, t: number): number => {
+      const clamped = Math.max(0, Math.min(1, 1 - x));
+      return 1 - Math.pow(clamped, t);
+    };
+
+    // Blade parameters (matching original infinite-terrain)
+    const GRASS_WIDTH = 0.15;
+    const GRASS_HEIGHT = 1.15;
+    const SEGMENTS = 4;
+
+    // Random variations based on seed
+    const heightVar = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 0.4;  // 0.8 ~ 1.2
+    const bladeHeight = GRASS_HEIGHT * heightVar;
+
+    // Calculate positions using easeOut taper (like original)
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const indices: number[] = [];
+
+    for (let seg = 0; seg <= SEGMENTS; seg++) {
+      const heightPercent = seg / SEGMENTS;
+      const y = heightPercent * bladeHeight;
+
+      // Width taper using easeOut (matching original)
+      const widthFactor = easeOut(1.08 - heightPercent, 2.0);
+      const halfWidth = (GRASS_WIDTH * widthFactor) / 2;
+
+      if (seg === SEGMENTS) {
+        // Top vertex - single point (tip of triangle)
+        positions.push(0, y, 0);
+        normals.push(0, 0, 1);
+      } else {
+        // Left and right vertices
+        positions.push(-halfWidth, y, 0);  // Left
+        normals.push(0, 0, 1);
+        positions.push(halfWidth, y, 0);   // Right
+        normals.push(0, 0, 1);
+      }
+    }
+
+    // Generate indices for triangle strip
+    for (let seg = 0; seg < SEGMENTS; seg++) {
+      const vi = seg * 2;
+      if (seg === SEGMENTS - 1) {
+        // Last segment connects to tip
+        const tipIndex = SEGMENTS * 2;
+        indices.push(vi, vi + 1, tipIndex);
+      } else {
+        // Regular quad (two triangles)
+        indices.push(vi, vi + 1, vi + 2);
+        indices.push(vi + 2, vi + 1, vi + 3);
+      }
+    }
+
+    const mesh = new Mesh("grass_blade_" + seed, this.scene);
+    const vertexData = new VertexData();
+    vertexData.positions = positions;
+    vertexData.indices = indices;
+    vertexData.normals = normals;
+    vertexData.applyToMesh(mesh);
+
+    // Set vertex color
+    setMeshVertexColor(mesh, 0.35, 0.55, 0.25);
+
+    return mesh;
   }
 
   /**
@@ -1051,51 +1228,52 @@ export class FoliageSystem {
   }
 
   /**
-   * Create a simple grass blade mesh
+   * Create a grass blade mesh with vertexID attribute (like original infinite-terrain)
+   * Position is calculated in shader based on vertexID
    */
   private createGrassBladeMesh(): Mesh {
+    const segments = 4;
+    const vertexCount = (segments + 1) * 2;  // 10 vertices per face
+    const totalVertices = vertexCount * 2;    // front + back = 20
+
     const positions: number[] = [];
-    const indices: number[] = [];
     const normals: number[] = [];
     const colors: number[] = [];
+    const vertexIDs: number[] = [];
+    const indices: number[] = [];
 
-    // Create 2 crossing quads for a grass clump (optimized from 3)
-    // backFaceCulling=false handles visibility from both sides
-    const bladeCount = 2;
-    const bladeWidth = 0.08;
-    const bladeHeight = 0.5;
+    // Front face vertices (vertexID 0-9)
+    for (let i = 0; i < vertexCount; i++) {
+      // Dummy position (0,0,0) - actual position calculated in shader
+      positions.push(0, 0, 0);
+      // Normal pointing forward
+      normals.push(0, 0, 1);
+      // Color with blade parameters: RGB for color, A for height (used in shader)
+      colors.push(0.30, 0.40, 0.18, 1.0);
+      // VertexID for shader calculation
+      vertexIDs.push(i);
+    }
 
-    for (let i = 0; i < bladeCount; i++) {
-      const angle = (i / bladeCount) * Math.PI;  // 0° and 90°
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
+    // Back face vertices (vertexID 10-19)
+    for (let i = 0; i < vertexCount; i++) {
+      positions.push(0, 0, 0);
+      normals.push(0, 0, -1);  // reversed normal
+      colors.push(0.30, 0.40, 0.18, 1.0);
+      vertexIDs.push(vertexCount + i);
+    }
 
-      const baseIdx = positions.length / 3;
+    // Front face indices
+    for (let i = 0; i < segments; i++) {
+      const vi = i * 2;
+      indices.push(vi, vi + 1, vi + 2);
+      indices.push(vi + 2, vi + 1, vi + 3);
+    }
 
-      // Four vertices per blade (2 triangles)
-      // Bottom left
-      positions.push(-bladeWidth * cos, 0, -bladeWidth * sin);
-      normals.push(sin, 0, -cos);
-      colors.push(0.22, 0.30, 0.14, 1.0);  // darker olive at base
-
-      // Bottom right
-      positions.push(bladeWidth * cos, 0, bladeWidth * sin);
-      normals.push(sin, 0, -cos);
-      colors.push(0.22, 0.30, 0.14, 1.0);
-
-      // Top right
-      positions.push(bladeWidth * cos * 0.3, bladeHeight, bladeWidth * sin * 0.3);
-      normals.push(sin, 0.2, -cos);
-      colors.push(0.35, 0.45, 0.22, 1.0);  // olive green at tip
-
-      // Top left
-      positions.push(-bladeWidth * cos * 0.3, bladeHeight, -bladeWidth * sin * 0.3);
-      normals.push(sin, 0.2, -cos);
-      colors.push(0.35, 0.45, 0.22, 1.0);
-
-      // Two triangles only (no back faces - backFaceCulling=false handles it)
-      indices.push(baseIdx, baseIdx + 1, baseIdx + 2);
-      indices.push(baseIdx, baseIdx + 2, baseIdx + 3);
+    // Back face indices (reversed winding)
+    for (let i = 0; i < segments; i++) {
+      const vi = vertexCount + i * 2;
+      indices.push(vi + 2, vi + 1, vi);
+      indices.push(vi + 3, vi + 1, vi + 2);
     }
 
     const mesh = new Mesh("grass_base", this.scene);
@@ -1105,6 +1283,9 @@ export class FoliageSystem {
     vertexData.normals = normals;
     vertexData.colors = colors;
     vertexData.applyToMesh(mesh);
+
+    // Add vertexID as custom attribute (stride=1 for single float per vertex)
+    mesh.setVerticesData("vertexID", vertexIDs, false, 1);
 
     return mesh;
   }
@@ -1194,6 +1375,8 @@ export class FoliageSystem {
           "uWindStrength",
           "uWindScale",
           "uWindSecondaryStrength",
+          "uWindMacroSpeed",
+          "uWindMicroSpeed",
           "uBladeThickness",
           "uWindDirection",
           "uCameraPosition",
@@ -1208,6 +1391,19 @@ export class FoliageSystem {
           "uAmbient",
           "uFogColor",
           "uFogDensity",
+          "uFlowersEnabled",
+          "uFlowerDensity",
+          "uFlowerNoiseScale",
+          "uFlowerHeightBoost",
+          "uFlowerTipStart",
+          "uFlowerBaseScale",
+          "uFlowerExpand",
+          "uFlowerColorA",
+          "uFlowerColorB",
+          "uFlowerColorC",
+          "uFlowerColorD",
+          "uGrassBaseColor",
+          "uGrassTopColor",
         ],
         needAlphaBlending: false,
       }
@@ -1228,6 +1424,14 @@ export class FoliageSystem {
       DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.windSecondaryStrength
     );
     this.grassMaterial.setFloat(
+      "uWindMacroSpeed",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassMacroSpeed
+    );
+    this.grassMaterial.setFloat(
+      "uWindMicroSpeed",
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassMicroSpeed
+    );
+    this.grassMaterial.setFloat(
       "uBladeThickness",
       DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.bladeThickness
     );
@@ -1242,6 +1446,12 @@ export class FoliageSystem {
     this.grassMaterial.setVector3("uSunDirection", new Vector3(0.5, 1, 0.5).normalize());
     this.grassMaterial.setColor3("uSunColor", new Color3(1, 0.95, 0.8));
     this.grassMaterial.setFloat("uAmbient", 0.4);
+
+    // Grass color gradient (matching original infinite-terrain)
+    // colorBase: '#396c18' = rgb(57, 108, 24) / 255
+    // colorTop: '#77aa1a' = rgb(119, 170, 26) / 255
+    this.grassMaterial.setColor3("uGrassBaseColor", new Color3(57/255, 108/255, 24/255));
+    this.grassMaterial.setColor3("uGrassTopColor", new Color3(119/255, 170/255, 26/255));
 
     // Default fog values (will be synced with scene fog when game mode is enabled)
     this.grassMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
@@ -1268,6 +1478,32 @@ export class FoliageSystem {
     this.grassMaterial.setInt(
       "uDitherMode",
       DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.ditherMode
+    );
+
+    // Flower uniforms
+    const flowerProfile = DEFAULT_FOLIAGE_QUALITY_PROFILE.flower;
+    this.grassMaterial.setFloat("uFlowersEnabled", flowerProfile.enabled ? 1.0 : 0.0);
+    this.grassMaterial.setFloat("uFlowerDensity", flowerProfile.density);
+    this.grassMaterial.setFloat("uFlowerNoiseScale", flowerProfile.noiseScale);
+    this.grassMaterial.setFloat("uFlowerHeightBoost", flowerProfile.heightBoost);
+    this.grassMaterial.setFloat("uFlowerTipStart", flowerProfile.tipStart);
+    this.grassMaterial.setFloat("uFlowerBaseScale", flowerProfile.baseScale);
+    this.grassMaterial.setFloat("uFlowerExpand", flowerProfile.expand);
+    this.grassMaterial.setColor3(
+      "uFlowerColorA",
+      new Color3(flowerProfile.colorA.r, flowerProfile.colorA.g, flowerProfile.colorA.b)
+    );
+    this.grassMaterial.setColor3(
+      "uFlowerColorB",
+      new Color3(flowerProfile.colorB.r, flowerProfile.colorB.g, flowerProfile.colorB.b)
+    );
+    this.grassMaterial.setColor3(
+      "uFlowerColorC",
+      new Color3(flowerProfile.colorC.r, flowerProfile.colorC.g, flowerProfile.colorC.b)
+    );
+    this.grassMaterial.setColor3(
+      "uFlowerColorD",
+      new Color3(flowerProfile.colorD.r, flowerProfile.colorD.g, flowerProfile.colorD.b)
     );
 
     // Grass needs both sides rendered (thin blades)
@@ -1850,22 +2086,21 @@ export class FoliageSystem {
       if (slope > config.slopeMax) continue;
 
       // Calculate scale with variation
-      const scaleBase = config.minScale + this.seededRandom() * (config.maxScale - config.minScale);
-      const suppressionScale = 1.0 - stoneInfluence * (DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression * 0.55);
-      const scale = Math.max(0.05, scaleBase * (0.8 + this.seededRandom() * 0.4) * suppressionScale);
+      // For grass, shader handles all transforms (rotation, scale, bending)
+      // Matrix only contains position (like original infinite-terrain's aInstancePosition)
+      // Skip scale/rotation here - shader uses hash-based randomization
+      const _unusedScaleBase = config.minScale + this.seededRandom() * (config.maxScale - config.minScale);
+      const _unusedSuppressionScale = 1.0 - stoneInfluence * (DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression * 0.55);
+      // Consume random values to maintain seed consistency
+      this.seededRandom(); // was scale variation
+      this.seededRandom(); // was rotationY
 
-      // Random rotation (Y axis only for grass)
-      const rotationY = this.seededRandom() * Math.PI * 2;
-
-      // Create transformation matrix using reusable objects
-      this._tempScale.set(scale, scale, scale);
+      // Create identity matrix with only translation (position)
+      // Scale=1, Rotation=identity - shader handles everything
+      this._tempScale.set(1, 1, 1);
       this._tempPosition.set(x, y + config.yOffset, z);
-      this._tempQuaternion.set(0, 0, 0, 1);  // Identity quaternion
-      Matrix.ComposeToRef(this._tempScale, this._tempQuaternion, this._tempPosition, this._tempMatrix);
-
-      // Apply Y rotation using reusable matrix
-      Matrix.RotationYToRef(rotationY, this._tempRotMatrixY);
-      this._tempRotMatrixY.multiplyToRef(this._tempMatrix, this._tempFinalMatrix);
+      this._tempQuaternion.set(0, 0, 0, 1);
+      Matrix.ComposeToRef(this._tempScale, this._tempQuaternion, this._tempPosition, this._tempFinalMatrix);
 
       // Select variation based on seeded random
       const variationIndex = Math.floor(this.seededRandom() * this.grassVariations.length);

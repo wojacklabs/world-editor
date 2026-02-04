@@ -20,6 +20,13 @@ export interface WindQualityProfile {
   bushStrength: number;
   treeStrength: number;
   biomeGrassStrength: number;
+  // Grass wind timing (FBM noise based)
+  grassMacroSpeed: number;
+  grassMicroSpeed: number;
+  // Props wind timing (sine wave based)
+  propsPrimarySpeed: number;
+  propsSecondarySpeed: number;
+  propsNoiseSpeed: number;
 }
 
 export interface FadeQualityProfile {
@@ -40,6 +47,20 @@ export interface GrassQualityProfile {
   stoneSuppressionStartWeight: number;
 }
 
+export interface FlowerProfile {
+  enabled: boolean;
+  density: number;
+  noiseScale: number;
+  heightBoost: number;
+  tipStart: number;
+  baseScale: number;
+  expand: number;
+  colorA: { r: number; g: number; b: number };
+  colorB: { r: number; g: number; b: number };
+  colorC: { r: number; g: number; b: number };
+  colorD: { r: number; g: number; b: number };
+}
+
 export interface FoliageQualityProfile {
   version: string;
   foliageProfileVersion: string;
@@ -49,6 +70,7 @@ export interface FoliageQualityProfile {
   wind: WindQualityProfile;
   fade: FadeQualityProfile;
   grass: GrassQualityProfile;
+  flower: FlowerProfile;
 }
 
 export interface WorldRenderingConfig {
@@ -81,7 +103,14 @@ export const DEFAULT_FOLIAGE_QUALITY_PROFILE: FoliageQualityProfile = {
     grassClumpStrength: 0.8,
     bushStrength: 0.4,
     treeStrength: 0.35,
-    biomeGrassStrength: 0.15,
+    biomeGrassStrength: 0.7,
+    // Grass wind timing (matching infinite-terrain)
+    grassMacroSpeed: 0.1,
+    grassMicroSpeed: 0.02,
+    // Props wind timing
+    propsPrimarySpeed: 0.5,
+    propsSecondarySpeed: 1.5,
+    propsNoiseSpeed: 0.2,
   },
   fade: {
     leafFadeStart: 45,
@@ -98,6 +127,19 @@ export const DEFAULT_FOLIAGE_QUALITY_PROFILE: FoliageQualityProfile = {
     ditherPixelSize: 1.0,
     stoneSuppression: 0.65,
     stoneSuppressionStartWeight: 0.22,
+  },
+  flower: {
+    enabled: true,
+    density: 0.15,
+    noiseScale: 0.03,
+    heightBoost: 0.35,
+    tipStart: 0.7,
+    baseScale: 0.6,
+    expand: 0.45,
+    colorA: { r: 0.9, g: 0.2, b: 0.3 },
+    colorB: { r: 1.0, g: 0.85, b: 0.2 },
+    colorC: { r: 0.6, g: 0.3, b: 0.8 },
+    colorD: { r: 1.0, g: 0.5, b: 0.2 },
   },
 };
 
