@@ -2,7 +2,7 @@
  * WorldLoader Package
  *
  * Independent library for loading world editor data
- * Can be used in any Babylon.js or Three.js project
+ * Can be used in any Three.js project
  *
  * @example
  * ```typescript

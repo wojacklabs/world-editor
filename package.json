@@ -15,10 +15,12 @@
     "@babylonjs/materials": "^8.45.3",
     "@babylonjs/serializers": "^8.45.3",
     "@recast-navigation/core": "^0.43.0",
+    "@types/three": "^0.182.0",
     "next": "16.1.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "recast-navigation": "^0.43.0",
+    "three": "^0.182.0",
     "zustand": "^5.0.9"
   },
   "devDependencies": {

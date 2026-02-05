@@ -1,10 +1,10 @@
 /**
- * FoliageRenderer - Independent foliage rendering for Babylon.js
+ * FoliageRenderer - Independent foliage rendering for Three.js
  *
  * Features:
  * - No editor logic dependency (Heightmap, SplatMap, dirty flags)
  * - Accepts pre-computed foliage data from WorldLoader
- * - Chunk-based ThinInstance management
+ * - Chunk-based InstancedMesh management
  * - Simple built-in meshes (can be customized)
  *
  * Usage:
@@ -19,45 +19,18 @@
  * ```
  */
 
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  Vector3,
-  Vector2,
-  VertexData,
-  VertexBuffer,
-  StandardMaterial,
-  ShaderMaterial,
-  Effect,
-  Color3,
-  Texture,
-  RawTexture,
-  Frustum,
-  Plane,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 import type { FoliageRendererOptions } from "./types";
-import { loadTextureWithFallback } from "../shared/rendering/TextureLoader";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../shared/foliage/FoliageQualityProfile";
 import { fbm3D, noise3D } from "../shared/math/NoiseUtils";
 
 // ============================================
-// Register Grass Shader (matching editor/FoliageSystem)
+// Grass Vertex Shader
+// Three.js InstancedMesh auto-injects: instanceMatrix, modelMatrix, viewMatrix, projectionMatrix
 // ============================================
 
-Effect.ShadersStore["loaderGrassVertexShader"] = `
-precision highp float;
-
-attribute vec3 position;
-attribute vec3 normal;
-attribute vec4 color;
-
-attribute vec4 world0;
-attribute vec4 world1;
-attribute vec4 world2;
-attribute vec4 world3;
-
-uniform mat4 viewProjection;
+const grassVertexShader = `
 uniform float uTime;
 uniform float uWindStrength;
 uniform float uWindScale;
@@ -70,15 +43,12 @@ uniform vec3 uCameraPosition;
 uniform float uLodFar;
 uniform float uVariationStrength;
 
-// Grass color uniforms (matching original infinite-terrain)
 uniform vec3 uGrassBaseColor;
 uniform vec3 uGrassTopColor;
 
-// Wind noise texture (pre-computed fbm for performance)
 uniform sampler2D uWindTexture;
-uniform float uWindTextureScale;  // terrain scale for UV mapping
+uniform float uWindTextureScale;
 
-// Grass blade constants (matching original infinite-terrain)
 #define GRASS_SEGMENTS 4
 #define GRASS_VERTICES 10
 #define GRASS_WIDTH 0.15
@@ -92,8 +62,6 @@ varying float vVariation;
 varying float vGrassX;
 varying float vHeightPercent;
 
-// EaseOut function for blade width tapering (isosceles triangle shape)
-// Clamp input to avoid undefined pow(negative, float) behavior
 float easeOut(float x, float t) {
     float clamped = clamp(1.0 - x, 0.0, 1.0);
     return 1.0 - pow(clamped, t);
@@ -107,12 +75,10 @@ float noise2D(vec2 p) {
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
-
     float a = hash2D(i);
     float b = hash2D(i + vec2(1.0, 0.0));
     float c = hash2D(i + vec2(0.0, 1.0));
     float d = hash2D(i + vec2(1.0, 1.0));
-
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -127,7 +93,6 @@ float fbm2D(vec2 p) {
     return value;
 }
 
-// Bezier curve functions for natural blade bending
 vec3 bezier(vec3 P0, vec3 P1, vec3 P2, vec3 P3, float t) {
     float mt = 1.0 - t;
     return mt*mt*mt*P0 + 3.0*mt*mt*t*P1 + 3.0*mt*t*t*P2 + t*t*t*P3;
@@ -138,14 +103,12 @@ vec3 bezierGrad(vec3 P0, vec3 P1, vec3 P2, vec3 P3, float t) {
     return 3.0*mt*mt*(P1-P0) + 6.0*mt*t*(P2-P1) + 3.0*t*t*(P3-P2);
 }
 
-// Rotation matrix around Y axis
 mat3 rotateY(float theta) {
     float c = cos(theta);
     float s = sin(theta);
     return mat3(vec3(c, 0, s), vec3(0, 1, 0), vec3(-s, 0, c));
 }
 
-// Rotation matrix around arbitrary axis
 mat3 rotateAxis(vec3 axis, float angle) {
     float s = sin(angle);
     float c = cos(angle);
@@ -158,95 +121,71 @@ mat3 rotateAxis(vec3 axis, float angle) {
 }
 
 void main() {
-    mat4 worldMatrix = mat4(world0, world1, world2, world3);
-    // worldPos is the blade base position (from instance matrix position)
-    vec4 worldPos = worldMatrix * vec4(0.0, 0.0, 0.0, 1.0);
-    vec3 grassBase = worldPos.xyz;
+    // Extract instance position from instanceMatrix (Three.js auto-injected)
+    vec3 grassBase = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
 
-    // Blade geometry from pre-calculated position (WebGPU compatible)
-    // position.x: -halfWidth to +halfWidth, position.y: 0 to bladeHeight
     float heightPercent = position.y / GRASS_HEIGHT;
-    float xSide = step(0.0, position.x);  // 0 = left, 1 = right
-    float zSide = -1.0;  // front face only (backFaceCulling = false)
+    float xSide = step(0.0, position.x);
+    float zSide = -1.0;
 
-    // Camera height extends LOD distance
     float cameraHeight = max(0.0, uCameraPosition.y - 10.0);
     float heightBonus = cameraHeight * 1.5;
     float effectiveLodFar = uLodFar + heightBonus;
 
-    // Distance for wind attenuation (no size scaling - perspective handles it naturally)
     float distanceToCamera = length(grassBase.xz - uCameraPosition.xz);
     float distanceRatio = distanceToCamera / effectiveLodFar;
-    float lodScale = 1.0;  // No artificial scaling - perspective already makes distant objects smaller
+    float lodScale = 1.0;
     float variation = (hash2D(grassBase.xz * 0.12) - 0.5) * uVariationStrength;
 
-    // Per-blade random height variation
     float randomHeight = (hash2D(grassBase.xz * 0.19) * 2.0 - 1.0) * 0.2;
 
-    // Blade dimensions
-    float grassHeight = 1.0;  // base height multiplier
+    float grassHeight = 1.0;
     float bladeWidth = GRASS_WIDTH * easeOut(1.08 - heightPercent, 2.0) * grassHeight;
     float bladeHeight = GRASS_HEIGHT * grassHeight + randomHeight;
 
-    // Local x position - use pre-calculated position.x (already has easeOut taper)
     float x = position.x;
 
-    // Wind attenuation: synced with grass LOD visibility
     float windScaleAtten = 1.0 - smoothstep(0.6, 0.9, distanceRatio);
     float heightWindAtten = 1.0 / (1.0 + cameraHeight * 0.03);
     vec2 windDir = normalize(uWindDirection);
 
-    // Texture-based wind (infinite-terrain style) - single sample, slow scroll
     vec2 windUV = grassBase.xz * 0.035 + windDir * uTime * 0.1;
     float windNoise = texture2D(uWindTexture, windUV).r * 2.0 - 1.0;
-    // Secondary flutter (higher frequency, very subtle)
     vec2 flutterUV = grassBase.xz * 0.08 + windDir * uTime * 0.15;
     float flutter = texture2D(uWindTexture, flutterUV).r * 0.15;
     float combinedWind = windNoise + flutter;
 
-    // Base lean factor (random per blade, range ±0.2 like original)
     float baseLean = (hash2D(grassBase.xz * 0.31) - 0.5) * 0.4;
 
-    // Wind animation
     float windStrengthNorm = combinedWind * uWindStrength * windScaleAtten * heightWindAtten;
     float leanAnimation = windStrengthNorm * 0.5;
     float leanFactor = baseLean + leanAnimation;
 
-    // Random rotation angle for each blade (range -PI/4 to PI/4)
     float angle = (hash2D(grassBase.xz * 0.23) - 0.5) * 1.5708;
 
-    // Wind axis and lean angle
     float windAngle = 0.6;
     vec3 windAxis = vec3(cos(windAngle), 0.0, sin(windAngle));
     float windLeanAngle = windStrengthNorm * heightPercent;
 
-    // Bezier control points with cos/sin curve for natural drooping
     vec3 p0 = vec3(0.0, 0.0, 0.0);
     vec3 p1 = vec3(0.0, 0.33, 0.0);
     vec3 p2 = vec3(0.0, 0.66, 0.0);
     vec3 p3 = vec3(0.0, cos(leanFactor), sin(leanFactor));
 
-    // Sample bezier curve
     vec3 curvePoint = bezier(p0, p1, p2, p3, heightPercent);
     vec3 curveGrad = bezierGrad(p0, p1, p2, p3, heightPercent);
 
-    // y and z from bezier curve
     float y = curvePoint.y * bladeHeight;
     float z = curvePoint.z * bladeHeight;
 
-    // Apply rotation matrices: wind lean + random Y rotation
     mat3 grassMat = rotateAxis(windAxis, windLeanAngle) * rotateY(angle);
     vec3 grassLocalPosition = grassMat * vec3(x, y, z);
 
-    // Normal from bezier gradient (rotate 90 degrees in YZ plane)
     mat2 curveRot90 = mat2(0.0, 1.0, -1.0, 0.0) * -zSide;
     vec3 grassLocalNormal = grassMat * vec3(0.0, curveRot90 * curveGrad.yz);
 
-    // Final world position
     vec3 finalPos = grassBase + grassLocalPosition * lodScale;
 
-    // View-space thickening for grazing angles
-    // Use grassBase (blade base position) for viewDir, not finalPos (like original)
     vec3 viewDir = normalize(uCameraPosition - grassBase);
     vec3 grassFaceNormal = grassMat * vec3(0.0, 0.0, -zSide);
     float viewDotNormal = clamp(dot(grassFaceNormal, viewDir), 0.0, 1.0);
@@ -258,28 +197,25 @@ void main() {
     } else {
         viewRight = normalize(viewRight);
     }
-    // Apply thickening along viewRight direction (camera-aligned, like original)
     finalPos += viewRight * viewSpaceThickenFactor * (xSide - 0.5) * bladeWidth * 0.5 * -zSide * lodScale;
 
     vWorldPosition = finalPos;
     vHeight = heightPercent * bladeHeight * lodScale * (1.0 + variation * 0.15);
     vVariation = variation;
 
-    gl_Position = viewProjection * vec4(finalPos, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * vec4(finalPos, 1.0);
 
-    // Distance normal blend: fade curve normal to up vector at distance
     float distanceBlend = smoothstep(0.0, 10.0, distanceToCamera);
     vec3 blendedNormal = mix(grassLocalNormal, vec3(0.0, 1.0, 0.0), distanceBlend * 0.5);
     vNormal = normalize(blendedNormal);
 
-    // Color gradient from base to top (matching original infinite-terrain)
     vColor = mix(uGrassBaseColor, uGrassTopColor, heightPercent);
-    vGrassX = x;  // Local x position for edge darkening in fragment shader
+    vGrassX = x;
     vHeightPercent = heightPercent;
 }
 `;
 
-Effect.ShadersStore["loaderGrassFragmentShader"] = `
+const grassFragmentShader = `
 precision highp float;
 
 varying vec3 vNormal;
@@ -335,7 +271,6 @@ float fbm(vec3 p) {
     return value;
 }
 
-// Hemisphere lighting: blend between ground and sky color based on normal Y
 vec3 hemiLight(vec3 normal, vec3 groundColor, vec3 skyColor) {
     return mix(groundColor, skyColor, 0.5 * normal.y + 0.5);
 }
@@ -396,12 +331,10 @@ void main() {
     vec3 normal = normalize(vNormal);
     vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
 
-    // Hemisphere ambient lighting
     vec3 skyColor = vec3(1.0, 1.0, 0.75);
     vec3 groundColor = vec3(0.05, 0.05, 0.25);
     vec3 ambientLighting = hemiLight(normal, groundColor, skyColor);
 
-    // Directional light (wrapped Lambert with backlight scatter)
     vec3 lightDir = normalize(vec3(1.0, 0.5, 1.0));
     float wrap = 0.5;
     float dotNL = clamp((dot(normal, lightDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
@@ -409,10 +342,8 @@ void main() {
     vec3 scatter = vec3(pow(backlight, 2.0));
     vec3 diffuseLighting = (vec3(dotNL) + scatter) * uSunColor;
 
-    // Final lighting mix (matching original: 20% diffuse, 80% ambient)
     vec3 lighting = diffuseLighting * 0.2 + ambientLighting * 0.8;
 
-    // Apply lighting to color (matching original - no edge darkening)
     vec3 color = vColor * lighting;
 
     float distanceToCamera = length(vWorldPosition - uCameraPosition);
@@ -420,11 +351,9 @@ void main() {
     float dither = sampleDitherThreshold(gl_FragCoord.xy);
     if (dither > clamp(fadeAlpha, 0.0, 1.0)) discard;
 
-    // Fog
     float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
     color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping and gamma (matching original infinite-terrain)
     color = color / (color + vec3(1.0)) * 1.1;
     color = pow(color, vec3(0.95));
 
@@ -432,19 +361,27 @@ void main() {
 }
 `;
 
-function setMeshVertexColor(mesh: Mesh, r: number, g: number, b: number): void {
-  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-  if (!positions) return;
+// ============================================
+// Helper: set vertex colors on BufferGeometry
+// ============================================
 
-  const vertexCount = positions.length / 3;
-  const colors = new Float32Array(vertexCount * 4);
-  for (let i = 0; i < vertexCount; i++) {
+function setGeometryVertexColor(
+  geometry: THREE.BufferGeometry,
+  r: number,
+  g: number,
+  b: number
+): void {
+  const posAttr = geometry.attributes.position;
+  if (!posAttr) return;
+  const count = posAttr.count;
+  const colors = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) {
     colors[i * 4] = r;
     colors[i * 4 + 1] = g;
     colors[i * 4 + 2] = b;
     colors[i * 4 + 3] = 1;
   }
-  mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
 }
 
 // ============================================
@@ -454,7 +391,7 @@ function setMeshVertexColor(mesh: Mesh, r: number, g: number, b: number): void {
 interface FoliageChunk {
   x: number;
   z: number;
-  meshes: Map<string, Mesh>;
+  meshes: Map<string, THREE.InstancedMesh>;
   instanceCounts: Map<string, number>;
 }
 
@@ -481,41 +418,30 @@ type NormalizedFoliageRendererOptions = {
 // ============================================
 
 export class FoliageRenderer {
-  private scene: Scene;
+  private scene: THREE.Scene;
   private options: NormalizedFoliageRendererOptions;
 
-  // Chunk management
   private chunks: Map<string, FoliageChunk> = new Map();
+  private baseGeometries: Map<string, THREE.BufferGeometry> = new Map();
+  private baseMaterials: Map<string, THREE.Material> = new Map();
 
-  // Base meshes for each foliage type
-  private baseMeshes: Map<string, Mesh> = new Map();
+  private grassMaterial: THREE.ShaderMaterial | null = null;
+  private rockMaterial: THREE.MeshStandardMaterial | null = null;
+  private treeMaterial: THREE.MeshStandardMaterial | null = null;
+  private flowerMaterial: THREE.MeshStandardMaterial | null = null;
+  private bushMaterial: THREE.MeshStandardMaterial | null = null;
 
-  // Materials
-  private grassMaterial: ShaderMaterial | null = null;
-  private rockMaterial: ShaderMaterial | null = null;
-  private treeMaterial: StandardMaterial | null = null;
-  private flowerMaterial: StandardMaterial | null = null;
-  private bushMaterial: StandardMaterial | null = null;
-
-  // Time tracking for wind animation
-  private startTime: number = Date.now();
-  private beforeRenderObserver: ReturnType<typeof Scene.prototype.onBeforeRenderObservable.add> | null = null;
-
-  // Statistics
   private totalInstances: number = 0;
 
-  // Wind noise texture for GPU-efficient wind animation
-  private windNoiseTexture: RawTexture | null = null;
+  private windNoiseTexture: THREE.DataTexture | null = null;
   private readonly WIND_TEXTURE_SIZE = 256;
 
-  // Frustum culling for performance optimization
-  private frustumPlanesCache: Plane[] = [];
-  private lastFrustumUpdateFrame = -1;
+  private frustum = new THREE.Frustum();
+  private vpMatrix = new THREE.Matrix4();
 
-  // Terrain scale for wind texture (set when loading tile)
   private terrainScale: number = 256;
 
-  constructor(scene: Scene, options: FoliageRendererOptions = {}) {
+  constructor(scene: THREE.Scene, options: FoliageRendererOptions = {}) {
     this.scene = scene;
     this.options = {
       chunkSize: options.chunkSize ?? 16,
@@ -527,19 +453,13 @@ export class FoliageRenderer {
     };
 
     this.createMaterials();
-    this.createBaseMeshes();
+    this.createBaseGeometries();
   }
 
   // ============================================
   // Public API
   // ============================================
 
-  /**
-   * Load foliage data from DecodedTileData.foliage
-   * @param foliageData Map of type name to matrix buffer (from WorldLoader)
-   * @param offsetX World X offset (for multi-tile)
-   * @param offsetZ World Z offset (for multi-tile)
-   */
   loadTile(
     foliageData: Map<string, Float32Array>,
     offsetX: number = 0,
@@ -548,13 +468,11 @@ export class FoliageRenderer {
     for (const [typeName, matrices] of foliageData) {
       if (matrices.length === 0) continue;
 
-      // Apply offset if needed
       const offsetMatrices =
         offsetX !== 0 || offsetZ !== 0
           ? this.applyOffset(matrices, offsetX, offsetZ)
           : matrices;
 
-      // Group by chunk and create meshes
       this.loadTypeInstances(typeName, offsetMatrices);
     }
 
@@ -563,10 +481,6 @@ export class FoliageRenderer {
     );
   }
 
-  /**
-   * Load foliage from serialized format (Record<string, string>)
-   * Convenience method that decodes Base64 internally
-   */
   loadTileFromSerialized(
     foliageData: Record<string, string>,
     offsetX: number = 0,
@@ -579,104 +493,79 @@ export class FoliageRenderer {
     this.loadTile(decoded, offsetX, offsetZ);
   }
 
-  /**
-   * Unload a specific chunk
-   */
   unloadChunk(chunkX: number, chunkZ: number): void {
     const key = `${chunkX}_${chunkZ}`;
     const chunk = this.chunks.get(key);
     if (!chunk) return;
 
     for (const mesh of chunk.meshes.values()) {
-      this.totalInstances -= mesh.thinInstanceCount;
-      mesh.dispose();
+      this.totalInstances -= mesh.count;
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
     }
     this.chunks.delete(key);
   }
 
   /**
-   * Update frustum planes cache (call once per frame before visibility check)
+   * Update time uniform for wind animation. Call from render loop.
    */
-  private updateFrustumPlanes(): void {
-    const frameNumber = this.scene.getFrameId();
-    if (this.lastFrustumUpdateFrame === frameNumber) return;
-
-    const camera = this.scene.activeCamera;
-    if (!camera) return;
-
-    // Get view-projection matrix
-    const viewMatrix = camera.getViewMatrix();
-    const projMatrix = camera.getProjectionMatrix();
-    const vpMatrix = viewMatrix.multiply(projMatrix);
-
-    // Extract frustum planes
-    this.frustumPlanesCache = Frustum.GetPlanes(vpMatrix);
-    this.lastFrustumUpdateFrame = frameNumber;
-  }
-
-  /**
-   * Check if a chunk is inside the camera frustum
-   */
-  private isChunkInFrustum(chunkCenterX: number, chunkCenterY: number, chunkCenterZ: number): boolean {
-    if (this.frustumPlanesCache.length === 0) return true;
-
-    // Chunk bounding sphere radius
-    const radius = this.options.chunkSize * 0.7071;
-
-    for (const plane of this.frustumPlanesCache) {
-      const distance = plane.normal.x * chunkCenterX +
-                       plane.normal.y * chunkCenterY +
-                       plane.normal.z * chunkCenterZ +
-                       plane.d;
-      if (distance < -radius) {
-        return false;
-      }
+  updateTime(time: number): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.uniforms.uTime.value = time;
     }
-    return true;
   }
 
   /**
-   * Update visibility based on camera position (frustum culling only - no distance culling)
+   * Update camera position uniform. Call from render loop.
    */
-  updateVisibility(cameraPosition: Vector3): void {
+  updateCamera(cameraPosition: THREE.Vector3): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.uniforms.uCameraPosition.value.copy(cameraPosition);
+    }
+  }
+
+  /**
+   * Update visibility based on camera (frustum culling).
+   */
+  updateVisibility(camera: THREE.Camera): void {
     if (!this.options.lodEnabled) return;
 
     const chunkSize = this.options.chunkSize;
 
-    // Update frustum planes for culling
-    this.updateFrustumPlanes();
+    // Update frustum
+    this.vpMatrix.multiplyMatrices(
+      camera.projectionMatrix,
+      camera.matrixWorldInverse
+    );
+    this.frustum.setFromProjectionMatrix(this.vpMatrix);
+
+    const sphere = new THREE.Sphere();
+    const radius = chunkSize * 0.7071;
 
     for (const [_key, chunk] of this.chunks) {
-      const chunkCenterX = (chunk.x + 0.5) * chunkSize;
-      const chunkCenterZ = (chunk.z + 0.5) * chunkSize;
-      const chunkCenterY = cameraPosition.y * 0.5;
+      const cx = (chunk.x + 0.5) * chunkSize;
+      const cz = (chunk.z + 0.5) * chunkSize;
+      const cy = camera.position.y * 0.5;
 
-      // Frustum culling only (no distance-based hiding)
-      const visible = this.isChunkInFrustum(chunkCenterX, chunkCenterY, chunkCenterZ);
+      sphere.center.set(cx, cy, cz);
+      sphere.radius = radius;
+
+      const visible = this.frustum.intersectsSphere(sphere);
 
       for (const mesh of chunk.meshes.values()) {
-        mesh.setEnabled(visible);
+        mesh.visible = visible;
       }
     }
   }
 
-  /**
-   * Get total instance count
-   */
   getTotalInstances(): number {
     return this.totalInstances;
   }
 
-  /**
-   * Get chunk count
-   */
   getChunkCount(): number {
     return this.chunks.size;
   }
 
-  /**
-   * Get statistics
-   */
   getStats(): { chunks: number; instances: number; types: string[] } {
     const types = new Set<string>();
     for (const chunk of this.chunks.values()) {
@@ -691,74 +580,46 @@ export class FoliageRenderer {
     };
   }
 
-  /**
-   * Set custom base mesh for a foliage type
-   */
-  setBaseMesh(typeName: string, mesh: Mesh): void {
-    this.baseMeshes.set(typeName, mesh);
+  setBaseMesh(typeName: string, geometry: THREE.BufferGeometry): void {
+    this.baseGeometries.set(typeName, geometry);
   }
 
-  /**
-   * Set sun direction for grass shader lighting
-   */
-  setSunDirection(direction: Vector3): void {
+  setSunDirection(direction: THREE.Vector3): void {
     if (this.grassMaterial) {
-      this.grassMaterial.setVector3("uSunDirection", direction.normalize());
-    }
-    if (this.rockMaterial) {
-      this.rockMaterial.setVector3("uSunDirection", direction.normalize());
+      this.grassMaterial.uniforms.uSunDirection.value.copy(
+        direction.clone().normalize()
+      );
     }
   }
 
-  /**
-   * Set fog parameters for grass shader
-   */
-  setFog(color: Color3, density: number): void {
+  setFog(color: THREE.Color, density: number): void {
     if (this.grassMaterial) {
-      this.grassMaterial.setColor3("uFogColor", color);
-      this.grassMaterial.setFloat("uFogDensity", density);
-    }
-    if (this.rockMaterial) {
-      this.rockMaterial.setColor3("uFogColor", color);
-      this.rockMaterial.setFloat("uFogDensity", density);
+      this.grassMaterial.uniforms.uFogColor.value.copy(color);
+      this.grassMaterial.uniforms.uFogDensity.value = density;
     }
   }
 
-  /**
-   * Set wind strength for grass animation
-   */
   setWindStrength(strength: number): void {
     if (this.grassMaterial) {
-      this.grassMaterial.setFloat("uWindStrength", strength);
+      this.grassMaterial.uniforms.uWindStrength.value = strength;
     }
   }
 
-  /**
-   * Dispose all resources
-   */
   dispose(): void {
-    // Remove render observer
-    if (this.beforeRenderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.beforeRenderObserver);
-      this.beforeRenderObserver = null;
-    }
-
-    // Dispose all chunk meshes
     for (const chunk of this.chunks.values()) {
       for (const mesh of chunk.meshes.values()) {
-        mesh.dispose();
+        this.scene.remove(mesh);
+        mesh.geometry.dispose();
       }
     }
     this.chunks.clear();
     this.totalInstances = 0;
 
-    // Dispose base meshes
-    for (const mesh of this.baseMeshes.values()) {
-      mesh.dispose();
+    for (const geo of this.baseGeometries.values()) {
+      geo.dispose();
     }
-    this.baseMeshes.clear();
+    this.baseGeometries.clear();
 
-    // Dispose materials
     this.grassMaterial?.dispose();
     this.rockMaterial?.dispose();
     this.treeMaterial?.dispose();
@@ -770,7 +631,6 @@ export class FoliageRenderer {
     this.flowerMaterial = null;
     this.bushMaterial = null;
 
-    // Dispose wind texture
     if (this.windNoiseTexture) {
       this.windNoiseTexture.dispose();
       this.windNoiseTexture = null;
@@ -782,222 +642,87 @@ export class FoliageRenderer {
   // ============================================
 
   private createMaterials(): void {
-    const foliageProfileVersion =
-      this.options.renderingProfile?.foliageProfileVersion ??
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.foliageProfileVersion;
-
-    // Grass material - ShaderMaterial with wind animation and dither fade.
-    this.grassMaterial = new ShaderMaterial(
-      `loaderGrass_${foliageProfileVersion}`,
-      this.scene,
-      {
-        vertex: "loaderGrass",
-        fragment: "loaderGrass",
-      },
-      {
-        attributes: ["position", "normal", "color"],
-        uniforms: [
-          "viewProjection",
-          "uTime",
-          "uWindStrength",
-          "uWindScale",
-          "uWindSecondaryStrength",
-          "uWindMacroSpeed",
-          "uWindMicroSpeed",
-          "uBladeThickness",
-          "uWindDirection",
-          "uCameraPosition",
-          "uLodFar",
-          "uVariationStrength",
-          "uFadeStart",
-          "uFadeEnd",
-          "uDitherPixelSize",
-          "uDitherMode",
-          "uSunDirection",
-          "uSunColor",
-          "uAmbient",
-          "uFogColor",
-          "uFogDensity",
-          "uGrassBaseColor",
-          "uGrassTopColor",
-          "uWindTextureScale",
-        ],
-        samplers: ["uWindTexture"],
-        needAlphaBlending: false,
-        needAlphaTesting: true,
-      }
-    );
-    this.grassMaterial.backFaceCulling = false;
-
-    // Create and set wind texture
     this.createWindTexture();
-    if (this.windNoiseTexture) {
-      this.grassMaterial.setTexture("uWindTexture", this.windNoiseTexture);
-    }
-    this.grassMaterial.setFloat("uWindTextureScale", this.terrainScale);
 
-    this.grassMaterial.setFloat("uTime", 0);
-    this.grassMaterial.setFloat(
-      "uWindStrength",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.biomeGrassStrength
-    );
-    this.grassMaterial.setFloat(
-      "uWindScale",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.windScale
-    );
-    this.grassMaterial.setFloat(
-      "uWindSecondaryStrength",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.windSecondaryStrength
-    );
-    this.grassMaterial.setFloat(
-      "uWindMacroSpeed",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassMacroSpeed
-    );
-    this.grassMaterial.setFloat(
-      "uWindMicroSpeed",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassMicroSpeed
-    );
-    this.grassMaterial.setFloat(
-      "uBladeThickness",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.bladeThickness
-    );
-    this.grassMaterial.setVector2(
-      "uWindDirection",
-      new Vector2(
-        Math.cos(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians),
-        Math.sin(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians)
-      )
-    );
-    this.grassMaterial.setVector3(
-      "uCameraPosition",
-      this.scene.activeCamera?.position ?? new Vector3(0, 10, 0)
-    );
-    this.grassMaterial.setFloat("uLodFar", this.options.lodDistances.far);
-    this.grassMaterial.setFloat(
-      "uVariationStrength",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeVariationStrength
-    );
-    this.grassMaterial.setFloat(
-      "uFadeStart",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeGrassFadeStart
-    );
-    this.grassMaterial.setFloat(
-      "uFadeEnd",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeGrassFadeEnd
-    );
-    this.grassMaterial.setFloat(
-      "uDitherPixelSize",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.ditherPixelSize
-    );
-    this.grassMaterial.setInt(
-      "uDitherMode",
-      DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.ditherMode
-    );
+    const prof = DEFAULT_FOLIAGE_QUALITY_PROFILE;
 
-    // Grass color gradient (matching original infinite-terrain)
-    // colorBase: '#396c18' = rgb(57, 108, 24) / 255
-    // colorTop: '#77aa1a' = rgb(119, 170, 26) / 255
-    this.grassMaterial.setColor3("uGrassBaseColor", new Color3(57/255, 108/255, 24/255));
-    this.grassMaterial.setColor3("uGrassTopColor", new Color3(119/255, 170/255, 26/255));
-
-    this.grassMaterial.setVector3("uSunDirection", new Vector3(-0.5, 0.8, -0.3).normalize());
-    this.grassMaterial.setColor3("uSunColor", new Color3(1.0, 0.95, 0.85));
-    this.grassMaterial.setFloat("uAmbient", 0.4);
-    this.grassMaterial.setColor3("uFogColor", new Color3(0.55, 0.7, 0.9));
-    this.grassMaterial.setFloat("uFogDensity", this.scene.fogDensity ?? 0.008);
-
-    // Setup time + camera updates for wind animation and fog.
-    this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      const camera = this.scene.activeCamera;
-      const elapsed = (Date.now() - this.startTime) / 1000;
-      if (this.grassMaterial) {
-        this.grassMaterial.setFloat("uTime", elapsed);
-        if (camera) {
-          this.grassMaterial.setVector3("uCameraPosition", camera.position);
-        }
-      }
-      if (this.rockMaterial && camera) {
-        this.rockMaterial.setVector3("uCameraPosition", camera.position);
-      }
-    });
-
-    // Rock material - same triplanar shader path as editor foliage rocks.
-    this.rockMaterial = new ShaderMaterial(
-      `loaderRock_${foliageProfileVersion}`,
-      this.scene,
-      {
-        vertex: "rock",
-        fragment: "rock",
+    this.grassMaterial = new THREE.ShaderMaterial({
+      vertexShader: grassVertexShader,
+      fragmentShader: grassFragmentShader,
+      uniforms: {
+        uTime: { value: 0 },
+        uWindStrength: { value: prof.wind.biomeGrassStrength },
+        uWindScale: { value: prof.grass.windScale },
+        uWindSecondaryStrength: { value: prof.grass.windSecondaryStrength },
+        uWindMacroSpeed: { value: prof.wind.grassMacroSpeed },
+        uWindMicroSpeed: { value: prof.wind.grassMicroSpeed },
+        uBladeThickness: { value: prof.grass.bladeThickness },
+        uWindDirection: {
+          value: new THREE.Vector2(
+            Math.cos(prof.wind.directionRadians),
+            Math.sin(prof.wind.directionRadians)
+          ),
+        },
+        uCameraPosition: { value: new THREE.Vector3(0, 10, 0) },
+        uLodFar: { value: this.options.lodDistances.far },
+        uVariationStrength: { value: prof.fade.biomeVariationStrength },
+        uFadeStart: { value: prof.fade.biomeGrassFadeStart },
+        uFadeEnd: { value: prof.fade.biomeGrassFadeEnd },
+        uDitherPixelSize: { value: prof.grass.ditherPixelSize },
+        uDitherMode: { value: prof.grass.ditherMode },
+        uGrassBaseColor: { value: new THREE.Color(57 / 255, 108 / 255, 24 / 255) },
+        uGrassTopColor: { value: new THREE.Color(119 / 255, 170 / 255, 26 / 255) },
+        uSunDirection: { value: new THREE.Vector3(-0.5, 0.8, -0.3).normalize() },
+        uSunColor: { value: new THREE.Color(1.0, 0.95, 0.85) },
+        uAmbient: { value: 0.4 },
+        uFogColor: { value: new THREE.Color(0.55, 0.7, 0.9) },
+        uFogDensity: { value: 0.008 },
+        uWindTexture: { value: this.windNoiseTexture },
+        uWindTextureScale: { value: this.terrainScale },
       },
-      {
-        attributes: ["position", "normal"],
-        uniforms: [
-          "viewProjection",
-          "uCameraPosition",
-          "uSunDirection",
-          "uSunColor",
-          "uAmbient",
-          "uDiffuseColor",
-          "uSpecularColor",
-          "uFogColor",
-          "uFogDensity",
-          "uFogHeightFalloff",
-          "uFogHeightDensity",
-          "textureScale",
-        ],
-        samplers: ["rockTexture"],
-      }
-    );
-
-    this.rockMaterial.setVector3("uCameraPosition", new Vector3(0, 0, 0));
-    this.rockMaterial.setVector3("uSunDirection", new Vector3(0.5, 1, 0.5).normalize());
-    this.rockMaterial.setColor3("uSunColor", new Color3(1, 0.95, 0.8));
-    this.rockMaterial.setFloat("uAmbient", 0.4);
-    this.rockMaterial.setColor3("uDiffuseColor", new Color3(0.5, 0.48, 0.45));
-    this.rockMaterial.setColor3("uSpecularColor", new Color3(0.1, 0.1, 0.1));
-    this.rockMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
-    this.rockMaterial.setFloat("uFogDensity", this.scene.fogDensity ?? 0.008);
-    this.rockMaterial.setFloat("uFogHeightFalloff", 5.0);
-    this.rockMaterial.setFloat("uFogHeightDensity", 0.1);
-
-    const rockTexturePath =
-      this.options.textureUrls?.rock ?? DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock;
-    const rockTex = loadTextureWithFallback(this.scene, rockTexturePath, {
-      preferredExtensions: ["ktx2", "jpg", "png"],
-      wrapU: Texture.WRAP_ADDRESSMODE,
-      wrapV: Texture.WRAP_ADDRESSMODE,
-      anisotropicFilteringLevel: 8,
+      side: THREE.DoubleSide,
     });
-    this.rockMaterial.setTexture("rockTexture", rockTex);
-    this.rockMaterial.setFloat("textureScale", 1.0);
-    this.rockMaterial.backFaceCulling = false;
 
-    // Tree material - keep simple shaded material for biome compatibility.
-    this.treeMaterial = new StandardMaterial("foliageTree", this.scene);
-    this.treeMaterial.diffuseColor = new Color3(1, 1, 1);
-    this.treeMaterial.backFaceCulling = false;
-    this.treeMaterial.specularColor = new Color3(0.05, 0.05, 0.05);
+    this.baseMaterials.set("grass", this.grassMaterial);
 
-    this.flowerMaterial = new StandardMaterial("foliageFlower", this.scene);
-    this.flowerMaterial.diffuseColor = new Color3(1, 1, 1);
-    this.flowerMaterial.backFaceCulling = false;
-    this.flowerMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
+    this.rockMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0.5, 0.48, 0.45),
+      roughness: 0.85,
+      metalness: 0.0,
+      side: THREE.DoubleSide,
+    });
+    this.baseMaterials.set("rock", this.rockMaterial);
+    this.baseMaterials.set("pebble", this.rockMaterial);
 
-    this.bushMaterial = new StandardMaterial("foliageBush", this.scene);
-    this.bushMaterial.diffuseColor = new Color3(1, 1, 1);
-    this.bushMaterial.backFaceCulling = false;
-    this.bushMaterial.specularColor = new Color3(0.05, 0.05, 0.05);
+    this.treeMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(1, 1, 1),
+      roughness: 0.8,
+      side: THREE.DoubleSide,
+      vertexColors: true,
+    });
+    this.baseMaterials.set("tree", this.treeMaterial);
+
+    this.flowerMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(1, 1, 1),
+      roughness: 0.7,
+      side: THREE.DoubleSide,
+      vertexColors: true,
+    });
+    this.baseMaterials.set("flower", this.flowerMaterial);
+
+    this.bushMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(1, 1, 1),
+      roughness: 0.8,
+      side: THREE.DoubleSide,
+      vertexColors: true,
+    });
+    this.baseMaterials.set("bush", this.bushMaterial);
   }
 
-  /**
-   * Create wind noise texture for GPU-efficient wind animation
-   * Pre-computes tileable fbm2D noise to replace per-vertex fbm calculations
-   */
   private createWindTexture(): void {
     const size = this.WIND_TEXTURE_SIZE;
-    const data = new Uint8Array(size * size * 4);  // RGBA
+    const data = new Uint8Array(size * size * 4);
 
-    // Generate tileable fbm2D noise
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
         const nx = x / size;
@@ -1010,14 +735,16 @@ export class FoliageRenderer {
         let py = ny * 4;
 
         for (let i = 0; i < 3; i++) {
-          const noiseVal = this.tileableNoise2D(px * frequency, py * frequency, 4);
+          const noiseVal = this.tileableNoise2D(
+            px * frequency,
+            py * frequency,
+            4
+          );
           value += amplitude * noiseVal;
           frequency *= 2.02;
           amplitude *= 0.5;
         }
 
-        // Store raw fbm value (0 to ~0.875) directly
-        // Shader will transform with * 2.0 - 1.0 to get proper -1 to +0.75 range
         const byteVal = Math.floor(Math.min(1, value) * 255);
         const idx = (y * size + x) * 4;
         data[idx] = byteVal;
@@ -1027,17 +754,18 @@ export class FoliageRenderer {
       }
     }
 
-    this.windNoiseTexture = RawTexture.CreateRGBATexture(
+    this.windNoiseTexture = new THREE.DataTexture(
       data,
       size,
       size,
-      this.scene,
-      false,
-      false,
-      Texture.TRILINEAR_SAMPLINGMODE
+      THREE.RGBAFormat
     );
-    this.windNoiseTexture.wrapU = Texture.WRAP_ADDRESSMODE;
-    this.windNoiseTexture.wrapV = Texture.WRAP_ADDRESSMODE;
+    this.windNoiseTexture.wrapS = THREE.RepeatWrapping;
+    this.windNoiseTexture.wrapT = THREE.RepeatWrapping;
+    this.windNoiseTexture.minFilter = THREE.LinearMipmapLinearFilter;
+    this.windNoiseTexture.magFilter = THREE.LinearFilter;
+    this.windNoiseTexture.generateMipmaps = true;
+    this.windNoiseTexture.needsUpdate = true;
   }
 
   private tileableNoise2D(x: number, y: number, period: number): number {
@@ -1064,68 +792,46 @@ export class FoliageRenderer {
     return n - Math.floor(n);
   }
 
-  private createBaseMeshes(): void {
-    // Procedural grass mesh (isosceles triangle shape like original infinite-terrain)
-    const grassMesh = this.generateIsoscelesGrassBlade(2000);
-    grassMesh.material = this.grassMaterial;
-    grassMesh.isVisible = false;
-    this.baseMeshes.set("grass", grassMesh);
+  private createBaseGeometries(): void {
+    // Grass blade
+    const grassGeo = this.generateIsoscelesGrassBlade(2000);
+    this.baseGeometries.set("grass", grassGeo);
 
-    // Procedural rock mesh (editor-quality with shape variations)
-    const rockMesh = this.generateProceduralRock(1000);
-    rockMesh.material = this.rockMaterial;
-    rockMesh.isVisible = false;
-    this.baseMeshes.set("rock", rockMesh);
+    // Rock
+    const rockGeo = this.generateProceduralRock(1000);
+    this.baseGeometries.set("rock", rockGeo);
 
-    // Procedural tree mesh (trunk + foliage layers)
-    const treeMesh = this.generateProceduralTree(3000);
-    treeMesh.material = this.treeMaterial;
-    treeMesh.isVisible = false;
-    this.baseMeshes.set("tree", treeMesh);
+    // Tree
+    const treeGeo = this.generateProceduralTree(3000);
+    this.baseGeometries.set("tree", treeGeo);
 
-    // Procedural flower mesh (stem + petals)
-    const flowerMesh = this.generateProceduralFlower(4000);
-    flowerMesh.material = this.flowerMaterial;
-    flowerMesh.isVisible = false;
-    this.baseMeshes.set("flower", flowerMesh);
+    // Flower
+    const flowerGeo = this.generateProceduralFlower(4000);
+    this.baseGeometries.set("flower", flowerGeo);
 
-    // Procedural bush mesh (dense foliage sphere)
-    const bushMesh = this.generateProceduralBush(5000);
-    bushMesh.material = this.bushMaterial;
-    bushMesh.isVisible = false;
-    this.baseMeshes.set("bush", bushMesh);
+    // Bush
+    const bushGeo = this.generateProceduralBush(5000);
+    this.baseGeometries.set("bush", bushGeo);
 
-    // Pebble mesh (small rock for dirt areas)
-    const pebbleMesh = MeshBuilder.CreateIcoSphere("pebble_base", {
-      radius: 0.15,
-      subdivisions: 1,
-    }, this.scene);
-    pebbleMesh.material = this.rockMaterial;
-    pebbleMesh.isVisible = false;
-    this.baseMeshes.set("pebble", pebbleMesh);
+    // Pebble
+    const pebbleGeo = new THREE.IcosahedronGeometry(0.15, 1);
+    setGeometryVertexColor(pebbleGeo, 0.5, 0.5, 0.52);
+    this.baseGeometries.set("pebble", pebbleGeo);
   }
 
-  /**
-   * Generate a single grass blade with isosceles triangle shape (matching original infinite-terrain)
-   * Uses easeOut taper like original: width = GRASS_WIDTH * easeOut(1.08 - heightPercent, 2.0)
-   */
-  private generateIsoscelesGrassBlade(seed: number): Mesh {
-    // EaseOut function: 1 - pow(1 - x, t)
+  private generateIsoscelesGrassBlade(seed: number): THREE.BufferGeometry {
     const easeOut = (x: number, t: number): number => {
       const clamped = Math.max(0, Math.min(1, 1 - x));
       return 1 - Math.pow(clamped, t);
     };
 
-    // Blade parameters (matching original infinite-terrain)
     const GRASS_WIDTH = 0.15;
     const GRASS_HEIGHT = 1.15;
     const SEGMENTS = 4;
 
-    // Random variations based on seed
-    const heightVar = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 0.4;  // 0.8 ~ 1.2
+    const heightVar = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 0.4;
     const bladeHeight = GRASS_HEIGHT * heightVar;
 
-    // Calculate positions using easeOut taper (like original)
     const positions: number[] = [];
     const normals: number[] = [];
     const colors: number[] = [];
@@ -1134,63 +840,55 @@ export class FoliageRenderer {
     for (let seg = 0; seg <= SEGMENTS; seg++) {
       const heightPercent = seg / SEGMENTS;
       const y = heightPercent * bladeHeight;
-
-      // Width taper using easeOut (matching original)
       const widthFactor = easeOut(1.08 - heightPercent, 2.0);
       const halfWidth = (GRASS_WIDTH * widthFactor) / 2;
 
       if (seg === SEGMENTS) {
-        // Top vertex - single point (tip of triangle)
         positions.push(0, y, 0);
         normals.push(0, 0, 1);
-        colors.push(0.30, 0.40, 0.18, 1.0);
+        colors.push(0.3, 0.4, 0.18, 1.0);
       } else {
-        // Left and right vertices
-        positions.push(-halfWidth, y, 0);  // Left
+        positions.push(-halfWidth, y, 0);
         normals.push(0, 0, 1);
-        colors.push(0.30, 0.40, 0.18, 1.0);
-        positions.push(halfWidth, y, 0);   // Right
+        colors.push(0.3, 0.4, 0.18, 1.0);
+        positions.push(halfWidth, y, 0);
         normals.push(0, 0, 1);
-        colors.push(0.30, 0.40, 0.18, 1.0);
+        colors.push(0.3, 0.4, 0.18, 1.0);
       }
     }
 
-    // Generate indices for triangle strip
     for (let seg = 0; seg < SEGMENTS; seg++) {
       const vi = seg * 2;
       if (seg === SEGMENTS - 1) {
-        // Last segment connects to tip
         const tipIndex = SEGMENTS * 2;
         indices.push(vi, vi + 1, tipIndex);
       } else {
-        // Regular quad (two triangles)
         indices.push(vi, vi + 1, vi + 2);
         indices.push(vi + 2, vi + 1, vi + 3);
       }
     }
 
-    const mesh = new Mesh("grass_blade_" + seed, this.scene);
-    const vertexData = new VertexData();
-    vertexData.positions = positions;
-    vertexData.indices = indices;
-    vertexData.normals = normals;
-    vertexData.colors = colors;
-    vertexData.applyToMesh(mesh);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(new Float32Array(positions), 3)
+    );
+    geometry.setAttribute(
+      "normal",
+      new THREE.BufferAttribute(new Float32Array(normals), 3)
+    );
+    geometry.setAttribute(
+      "color",
+      new THREE.BufferAttribute(new Float32Array(colors), 4)
+    );
+    geometry.setIndex(indices);
 
-    return mesh;
+    return geometry;
   }
 
-  /**
-   * Generate procedural rock (from editor/FoliageSystem)
-   */
-  private generateProceduralRock(seed: number): Mesh {
-    const rock = MeshBuilder.CreateIcoSphere(
-      "rock_" + seed,
-      { radius: 0.5, subdivisions: 4, flat: false, updatable: true },
-      this.scene
-    );
+  private generateProceduralRock(seed: number): THREE.BufferGeometry {
+    const geo = new THREE.IcosahedronGeometry(0.5, 4);
 
-    // Shape parameters from seed
     const scaleX = 0.5 + Math.abs(noise3D(seed * 1.0, 0, 0)) * 1.2;
     const scaleY = 0.4 + Math.abs(noise3D(0, seed * 1.1, 0)) * 1.6;
     const scaleZ = 0.5 + Math.abs(noise3D(0, 0, seed * 1.2)) * 1.2;
@@ -1207,258 +905,201 @@ export class FoliageRenderer {
     const bendX = noise3D(seed * 5.0, 0, 0) * 0.4;
     const bendZ = noise3D(0, 0, seed * 5.1) * 0.4;
 
-    const positions = rock.getVerticesData(VertexBuffer.PositionKind);
-    if (positions) {
-      const newPositions = new Float32Array(positions.length);
+    const posAttr = geo.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) {
+      let x = posAttr.getX(i);
+      let y = posAttr.getY(i);
+      let z = posAttr.getZ(i);
 
-      for (let i = 0; i < positions.length; i += 3) {
-        let x = positions[i];
-        let y = positions[i + 1];
-        let z = positions[i + 2];
+      const len = Math.sqrt(x * x + y * y + z * z);
+      const nx = x / len;
+      const ny = y / len;
+      const nz = z / len;
 
-        const len = Math.sqrt(x * x + y * y + z * z);
-        const nx = x / len;
-        const ny = y / len;
-        const nz = z / len;
+      x *= scaleX;
+      y *= scaleY;
+      z *= scaleZ;
 
-        // Apply scale
-        x *= scaleX;
-        y *= scaleY;
-        z *= scaleZ;
+      const taperFactorY = 1.0 - taperY * ny;
+      const taperFactorX = 1.0 - taperX * nx;
+      const taperFactorZ = 1.0 - taperZ * nz;
+      x *= taperFactorY * taperFactorX;
+      z *= taperFactorY * taperFactorZ;
 
-        // Apply taper
-        const taperFactorY = 1.0 - taperY * ny;
-        const taperFactorX = 1.0 - taperX * nx;
-        const taperFactorZ = 1.0 - taperZ * nz;
-        x *= taperFactorY * taperFactorX;
-        z *= taperFactorY * taperFactorZ;
+      const twistAngle = twistAmount * ny;
+      const cosT = Math.cos(twistAngle);
+      const sinT = Math.sin(twistAngle);
+      const rx = x * cosT - z * sinT;
+      const rz = x * sinT + z * cosT;
+      x = rx;
+      z = rz;
 
-        // Apply twist
-        const twistAngle = twistAmount * ny;
-        const cosT = Math.cos(twistAngle);
-        const sinT = Math.sin(twistAngle);
-        const rx = x * cosT - z * sinT;
-        const rz = x * sinT + z * cosT;
-        x = rx;
-        z = rz;
+      x += bendX * y * y;
+      z += bendZ * y * y;
 
-        // Apply bend
-        x += bendX * y * y;
-        z += bendZ * y * y;
+      x += asymOffsetX * (1.0 - Math.abs(ny));
+      y += asymOffsetY;
+      z += asymOffsetZ * (1.0 - Math.abs(ny));
 
-        // Apply asymmetry
-        x += asymOffsetX * (1.0 - Math.abs(ny));
-        y += asymOffsetY;
-        z += asymOffsetZ * (1.0 - Math.abs(ny));
+      const surfaceNoise = fbm3D(nx * 3 + seed, ny * 3, nz * 3, 3);
+      const surfaceDisp = surfaceNoise * 0.15;
+      x += nx * surfaceDisp;
+      y += ny * surfaceDisp;
+      z += nz * surfaceDisp;
 
-        // Surface displacement (noise-based)
-        const surfaceNoise = fbm3D(nx * 3 + seed, ny * 3, nz * 3, 3);
-        const surfaceDisp = surfaceNoise * 0.15;
-        x += nx * surfaceDisp;
-        y += ny * surfaceDisp;
-        z += nz * surfaceDisp;
-
-        newPositions[i] = x;
-        newPositions[i + 1] = y;
-        newPositions[i + 2] = z;
-      }
-
-      rock.updateVerticesData(VertexBuffer.PositionKind, newPositions);
-
-      const indices = rock.getIndices();
-      const normals = rock.getVerticesData(VertexBuffer.NormalKind);
-      if (indices && normals) {
-        VertexData.ComputeNormals(newPositions, indices, normals);
-        rock.updateVerticesData(VertexBuffer.NormalKind, normals);
-      }
+      posAttr.setXYZ(i, x, y, z);
     }
 
-    // Set rock vertex color
-    setMeshVertexColor(rock, 0.5, 0.5, 0.52);
+    geo.computeVertexNormals();
+    setGeometryVertexColor(geo, 0.5, 0.5, 0.52);
 
-    return rock;
+    return geo;
   }
 
-  /**
-   * Generate procedural tree (trunk + layered foliage)
-   */
-  private generateProceduralTree(seed: number): Mesh {
-    const parts: Mesh[] = [];
+  private generateProceduralTree(seed: number): THREE.BufferGeometry {
+    const parts: THREE.BufferGeometry[] = [];
 
-    // Trunk parameters
     const trunkHeight = 1.0 + Math.abs(noise3D(seed, 0, 0)) * 0.5;
     const trunkRadius = 0.08 + Math.abs(noise3D(0, seed, 0)) * 0.04;
 
-    // Trunk
-    const trunk = MeshBuilder.CreateCylinder("trunk_" + seed, {
-      height: trunkHeight,
-      diameterTop: trunkRadius * 1.5,
-      diameterBottom: trunkRadius * 2.5,
-      tessellation: 8,
-    }, this.scene);
-    trunk.position.y = trunkHeight / 2;
-    setMeshVertexColor(trunk, 0.35, 0.22, 0.1); // Brown
-    parts.push(trunk);
+    const trunkGeo = new THREE.CylinderGeometry(
+      trunkRadius * 1.5,
+      trunkRadius * 2.5,
+      trunkHeight,
+      8
+    );
+    trunkGeo.translate(0, trunkHeight / 2, 0);
+    setGeometryVertexColor(trunkGeo, 0.35, 0.22, 0.1);
+    parts.push(trunkGeo);
 
-    // Foliage layers (3 cones)
     const foliageBaseY = trunkHeight * 0.7;
     const foliageLayers = 3;
 
     for (let i = 0; i < foliageLayers; i++) {
       const layerSeed = seed + i * 111;
-      const layerHeight = 0.6 + Math.abs(noise3D(layerSeed, 0, 0)) * 0.3;
-      const layerRadius = 0.5 - i * 0.12 + Math.abs(noise3D(0, layerSeed, 0)) * 0.15;
+      const layerHeight =
+        0.6 + Math.abs(noise3D(layerSeed, 0, 0)) * 0.3;
+      const layerRadius =
+        0.5 - i * 0.12 + Math.abs(noise3D(0, layerSeed, 0)) * 0.15;
       const layerY = foliageBaseY + i * 0.35;
 
-      const foliage = MeshBuilder.CreateCylinder("foliage_" + i + "_" + seed, {
-        height: layerHeight,
-        diameterTop: 0,
-        diameterBottom: layerRadius * 2,
-        tessellation: 8,
-      }, this.scene);
-      foliage.position.y = layerY + layerHeight / 2;
-      setMeshVertexColor(foliage, 0.15 + i * 0.05, 0.4 + i * 0.05, 0.1);
-      parts.push(foliage);
+      const coneGeo = new THREE.CylinderGeometry(
+        0,
+        layerRadius,
+        layerHeight,
+        8
+      );
+      coneGeo.translate(0, layerY + layerHeight / 2, 0);
+      setGeometryVertexColor(
+        coneGeo,
+        0.15 + i * 0.05,
+        0.4 + i * 0.05,
+        0.1
+      );
+      parts.push(coneGeo);
     }
 
-    const merged = Mesh.MergeMeshes(parts, true, true, undefined, false, true);
-    if (merged) {
-      merged.name = "tree_" + seed;
-      return merged;
-    }
-
-    return trunk;
+    return BufferGeometryUtils.mergeGeometries(parts);
   }
 
-  /**
-   * Generate procedural flower (stem + petals)
-   */
-  private generateProceduralFlower(seed: number): Mesh {
-    const parts: Mesh[] = [];
+  private generateProceduralFlower(seed: number): THREE.BufferGeometry {
+    const parts: THREE.BufferGeometry[] = [];
 
-    // Stem
     const stemHeight = 0.25 + Math.abs(noise3D(seed, 0, 0)) * 0.2;
-    const stem = MeshBuilder.CreateCylinder("stem_" + seed, {
-      height: stemHeight,
-      diameter: 0.02,
-      tessellation: 6,
-    }, this.scene);
-    stem.position.y = stemHeight / 2;
-    setMeshVertexColor(stem, 0.2, 0.5, 0.15);
-    parts.push(stem);
 
-    // Center
-    const center = MeshBuilder.CreateSphere("center_" + seed, {
-      diameter: 0.06,
-      segments: 6,
-    }, this.scene);
-    center.position.y = stemHeight + 0.03;
-    setMeshVertexColor(center, 0.9, 0.8, 0.2); // Yellow center
-    parts.push(center);
+    const stemGeo = new THREE.CylinderGeometry(0.01, 0.01, stemHeight, 6);
+    stemGeo.translate(0, stemHeight / 2, 0);
+    setGeometryVertexColor(stemGeo, 0.2, 0.5, 0.15);
+    parts.push(stemGeo);
 
-    // Petals (5-7 petals around)
-    const petalCount = 5 + Math.floor(Math.abs(noise3D(0, seed, 0)) * 3);
+    const centerGeo = new THREE.SphereGeometry(0.03, 6, 6);
+    centerGeo.translate(0, stemHeight + 0.03, 0);
+    setGeometryVertexColor(centerGeo, 0.9, 0.8, 0.2);
+    parts.push(centerGeo);
+
+    const petalCount =
+      5 + Math.floor(Math.abs(noise3D(0, seed, 0)) * 3);
     for (let i = 0; i < petalCount; i++) {
       const angle = (i / petalCount) * Math.PI * 2;
-      const petal = MeshBuilder.CreateDisc("petal_" + i + "_" + seed, {
-        radius: 0.05,
-        tessellation: 6,
-      }, this.scene);
-      petal.position.x = Math.cos(angle) * 0.04;
-      petal.position.z = Math.sin(angle) * 0.04;
-      petal.position.y = stemHeight + 0.02;
-      petal.rotation.x = -Math.PI / 3;
-      petal.rotation.y = angle;
+      const petalGeo = new THREE.CircleGeometry(0.05, 6);
 
-      // Random petal color
+      // Apply rotation and position manually via matrix
+      const mat = new THREE.Matrix4();
+      mat.makeRotationX(-Math.PI / 3);
+      const rotY = new THREE.Matrix4().makeRotationY(angle);
+      mat.premultiply(rotY);
+      mat.setPosition(
+        Math.cos(angle) * 0.04,
+        stemHeight + 0.02,
+        Math.sin(angle) * 0.04
+      );
+      petalGeo.applyMatrix4(mat);
+
       const r = 0.8 + Math.abs(noise3D(seed + i, 0, 0)) * 0.2;
       const g = 0.2 + Math.abs(noise3D(0, seed + i, 0)) * 0.3;
       const b = 0.3 + Math.abs(noise3D(0, 0, seed + i)) * 0.4;
-      setMeshVertexColor(petal, r, g, b);
-      parts.push(petal);
+      setGeometryVertexColor(petalGeo, r, g, b);
+      parts.push(petalGeo);
     }
 
-    const merged = Mesh.MergeMeshes(parts, true, true, undefined, false, true);
-    if (merged) {
-      merged.name = "flower_" + seed;
-      return merged;
-    }
-
-    return stem;
+    return BufferGeometryUtils.mergeGeometries(parts);
   }
 
-  /**
-   * Generate procedural bush (dense foliage sphere)
-   */
-  private generateProceduralBush(seed: number): Mesh {
-    const parts: Mesh[] = [];
+  private generateProceduralBush(seed: number): THREE.BufferGeometry {
+    const parts: THREE.BufferGeometry[] = [];
 
-    // Main body (deformed sphere)
-    const main = MeshBuilder.CreateIcoSphere("bush_main_" + seed, {
-      radius: 0.4,
-      subdivisions: 2,
-      updatable: true,
-    }, this.scene);
+    const mainGeo = new THREE.IcosahedronGeometry(0.4, 2);
 
-    // Deform the sphere
-    const positions = main.getVerticesData(VertexBuffer.PositionKind);
-    if (positions) {
-      const newPositions = new Float32Array(positions.length);
-      for (let i = 0; i < positions.length; i += 3) {
-        const x = positions[i];
-        const y = positions[i + 1];
-        const z = positions[i + 2];
+    const posAttr = mainGeo.attributes.position;
+    for (let i = 0; i < posAttr.count; i++) {
+      let x = posAttr.getX(i);
+      let y = posAttr.getY(i);
+      let z = posAttr.getZ(i);
 
-        const noise = fbm3D(x * 3 + seed, y * 3, z * 3, 2) * 0.15;
-        const len = Math.sqrt(x * x + y * y + z * z);
+      const len = Math.sqrt(x * x + y * y + z * z);
+      const noiseVal = fbm3D(x * 3 + seed, y * 3, z * 3, 2) * 0.15;
 
-        newPositions[i] = x + (x / len) * noise;
-        newPositions[i + 1] = y * 0.7 + (y / len) * noise; // Flatten
-        newPositions[i + 2] = z + (z / len) * noise;
-      }
-      main.updateVerticesData(VertexBuffer.PositionKind, newPositions);
+      x += (x / len) * noiseVal;
+      y = y * 0.7 + (y / len) * noiseVal;
+      z += (z / len) * noiseVal;
 
-      const indices = main.getIndices();
-      const normals = main.getVerticesData(VertexBuffer.NormalKind);
-      if (indices && normals) {
-        VertexData.ComputeNormals(newPositions, indices, normals);
-        main.updateVerticesData(VertexBuffer.NormalKind, normals);
-      }
+      posAttr.setXYZ(i, x, y, z);
     }
 
-    main.position.y = 0.25;
-    setMeshVertexColor(main, 0.15, 0.35, 0.1);
-    parts.push(main);
+    mainGeo.computeVertexNormals();
+    mainGeo.translate(0, 0.25, 0);
+    setGeometryVertexColor(mainGeo, 0.15, 0.35, 0.1);
+    parts.push(mainGeo);
 
-    // Add small bumps
     for (let i = 0; i < 5; i++) {
       const bumpSeed = seed + i * 77;
       const angle = (i / 5) * Math.PI * 2;
-      const bump = MeshBuilder.CreateSphere("bump_" + i + "_" + seed, {
-        diameter: 0.2 + Math.abs(noise3D(bumpSeed, 0, 0)) * 0.1,
-        segments: 4,
-      }, this.scene);
-      bump.position.x = Math.cos(angle) * 0.25;
-      bump.position.z = Math.sin(angle) * 0.25;
-      bump.position.y = 0.2 + Math.abs(noise3D(0, bumpSeed, 0)) * 0.1;
-      setMeshVertexColor(bump, 0.12 + i * 0.02, 0.32 + i * 0.02, 0.08);
-      parts.push(bump);
+      const bumpGeo = new THREE.SphereGeometry(
+        0.1 + Math.abs(noise3D(bumpSeed, 0, 0)) * 0.05,
+        4,
+        4
+      );
+      bumpGeo.translate(
+        Math.cos(angle) * 0.25,
+        0.2 + Math.abs(noise3D(0, bumpSeed, 0)) * 0.1,
+        Math.sin(angle) * 0.25
+      );
+      setGeometryVertexColor(
+        bumpGeo,
+        0.12 + i * 0.02,
+        0.32 + i * 0.02,
+        0.08
+      );
+      parts.push(bumpGeo);
     }
 
-    const merged = Mesh.MergeMeshes(parts, true, true, undefined, false, true);
-    if (merged) {
-      merged.name = "bush_" + seed;
-      return merged;
-    }
-
-    return main;
+    return BufferGeometryUtils.mergeGeometries(parts);
   }
 
   private loadTypeInstances(typeName: string, matrices: Float32Array): void {
     const instanceCount = Math.floor(matrices.length / 16);
     if (instanceCount === 0) return;
 
-    // Group instances by chunk
     const chunkInstances = new Map<string, number[]>();
     const chunkSize = this.options.chunkSize;
 
@@ -1475,17 +1116,14 @@ export class FoliageRenderer {
         chunkInstances.set(key, []);
       }
 
-      // Copy 16 floats for this instance
       for (let j = 0; j < 16; j++) {
         chunkInstances.get(key)!.push(matrices[baseIdx + j]);
       }
     }
 
-    // Create meshes for each chunk
     for (const [key, values] of chunkInstances) {
       const [cx, cz] = key.split("_").map(Number);
       const chunkMatrices = new Float32Array(values);
-
       this.createChunkMesh(cx, cz, typeName, chunkMatrices);
     }
   }
@@ -1498,10 +1136,8 @@ export class FoliageRenderer {
   ): void {
     const key = `${chunkX}_${chunkZ}`;
     const instanceCount = Math.floor(matrices.length / 16);
-
     if (instanceCount === 0) return;
 
-    // Get or create chunk
     let chunk = this.chunks.get(key);
     if (!chunk) {
       chunk = {
@@ -1513,85 +1149,79 @@ export class FoliageRenderer {
       this.chunks.set(key, chunk);
     }
 
-    // Find base mesh for this type
-    const baseMesh = this.getBaseMeshForType(typeName);
-    if (!baseMesh) {
+    const baseGeo = this.getBaseGeoForType(typeName);
+    const baseMat = this.getBaseMaterialForType(typeName);
+    if (!baseGeo || !baseMat) {
       console.warn(`[FoliageRenderer] No base mesh for type: ${typeName}`);
       return;
     }
 
-    // Create new mesh with independent vertex data (WebGPU compatibility)
-    const meshName = `foliage_${chunkX}_${chunkZ}_${typeName}`;
-    const mesh = new Mesh(meshName, this.scene);
+    const instMesh = new THREE.InstancedMesh(
+      baseGeo,
+      baseMat,
+      instanceCount
+    );
 
-    // Copy vertex data from base mesh (including colors for shader)
-    const vertexData = new VertexData();
-    const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
-    const normals = baseMesh.getVerticesData(VertexBuffer.NormalKind);
-    const uvs = baseMesh.getVerticesData(VertexBuffer.UVKind);
-    const colors = baseMesh.getVerticesData(VertexBuffer.ColorKind);
-    const indices = baseMesh.getIndices();
+    const mat4 = new THREE.Matrix4();
+    for (let i = 0; i < instanceCount; i++) {
+      mat4.fromArray(matrices, i * 16);
+      instMesh.setMatrixAt(i, mat4);
+    }
+    instMesh.instanceMatrix.needsUpdate = true;
 
-    if (positions) vertexData.positions = new Float32Array(positions);
-    if (normals) vertexData.normals = new Float32Array(normals);
-    if (uvs) vertexData.uvs = new Float32Array(uvs);
-    if (colors) vertexData.colors = new Float32Array(colors);
-    if (indices) vertexData.indices = new Uint32Array(indices);
+    this.scene.add(instMesh);
 
-    vertexData.applyToMesh(mesh);
-
-    // Share material
-    mesh.material = baseMesh.material;
-
-    // Setup thin instances
-    mesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
-    mesh.thinInstanceCount = instanceCount;
-    mesh.thinInstanceRefreshBoundingInfo(); // Required after setting buffer
-
-    // Store in chunk
-    chunk.meshes.set(typeName, mesh);
+    chunk.meshes.set(typeName, instMesh);
     chunk.instanceCounts.set(typeName, instanceCount);
-
     this.totalInstances += instanceCount;
   }
 
-  private getBaseMeshForType(typeName: string): Mesh | undefined {
-    // Check for exact match first
-    if (this.baseMeshes.has(typeName)) {
-      return this.baseMeshes.get(typeName);
+  private getBaseGeoForType(
+    typeName: string
+  ): THREE.BufferGeometry | undefined {
+    if (this.baseGeometries.has(typeName)) {
+      return this.baseGeometries.get(typeName);
     }
 
-    // Handle variation suffix (e.g., "grass_v0", "rock_v2")
     const varMatch = typeName.match(/^(.+?)(_v\d+)?$/);
     if (varMatch) {
       const baseType = varMatch[1];
-      if (this.baseMeshes.has(baseType)) {
-        return this.baseMeshes.get(baseType);
+      if (this.baseGeometries.has(baseType)) {
+        return this.baseGeometries.get(baseType);
       }
     }
 
-    // Fallback: check if type starts with known prefix
-    if (typeName.startsWith("grass")) {
-      return this.baseMeshes.get("grass");
+    if (typeName.startsWith("grass")) return this.baseGeometries.get("grass");
+    if (typeName.startsWith("rock") || typeName.startsWith("sandRock"))
+      return this.baseGeometries.get("rock");
+    if (typeName.startsWith("pebble"))
+      return this.baseGeometries.get("pebble");
+    if (typeName.startsWith("tree")) return this.baseGeometries.get("tree");
+    if (typeName.startsWith("flower"))
+      return this.baseGeometries.get("flower");
+    if (typeName.startsWith("bush")) return this.baseGeometries.get("bush");
+    if (typeName.startsWith("sand")) return this.baseGeometries.get("rock");
+
+    return undefined;
+  }
+
+  private getBaseMaterialForType(
+    typeName: string
+  ): THREE.Material | undefined {
+    if (this.baseMaterials.has(typeName)) {
+      return this.baseMaterials.get(typeName);
     }
-    if (typeName.startsWith("rock") || typeName.startsWith("sandRock")) {
-      return this.baseMeshes.get("rock");
-    }
-    if (typeName.startsWith("pebble")) {
-      return this.baseMeshes.get("pebble");
-    }
-    if (typeName.startsWith("tree")) {
-      return this.baseMeshes.get("tree");
-    }
-    if (typeName.startsWith("flower")) {
-      return this.baseMeshes.get("flower");
-    }
-    if (typeName.startsWith("bush")) {
-      return this.baseMeshes.get("bush");
-    }
-    if (typeName.startsWith("sand")) {
-      return this.baseMeshes.get("rock"); // sandRock -> rock
-    }
+
+    if (typeName.startsWith("grass")) return this.baseMaterials.get("grass");
+    if (typeName.startsWith("rock") || typeName.startsWith("sandRock"))
+      return this.baseMaterials.get("rock");
+    if (typeName.startsWith("pebble"))
+      return this.baseMaterials.get("pebble");
+    if (typeName.startsWith("tree")) return this.baseMaterials.get("tree");
+    if (typeName.startsWith("flower"))
+      return this.baseMaterials.get("flower");
+    if (typeName.startsWith("bush")) return this.baseMaterials.get("bush");
+    if (typeName.startsWith("sand")) return this.baseMaterials.get("rock");
 
     return undefined;
   }
@@ -1606,8 +1236,8 @@ export class FoliageRenderer {
 
     for (let i = 0; i < instanceCount; i++) {
       const baseIdx = i * 16;
-      result[baseIdx + 12] += offsetX; // X translation
-      result[baseIdx + 14] += offsetZ; // Z translation
+      result[baseIdx + 12] += offsetX;
+      result[baseIdx + 14] += offsetZ;
     }
 
     return result;

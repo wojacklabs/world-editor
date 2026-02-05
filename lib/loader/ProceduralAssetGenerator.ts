@@ -6,46 +6,28 @@
  * noise functions, vertex colors, and shape deformations.
  */
 
+import * as THREE from "three";
+import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  ShaderMaterial,
-  Effect,
-  Vector3,
-  Vector2,
-  Matrix,
-  Color3,
-  VertexData,
-  VertexBuffer,
-  Quaternion,
-  Texture,
-} from "@babylonjs/core";
-import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
-import "@babylonjs/loaders/glTF";
-import { loadTextureWithFallback } from "../shared/rendering/TextureLoader";
+  loadTextureWithFallbackSync,
+} from "../shared/rendering/TextureLoader.three";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../shared/foliage/FoliageQualityProfile";
-import { createLeafCardMesh } from "../shared/foliage/LeafCards";
+import { createLeafCardGeometry } from "../shared/foliage/LeafCards.three";
 import { fbm3D, noise3D } from "../shared/math/NoiseUtils";
 
-const REFERENCE_TREE_ROOT_URL = "/assets/references/infinite-terrain/";
-const REFERENCE_TREE_FILE_NAME = "tree.glb";
+const REFERENCE_TREE_URL = "/assets/references/infinite-terrain/tree.glb";
 
 // ============================================
-// Register Shaders
+// Shader Strings
 // ============================================
 
 // Wind-enabled vertex shader for foliage (grass, bush, tree leaves)
-Effect.ShadersStore["loaderFoliageWindVertexShader"] = `
+const foliageWindVertexShader = `
 precision highp float;
 
-attribute vec3 position;
-attribute vec3 normal;
-attribute vec2 uv;
 attribute vec4 color;
 
-uniform mat4 viewProjection;
-uniform mat4 world;
 uniform vec3 cameraPosition;
 uniform float uTime;
 uniform vec2 uWindDirection;
@@ -80,7 +62,7 @@ float noise2D(vec2 p) {
 }
 
 void main() {
-    vec4 worldPos = world * vec4(position, 1.0);
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
 
     // Height factor (use local Y) - cubic for natural tree sway
     float heightAboveMin = max(0.0, position.y - uMinWindHeight);
@@ -101,9 +83,9 @@ void main() {
     worldPos.z += uWindDirection.y * windAmount * 0.2;
     worldPos.y -= windAmount * 0.04;
 
-    gl_Position = viewProjection * worldPos;
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
 
-    vNormal = normalize(mat3(world) * normal);
+    vNormal = normalize(mat3(modelMatrix) * normal);
     vPosition = worldPos.xyz;
     vLocalPosition = position;
     vUV = uv;
@@ -113,7 +95,7 @@ void main() {
 }
 `;
 
-Effect.ShadersStore["loaderFoliageWindFragmentShader"] = `
+const foliageWindFragmentShader = `
 precision highp float;
 
 uniform vec3 baseColor;
@@ -252,16 +234,11 @@ void main() {
 `;
 
 // Procedural asset shader (for rocks)
-Effect.ShadersStore["loaderProceduralAssetVertexShader"] = `
+const proceduralAssetVertexShader = `
 precision highp float;
 
-attribute vec3 position;
-attribute vec3 normal;
-attribute vec2 uv;
 attribute vec4 color;
 
-uniform mat4 worldViewProjection;
-uniform mat4 world;
 uniform vec3 cameraPosition;
 
 varying vec3 vNormal;
@@ -273,10 +250,10 @@ varying vec3 vViewDirection;
 varying vec4 vColor;
 
 void main() {
-    vec4 worldPos = world * vec4(position, 1.0);
-    gl_Position = worldViewProjection * vec4(position, 1.0);
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 
-    vNormal = normalize(mat3(world) * normal);
+    vNormal = normalize(mat3(modelMatrix) * normal);
     vPosition = worldPos.xyz;
     vLocalPosition = position;
     vUV = uv;
@@ -286,7 +263,7 @@ void main() {
 }
 `;
 
-Effect.ShadersStore["loaderProceduralAssetFragmentShader"] = `
+const proceduralAssetFragmentShader = `
 precision highp float;
 
 uniform vec3 baseColor;
@@ -429,8 +406,14 @@ function calcSubdivision(size: number, base: number = 4, override?: number): num
 // Vertex Color Helpers
 // ============================================
 
-function setMeshVertexColor(mesh: Mesh, r: number, g: number, b: number): void {
-  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+function getPositions(geometry: THREE.BufferGeometry): Float32Array | null {
+  const attr = geometry.getAttribute("position");
+  if (!attr) return null;
+  return attr.array as Float32Array;
+}
+
+function setGeometryVertexColor(geometry: THREE.BufferGeometry, r: number, g: number, b: number): void {
+  const positions = getPositions(geometry);
   if (!positions) return;
 
   const vertexCount = positions.length / 3;
@@ -443,11 +426,11 @@ function setMeshVertexColor(mesh: Mesh, r: number, g: number, b: number): void {
     colors[i * 4 + 3] = 1.0;
   }
 
-  mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
 }
 
-function setRockVertexColors(mesh: Mesh, seed: number): void {
-  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+function setRockVertexColors(geometry: THREE.BufferGeometry, seed: number): void {
+  const positions = getPositions(geometry);
   if (!positions) return;
 
   const vertexCount = positions.length / 3;
@@ -516,11 +499,11 @@ function setRockVertexColors(mesh: Mesh, seed: number): void {
     colors[i * 4 + 3] = 1.0;
   }
 
-  mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
 }
 
-function setBarkVertexColors(mesh: Mesh, seed: number, isBranch: boolean = false): void {
-  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+function setBarkVertexColors(geometry: THREE.BufferGeometry, seed: number, isBranch: boolean = false): void {
+  const positions = getPositions(geometry);
   if (!positions) return;
 
   const vertexCount = positions.length / 3;
@@ -579,11 +562,11 @@ function setBarkVertexColors(mesh: Mesh, seed: number, isBranch: boolean = false
     colors[i * 4 + 3] = 1.0;
   }
 
-  mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
 }
 
-function setBushVertexColors(mesh: Mesh, seed: number): void {
-  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+function setBushVertexColors(geometry: THREE.BufferGeometry, seed: number): void {
+  const positions = getPositions(geometry);
   if (!positions) return;
 
   const vertexCount = positions.length / 3;
@@ -661,21 +644,20 @@ function setBushVertexColors(mesh: Mesh, seed: number): void {
     colors[i * 4 + 3] = 1.0;
   }
 
-  mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
 }
 
-function setLeafVertexColors(mesh: Mesh, seed: number, isTop: boolean = false): void {
-  const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+function setLeafVertexColors(geometry: THREE.BufferGeometry, seed: number, isTop: boolean = false): void {
+  const positions = getPositions(geometry);
   if (!positions) return;
 
   const vertexCount = positions.length / 3;
   const colors = new Float32Array(vertexCount * 4);
 
-  // 잔디와 동일 톤 팔레트
-  const sunLeaf = { r: 0.467, g: 0.667, b: 0.102 };    // 잔디 top
-  const shadeLeaf = { r: 0.15, g: 0.28, b: 0.06 };     // 그늘
-  const yellowLeaf = { r: 0.50, g: 0.70, b: 0.12 };    // 밝은 변형
-  const freshLeaf = { r: 0.224, g: 0.424, b: 0.094 };  // 잔디 base
+  const sunLeaf = { r: 0.467, g: 0.667, b: 0.102 };
+  const shadeLeaf = { r: 0.15, g: 0.28, b: 0.06 };
+  const yellowLeaf = { r: 0.50, g: 0.70, b: 0.12 };
+  const freshLeaf = { r: 0.224, g: 0.424, b: 0.094 };
 
   let minY = Infinity, maxY = -Infinity;
   for (let i = 0; i < positions.length; i += 3) {
@@ -732,7 +714,91 @@ function setLeafVertexColors(mesh: Mesh, seed: number, isTop: boolean = false): 
     colors[i * 4 + 3] = 1.0;
   }
 
-  mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
+}
+
+// ============================================
+// Geometry Transform Helpers
+// ============================================
+
+/**
+ * Compute normals from positions and indices.
+ */
+function computeNormals(
+  positions: Float32Array | number[],
+  indices: number[] | Uint16Array | Uint32Array,
+  normals: Float32Array | number[]
+): void {
+  for (let i = 0; i < normals.length; i++) normals[i] = 0;
+
+  for (let i = 0; i < indices.length; i += 3) {
+    const i0 = indices[i];
+    const i1 = indices[i + 1];
+    const i2 = indices[i + 2];
+
+    const ax = positions[i0 * 3], ay = positions[i0 * 3 + 1], az = positions[i0 * 3 + 2];
+    const bx = positions[i1 * 3], by = positions[i1 * 3 + 1], bz = positions[i1 * 3 + 2];
+    const cx = positions[i2 * 3], cy = positions[i2 * 3 + 1], cz = positions[i2 * 3 + 2];
+
+    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+
+    for (const idx of [i0, i1, i2]) {
+      normals[idx * 3] += nx;
+      normals[idx * 3 + 1] += ny;
+      normals[idx * 3 + 2] += nz;
+    }
+  }
+
+  for (let i = 0; i < normals.length; i += 3) {
+    const nx = normals[i], ny = normals[i + 1], nz = normals[i + 2];
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    normals[i] = nx / len;
+    normals[i + 1] = ny / len;
+    normals[i + 2] = nz / len;
+  }
+}
+
+/**
+ * Apply a matrix transform to geometry positions and normals in-place,
+ * then bake into the attribute buffers. Used before merging geometries.
+ */
+function applyTransformToGeometry(
+  geometry: THREE.BufferGeometry,
+  matrix: THREE.Matrix4
+): void {
+  geometry.applyMatrix4(matrix);
+}
+
+/**
+ * Ensure a geometry has all required attributes for merging (position, normal, uv, color).
+ */
+function ensureAttributes(geometry: THREE.BufferGeometry): void {
+  const posAttr = geometry.getAttribute("position");
+  if (!posAttr) return;
+  const vertexCount = posAttr.count;
+
+  if (!geometry.getAttribute("normal")) {
+    geometry.computeVertexNormals();
+  }
+  if (!geometry.getAttribute("uv")) {
+    const uvs = new Float32Array(vertexCount * 2);
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  }
+  if (!geometry.getAttribute("color")) {
+    const colors = new Float32Array(vertexCount * 4);
+    for (let i = 0; i < vertexCount; i++) {
+      colors[i * 4] = 0.5;
+      colors[i * 4 + 1] = 0.5;
+      colors[i * 4 + 2] = 0.5;
+      colors[i * 4 + 3] = 1.0;
+    }
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
+  }
 }
 
 // ============================================
@@ -755,15 +821,15 @@ export interface GeneratorParams {
 // ============================================
 
 export class ProceduralAssetGenerator {
-  private scene: Scene;
+  private scene: THREE.Scene;
   private time: number = 0;
-  private windDirection: Vector2 = new Vector2(
+  private windDirection: THREE.Vector2 = new THREE.Vector2(
     Math.cos(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians),
     Math.sin(DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians)
   );
   private windStrength: number = 0.5;
-  private fogColor: Color3 = new Color3(0.6, 0.75, 0.9);  // Matching editor
-  private fogDensity: number = 0.008;  // Matching editor
+  private fogColor: THREE.Color = new THREE.Color(0.6, 0.75, 0.9);
+  private fogDensity: number = 0.008;
   private renderingProfileVersion: string =
     DEFAULT_FOLIAGE_QUALITY_PROFILE.proceduralProfileVersion;
   private textureUrls: {
@@ -775,18 +841,16 @@ export class ProceduralAssetGenerator {
     dirt: DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.dirt,
     leafAtlas: DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.leafAtlas,
   };
-  private referenceTemplates: Partial<Record<"tree" | "bush", Mesh>> = {};
+  private referenceTemplates: Partial<Record<"tree" | "bush", THREE.BufferGeometry>> = {};
   private referenceTemplatesPromise: Promise<void> | null = null;
   private disposed = false;
 
-  constructor(scene: Scene) {
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
     // Use scene fog settings if available
-    if (scene.fogColor) {
-      this.fogColor = new Color3(scene.fogColor.r, scene.fogColor.g, scene.fogColor.b);
-    }
-    if (scene.fogDensity) {
-      this.fogDensity = scene.fogDensity;
+    if (scene.fog && scene.fog instanceof THREE.FogExp2) {
+      this.fogColor = scene.fog.color.clone();
+      this.fogDensity = scene.fog.density;
     }
   }
 
@@ -795,75 +859,28 @@ export class ProceduralAssetGenerator {
     return n - Math.floor(n);
   }
 
-  private bakeMeshToWorld(source: Mesh, name: string): Mesh | null {
-    const positions = source.getVerticesData(VertexBuffer.PositionKind);
-    const normals = source.getVerticesData(VertexBuffer.NormalKind);
-    const uvs = source.getVerticesData(VertexBuffer.UVKind);
-    const indices = source.getIndices();
+  private bakeMeshToWorld(mesh: THREE.Mesh, _name: string): THREE.BufferGeometry | null {
+    const geometry = mesh.geometry;
+    if (!geometry) return null;
+    const positions = geometry.getAttribute("position");
+    if (!positions) return null;
 
-    if (!positions || !indices) {
-      return null;
-    }
+    const cloned = geometry.clone();
+    // Apply the mesh's world transform to the geometry
+    mesh.updateWorldMatrix(true, false);
+    cloned.applyMatrix4(mesh.matrixWorld);
 
-    source.computeWorldMatrix(true);
-    const world = source.getWorldMatrix();
-    const temp = new Vector3();
+    // Recompute normals after transform
+    cloned.computeVertexNormals();
 
-    const outPositions = new Float32Array(positions.length);
-    for (let i = 0; i < positions.length; i += 3) {
-      Vector3.TransformCoordinatesFromFloatsToRef(
-        positions[i],
-        positions[i + 1],
-        positions[i + 2],
-        world,
-        temp
-      );
-      outPositions[i] = temp.x;
-      outPositions[i + 1] = temp.y;
-      outPositions[i + 2] = temp.z;
-    }
-
-    let outNormals: Float32Array | null = null;
-    if (normals) {
-      outNormals = new Float32Array(normals.length);
-      for (let i = 0; i < normals.length; i += 3) {
-        Vector3.TransformNormalFromFloatsToRef(
-          normals[i],
-          normals[i + 1],
-          normals[i + 2],
-          world,
-          temp
-        );
-        temp.normalize();
-        outNormals[i] = temp.x;
-        outNormals[i + 1] = temp.y;
-        outNormals[i + 2] = temp.z;
-      }
-    }
-
-    const baked = new Mesh(name, this.scene);
-    const vertexData = new VertexData();
-    vertexData.positions = outPositions;
-    vertexData.indices = Array.from(indices);
-    vertexData.uvs = uvs ? Array.from(uvs) : null;
-    vertexData.normals = outNormals ? Array.from(outNormals) : null;
-    if (!vertexData.normals) {
-      const computedNormals: number[] = [];
-      VertexData.ComputeNormals(
-        Array.from(outPositions),
-        Array.from(indices),
-        computedNormals
-      );
-      vertexData.normals = computedNormals;
-    }
-    vertexData.applyToMesh(baked);
-
-    return baked;
+    return cloned;
   }
 
-  private recenterMeshToGround(mesh: Mesh): void {
-    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-    if (!positions || positions.length < 3) return;
+  private recenterGeometryToGround(geometry: THREE.BufferGeometry): void {
+    const posAttr = geometry.getAttribute("position");
+    if (!posAttr || posAttr.count < 1) return;
+
+    const positions = posAttr.array as Float32Array;
 
     let minX = Infinity;
     let maxX = -Infinity;
@@ -885,27 +902,28 @@ export class ProceduralAssetGenerator {
     const centerX = (minX + maxX) * 0.5;
     const centerZ = (minZ + maxZ) * 0.5;
 
-    const shifted = new Float32Array(positions.length);
     for (let i = 0; i < positions.length; i += 3) {
-      shifted[i] = positions[i] - centerX;
-      shifted[i + 1] = positions[i + 1] - minY;
-      shifted[i + 2] = positions[i + 2] - centerZ;
+      positions[i] -= centerX;
+      positions[i + 1] -= minY;
+      positions[i + 2] -= centerZ;
     }
 
-    mesh.setVerticesData(VertexBuffer.PositionKind, shifted, true);
-    mesh.refreshBoundingInfo();
+    posAttr.needsUpdate = true;
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
   }
 
   private applyReferenceVariationDeformation(
-    mesh: Mesh,
+    geometry: THREE.BufferGeometry,
     seedBase: number,
     assetType: "tree" | "bush"
   ): void {
-    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-    const indices = mesh.getIndices();
-    if (!positions || !indices || positions.length < 3) {
-      return;
-    }
+    const posAttr = geometry.getAttribute("position");
+    if (!posAttr || posAttr.count < 1) return;
+
+    const positions = posAttr.array as Float32Array;
+    const indexAttr = geometry.getIndex();
+    if (!indexAttr) return;
 
     let minY = Infinity;
     let maxY = -Infinity;
@@ -926,7 +944,6 @@ export class ProceduralAssetGenerator {
     const twistAmount = (this.seeded01(seedBase + 9.7) - 0.5) * twistScale;
     const stretch = 0.9 + this.seeded01(seedBase + 10.9) * 0.35;
 
-    const deformed = new Float32Array(positions.length);
     for (let i = 0; i < positions.length; i += 3) {
       const x = positions[i];
       const y = positions[i + 1];
@@ -957,34 +974,28 @@ export class ProceduralAssetGenerator {
       pz += (this.seeded01(jitterSeed + 17.0) - 0.5) * jitterScale * smoothT;
       py += (this.seeded01(jitterSeed + 29.0) - 0.5) * jitterScale * 0.6 * smoothT;
 
-      deformed[i] = px;
-      deformed[i + 1] = py;
-      deformed[i + 2] = pz;
+      positions[i] = px;
+      positions[i + 1] = py;
+      positions[i + 2] = pz;
     }
 
-    mesh.setVerticesData(VertexBuffer.PositionKind, deformed, true);
-    const normals: number[] = [];
-    VertexData.ComputeNormals(Array.from(deformed), Array.from(indices), normals);
-    mesh.setVerticesData(VertexBuffer.NormalKind, normals, true);
-    mesh.refreshBoundingInfo();
+    posAttr.needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
   }
 
-  private createReferenceVariationMesh(
+  private createReferenceVariationGeometry(
     assetType: "tree" | "bush",
     seed: number,
-    size: number
-  ): Mesh | null {
+    _size: number
+  ): THREE.BufferGeometry | null {
     const template = this.referenceTemplates[assetType];
     if (!template) {
       return null;
     }
 
-    const mesh = template.clone(`${assetType}_ref_${seed}`);
-    if (!mesh) {
-      return null;
-    }
-
-    mesh.makeGeometryUnique();
+    const geometry = template.clone();
 
     const variationIndex = Math.floor(Math.abs(seed)) % 8;
     const seedBase =
@@ -995,14 +1006,15 @@ export class ProceduralAssetGenerator {
     const sy = 0.9 + this.seeded01(seedBase + 2.5) * 0.34;
     const sz = 0.88 + this.seeded01(seedBase + 3.3) * 0.26;
 
-    const variationTransform = Matrix.Scaling(sx, sy, sz).multiply(
-      Matrix.RotationY(yaw)
-    );
-    mesh.bakeTransformIntoVertices(variationTransform);
-    this.applyReferenceVariationDeformation(mesh, seedBase, assetType);
-    mesh.scaling.setAll(size);
+    // Apply scaling + rotation transform
+    const variationTransform = new THREE.Matrix4()
+      .makeScale(sx, sy, sz)
+      .multiply(new THREE.Matrix4().makeRotationY(yaw));
+    geometry.applyMatrix4(variationTransform);
 
-    return mesh;
+    this.applyReferenceVariationDeformation(geometry, seedBase, assetType);
+
+    return geometry;
   }
 
   async ensureReferenceTemplatesLoaded(): Promise<void> {
@@ -1021,30 +1033,35 @@ export class ProceduralAssetGenerator {
 
   private async loadReferenceTemplatesIfAvailable(): Promise<void> {
     try {
-      const result = await SceneLoader.ImportMeshAsync(
-        "",
-        REFERENCE_TREE_ROOT_URL,
-        REFERENCE_TREE_FILE_NAME,
-        this.scene
-      );
+      const loader = new GLTFLoader();
+      const gltf = await loader.loadAsync(REFERENCE_TREE_URL);
 
       if (this.disposed) {
-        for (const mesh of result.meshes) {
-          mesh.dispose(false, true);
-        }
-        result.skeletons?.forEach((skeleton) => skeleton.dispose());
-        result.animationGroups?.forEach((group) => group.dispose());
-        result.particleSystems?.forEach((ps) => ps.dispose());
-        result.transformNodes?.forEach((node) => node.dispose());
+        gltf.scene.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry?.dispose();
+            if (child.material) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach((m) => m.dispose());
+              } else {
+                child.material.dispose();
+              }
+            }
+          }
+        });
         return;
       }
 
-      const importedMeshes = result.meshes.filter(
-        (mesh): mesh is Mesh =>
-          mesh instanceof Mesh &&
-          !!mesh.getVerticesData(VertexBuffer.PositionKind) &&
-          !!mesh.getIndices()
-      );
+      const importedMeshes: THREE.Mesh[] = [];
+      gltf.scene.traverse((child) => {
+        if (
+          child instanceof THREE.Mesh &&
+          child.geometry &&
+          child.geometry.getAttribute("position")
+        ) {
+          importedMeshes.push(child);
+        }
+      });
 
       if (importedMeshes.length === 0) {
         return;
@@ -1059,15 +1076,15 @@ export class ProceduralAssetGenerator {
 
       const buildMergedTemplate = (
         includeTrunk: boolean,
-        name: string
-      ): Mesh | null => {
-        const bakedParts: Mesh[] = [];
+      ): THREE.BufferGeometry | null => {
+        const bakedParts: THREE.BufferGeometry[] = [];
 
         if (includeTrunk) {
           for (let i = 0; i < trunkSources.length; i++) {
             const baked = this.bakeMeshToWorld(trunkSources[i], `loader_ref_trunk_${i}`);
             if (!baked) continue;
-            setMeshVertexColor(baked, 0.44, 0.32, 0.18);
+            setGeometryVertexColor(baked, 0.44, 0.32, 0.18);
+            ensureAttributes(baked);
             bakedParts.push(baked);
           }
         }
@@ -1075,7 +1092,8 @@ export class ProceduralAssetGenerator {
         for (let i = 0; i < bushSources.length; i++) {
           const baked = this.bakeMeshToWorld(bushSources[i], `loader_ref_bush_${i}`);
           if (!baked) continue;
-          setMeshVertexColor(baked, 0.23, 0.48, 0.2);
+          setGeometryVertexColor(baked, 0.23, 0.48, 0.2);
+          ensureAttributes(baked);
           bakedParts.push(baked);
         }
 
@@ -1083,28 +1101,17 @@ export class ProceduralAssetGenerator {
           return null;
         }
 
-        const merged = Mesh.MergeMeshes(
-          bakedParts,
-          true,
-          true,
-          undefined,
-          false,
-          true
-        );
+        const merged = BufferGeometryUtils.mergeGeometries(bakedParts, false);
         if (!merged) {
           return null;
         }
 
-        merged.name = name;
-        this.recenterMeshToGround(merged);
-        merged.isVisible = false;
-        merged.isPickable = false;
-        merged.material = null;
+        this.recenterGeometryToGround(merged);
         return merged;
       };
 
-      const bushTemplate = buildMergedTemplate(false, "loader_ref_bush_template");
-      const treeTemplate = buildMergedTemplate(true, "loader_ref_tree_template");
+      const bushTemplate = buildMergedTemplate(false);
+      const treeTemplate = buildMergedTemplate(true);
 
       if (bushTemplate) {
         this.referenceTemplates.bush = bushTemplate;
@@ -1113,13 +1120,17 @@ export class ProceduralAssetGenerator {
         this.referenceTemplates.tree = treeTemplate;
       }
 
-      for (const mesh of result.meshes) {
-        mesh.dispose(false, true);
+      // Dispose original imported meshes
+      for (const mesh of importedMeshes) {
+        mesh.geometry?.dispose();
+        if (mesh.material) {
+          if (Array.isArray(mesh.material)) {
+            mesh.material.forEach((m) => m.dispose());
+          } else {
+            mesh.material.dispose();
+          }
+        }
       }
-      result.skeletons?.forEach((skeleton) => skeleton.dispose());
-      result.animationGroups?.forEach((group) => group.dispose());
-      result.particleSystems?.forEach((ps) => ps.dispose());
-      result.transformNodes?.forEach((node) => node.dispose());
 
       if (this.referenceTemplates.tree || this.referenceTemplates.bush) {
         console.log(
@@ -1139,9 +1150,16 @@ export class ProceduralAssetGenerator {
   }
 
   /**
+   * Get current time for material uniform updates
+   */
+  getTime(): number {
+    return this.time;
+  }
+
+  /**
    * Set wind parameters
    */
-  setWind(direction: Vector2, strength: number): void {
+  setWind(direction: THREE.Vector2, strength: number): void {
     this.windDirection = direction.normalize();
     this.windStrength = strength;
   }
@@ -1149,7 +1167,7 @@ export class ProceduralAssetGenerator {
   /**
    * Set fog parameters
    */
-  setFog(color: Color3, density: number): void {
+  setFog(color: THREE.Color, density: number): void {
     this.fogColor = color;
     this.fogDensity = density;
   }
@@ -1167,69 +1185,50 @@ export class ProceduralAssetGenerator {
   }
 
   /**
-   * Generate a procedural mesh based on params
+   * Generate a procedural geometry based on params.
+   * Returns a THREE.Mesh positioned at origin with the given scale.
    */
-  generate(params: GeneratorParams): Mesh | null {
+  generate(params: GeneratorParams): THREE.Mesh | null {
+    let geometry: THREE.BufferGeometry | null = null;
+
     switch (params.type) {
       case "rock":
-        return this.generateRock(params);
+        geometry = this.generateRock(params);
+        break;
       case "tree":
-        return (
-          this.createReferenceVariationMesh("tree", params.seed, params.size) ??
-          this.generateTree(params)
-        );
+        geometry =
+          this.createReferenceVariationGeometry("tree", params.seed, params.size) ??
+          this.generateTree(params);
+        break;
       case "bush":
-        return (
-          this.createReferenceVariationMesh("bush", params.seed, params.size) ??
-          this.generateBush(params)
-        );
+        geometry =
+          this.createReferenceVariationGeometry("bush", params.seed, params.size) ??
+          this.generateBush(params);
+        break;
       case "grass_clump":
-        return this.generateGrassClump(params);
+        geometry = this.generateGrassClump(params);
+        break;
       default:
         console.warn(`[ProceduralAssetGenerator] Unknown type: ${params.type}`);
         return null;
     }
+
+    if (!geometry) return null;
+
+    ensureAttributes(geometry);
+    const material = this.createMaterial(params);
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.scale.setScalar(params.size);
+    return mesh;
   }
 
   /**
    * Create material for the mesh
    */
-  createMaterial(params: GeneratorParams): ShaderMaterial {
+  createMaterial(params: GeneratorParams): THREE.ShaderMaterial {
     const needsWind = params.type === "grass_clump" || params.type === "bush" || params.type === "tree";
 
     if (needsWind) {
-      const material = new ShaderMaterial(
-        `loaderFoliageMat_${this.renderingProfileVersion}_${params.seed}`,
-        this.scene,
-        {
-          vertex: "loaderFoliageWind",
-          fragment: "loaderFoliageWind",
-        },
-        {
-          attributes: ["position", "normal", "uv", "color"],
-          uniforms: [
-            "viewProjection", "world", "cameraPosition",
-            "uTime", "uWindDirection", "uWindStrength",
-            "uMinWindHeight", "uMaxWindHeight",
-            "uPropsPrimarySpeed", "uPropsSecondarySpeed", "uPropsNoiseSpeed",
-            "baseColor", "detailColor", "sunDirection",
-            "ambientIntensity", "fogColor", "fogDensity",
-            "dirtTextureScale",
-            "uLeafAlphaCutoff",
-            "uLeafFadeStart",
-            "uLeafFadeEnd",
-            "uUseLeafAtlas",
-            "uLeafMaskFromLuma",
-            "uFresnelPower",
-            "uFresnelStrength",
-            "uFresnelColor",
-          ],
-          samplers: ["dirtTexture", "leafAtlas"],
-        }
-      );
-
-      material.setVector2("uWindDirection", this.windDirection);
-
       let windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength, minHeight = 0.0, maxHeight = 0.8;
       if (params.type === "grass_clump") {
         windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassClumpStrength;
@@ -1241,108 +1240,80 @@ export class ProceduralAssetGenerator {
         maxHeight = 0.4;
       } else if (params.type === "tree") {
         windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength;
-        minHeight = 1.2;  // Only upper part moves (trunk stays still)
+        minHeight = 1.2;
         maxHeight = 2.5;
       }
 
-      material.setFloat("uWindStrength", windStr * this.windStrength);
-      material.setFloat("uMinWindHeight", minHeight);
-      material.setFloat("uMaxWindHeight", maxHeight);
-      material.setFloat("uPropsPrimarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed);
-      material.setFloat("uPropsSecondarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed);
-      material.setFloat("uPropsNoiseSpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed);
-      material.setFloat("uTime", this.time);
-
-      material.setColor3("baseColor", new Color3(params.colorBase.r, params.colorBase.g, params.colorBase.b));
-      material.setColor3("detailColor", new Color3(params.colorDetail.r, params.colorDetail.g, params.colorDetail.b));
-      material.setVector3("sunDirection", new Vector3(0.5, 0.8, 0.3).normalize());
-      material.setFloat("ambientIntensity", 0.4);
-      material.setColor3("fogColor", this.fogColor);
-      material.setFloat("fogDensity", this.fogDensity);
-      material.setFloat("dirtTextureScale", 0.5);
-
-      // Load dirt texture for bark triplanar mapping
-      const dirtTex = loadTextureWithFallback(this.scene, this.textureUrls.dirt, {
+      const dirtTex = loadTextureWithFallbackSync(this.textureUrls.dirt, {
         preferredExtensions: ["ktx2", "jpg", "png"],
-        wrapU: Texture.WRAP_ADDRESSMODE,
-        wrapV: Texture.WRAP_ADDRESSMODE,
-        anisotropicFilteringLevel: 8,
+        wrapS: THREE.RepeatWrapping,
+        wrapT: THREE.RepeatWrapping,
+        anisotropy: 8,
       });
-      material.setTexture("dirtTexture", dirtTex);
 
-      const leafAtlas = loadTextureWithFallback(this.scene, this.textureUrls.leafAtlas, {
+      const leafAtlasTex = loadTextureWithFallbackSync(this.textureUrls.leafAtlas, {
         preferredExtensions: ["png", "ktx2", "jpg"],
-        wrapU: Texture.CLAMP_ADDRESSMODE,
-        wrapV: Texture.CLAMP_ADDRESSMODE,
-        anisotropicFilteringLevel: 4,
+        wrapS: THREE.ClampToEdgeWrapping,
+        wrapT: THREE.ClampToEdgeWrapping,
+        anisotropy: 4,
       });
-      material.setTexture("leafAtlas", leafAtlas);
-      material.setFloat(
-        "uLeafAlphaCutoff",
-        DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff
-      );
-      material.setFloat(
-        "uLeafFadeStart",
-        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart
-      );
-      material.setFloat(
-        "uLeafFadeEnd",
-        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd
-      );
-      material.setFloat(
-        "uUseLeafAtlas",
-        params.type === "tree" || params.type === "bush" ? 1.0 : 0.0
-      );
-      material.setFloat("uLeafMaskFromLuma", 1.0);
 
-      // Fresnel rim light settings
-      material.setFloat("uFresnelPower", 3.0);
-      material.setFloat("uFresnelStrength", 0.4);
-      material.setColor3("uFresnelColor", new Color3(0.8, 0.95, 0.7));
-
-      // Register update for wind animation
-      this.scene.registerBeforeRender(() => {
-        material.setFloat("uTime", this.time);
+      const material = new THREE.ShaderMaterial({
+        vertexShader: foliageWindVertexShader,
+        fragmentShader: foliageWindFragmentShader,
+        uniforms: {
+          uTime: { value: this.time },
+          uWindDirection: { value: this.windDirection.clone() },
+          uWindStrength: { value: windStr * this.windStrength },
+          uMinWindHeight: { value: minHeight },
+          uMaxWindHeight: { value: maxHeight },
+          uPropsPrimarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed },
+          uPropsSecondarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed },
+          uPropsNoiseSpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed },
+          baseColor: { value: new THREE.Color(params.colorBase.r, params.colorBase.g, params.colorBase.b) },
+          detailColor: { value: new THREE.Color(params.colorDetail.r, params.colorDetail.g, params.colorDetail.b) },
+          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+          ambientIntensity: { value: 0.4 },
+          fogColor: { value: this.fogColor.clone() },
+          fogDensity: { value: this.fogDensity },
+          dirtTexture: { value: dirtTex },
+          dirtTextureScale: { value: 0.5 },
+          leafAtlas: { value: leafAtlasTex },
+          uLeafAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
+          uLeafFadeStart: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart },
+          uLeafFadeEnd: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd },
+          uUseLeafAtlas: { value: params.type === "tree" || params.type === "bush" ? 1.0 : 0.0 },
+          uLeafMaskFromLuma: { value: 1.0 },
+          uFresnelPower: { value: 3.0 },
+          uFresnelStrength: { value: 0.4 },
+          uFresnelColor: { value: new THREE.Color(0.8, 0.95, 0.7) },
+        },
       });
 
       return material;
     } else {
       // Rock shader with triplanar texture
-      const material = new ShaderMaterial(
-        `loaderRockMat_${this.renderingProfileVersion}_${params.seed}`,
-        this.scene,
-        {
-          vertex: "loaderProceduralAsset",
-          fragment: "loaderProceduralAsset",
-        },
-        {
-          attributes: ["position", "normal", "uv", "color"],
-          uniforms: [
-            "worldViewProjection", "world", "cameraPosition",
-            "baseColor", "detailColor", "sunDirection",
-            "ambientIntensity", "fogColor", "fogDensity",
-            "textureScale",
-          ],
-          samplers: ["rockTexture"],
-        }
-      );
-
-      material.setColor3("baseColor", new Color3(params.colorBase.r, params.colorBase.g, params.colorBase.b));
-      material.setColor3("detailColor", new Color3(params.colorDetail.r, params.colorDetail.g, params.colorDetail.b));
-      material.setVector3("sunDirection", new Vector3(0.5, 0.8, 0.3).normalize());
-      material.setFloat("ambientIntensity", 0.4);
-      material.setColor3("fogColor", this.fogColor);
-      material.setFloat("fogDensity", this.fogDensity);
-      material.setFloat("textureScale", 0.5);
-
-      // Load rock diffuse texture for triplanar mapping
-      const rockTex = loadTextureWithFallback(this.scene, this.textureUrls.rock, {
+      const rockTex = loadTextureWithFallbackSync(this.textureUrls.rock, {
         preferredExtensions: ["ktx2", "jpg", "png"],
-        wrapU: Texture.WRAP_ADDRESSMODE,
-        wrapV: Texture.WRAP_ADDRESSMODE,
-        anisotropicFilteringLevel: 8,
+        wrapS: THREE.RepeatWrapping,
+        wrapT: THREE.RepeatWrapping,
+        anisotropy: 8,
       });
-      material.setTexture("rockTexture", rockTex);
+
+      const material = new THREE.ShaderMaterial({
+        vertexShader: proceduralAssetVertexShader,
+        fragmentShader: proceduralAssetFragmentShader,
+        uniforms: {
+          baseColor: { value: new THREE.Color(params.colorBase.r, params.colorBase.g, params.colorBase.b) },
+          detailColor: { value: new THREE.Color(params.colorDetail.r, params.colorDetail.g, params.colorDetail.b) },
+          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+          ambientIntensity: { value: 0.4 },
+          fogColor: { value: this.fogColor.clone() },
+          fogDensity: { value: this.fogDensity },
+          rockTexture: { value: rockTex },
+          textureScale: { value: 0.5 },
+        },
+      });
 
       return material;
     }
@@ -1352,15 +1323,11 @@ export class ProceduralAssetGenerator {
   // Rock Generation
   // ============================================
 
-  private generateRock(params: GeneratorParams): Mesh {
+  private generateRock(params: GeneratorParams): THREE.BufferGeometry {
     const seed = params.seed;
     const subdivisions = calcSubdivision(params.size, 4);
 
-    const rock = MeshBuilder.CreateIcoSphere(
-      "rock_" + seed,
-      { radius: 0.5, subdivisions, flat: false, updatable: true },
-      this.scene
-    );
+    const geometry = new THREE.IcosahedronGeometry(0.5, subdivisions);
 
     // Shape parameters from seed
     const scaleX = 0.5 + Math.abs(noise3D(seed * 1.0, 0, 0)) * 1.2;
@@ -1386,100 +1353,84 @@ export class ProceduralAssetGenerator {
     const peakLen = Math.sqrt(peakDirX * peakDirX + peakDirY * peakDirY + peakDirZ * peakDirZ);
     const peakStrength = 0.1 + Math.abs(noise3D(seed * 6.5, seed * 6.6, seed * 6.7)) * 0.4;
 
-    const positions = rock.getVerticesData(VertexBuffer.PositionKind);
-    if (positions) {
-      const newPositions = new Float32Array(positions.length);
+    const posAttr = geometry.getAttribute("position");
+    const positions = posAttr.array as Float32Array;
 
-      for (let i = 0; i < positions.length; i += 3) {
-        let x = positions[i];
-        let y = positions[i + 1];
-        let z = positions[i + 2];
+    for (let i = 0; i < positions.length; i += 3) {
+      let x = positions[i];
+      let y = positions[i + 1];
+      let z = positions[i + 2];
 
-        const len = Math.sqrt(x * x + y * y + z * z);
-        const nx = x / len;
-        const ny = y / len;
-        const nz = z / len;
+      const len = Math.sqrt(x * x + y * y + z * z);
+      const nx = x / len;
+      const ny = y / len;
+      const nz = z / len;
 
-        // Apply scale
-        x *= scaleX;
-        y *= scaleY;
-        z *= scaleZ;
+      x *= scaleX;
+      y *= scaleY;
+      z *= scaleZ;
 
-        // Apply taper
-        const taperFactorY = 1.0 - taperY * ny;
-        const taperFactorX = 1.0 - taperX * nx;
-        const taperFactorZ = 1.0 - taperZ * nz;
-        x *= taperFactorY * taperFactorX;
-        z *= taperFactorY * taperFactorZ;
+      const taperFactorY = 1.0 - taperY * ny;
+      const taperFactorX = 1.0 - taperX * nx;
+      const taperFactorZ = 1.0 - taperZ * nz;
+      x *= taperFactorY * taperFactorX;
+      z *= taperFactorY * taperFactorZ;
 
-        // Apply twist
-        const twistAngle = twistAmount * ny;
-        const cosT = Math.cos(twistAngle);
-        const sinT = Math.sin(twistAngle);
-        const rx = x * cosT - z * sinT;
-        const rz = x * sinT + z * cosT;
-        x = rx;
-        z = rz;
+      const twistAngle = twistAmount * ny;
+      const cosT = Math.cos(twistAngle);
+      const sinT = Math.sin(twistAngle);
+      const rx = x * cosT - z * sinT;
+      const rz = x * sinT + z * cosT;
+      x = rx;
+      z = rz;
 
-        // Apply bend
-        x += bendX * y * y;
-        z += bendZ * y * y;
+      x += bendX * y * y;
+      z += bendZ * y * y;
 
-        // Apply asymmetry
-        x += asymOffsetX * (1.0 - Math.abs(ny));
-        y += asymOffsetY;
-        z += asymOffsetZ * (1.0 - Math.abs(ny));
+      x += asymOffsetX * (1.0 - Math.abs(ny));
+      y += asymOffsetY;
+      z += asymOffsetZ * (1.0 - Math.abs(ny));
 
-        // Apply peak
-        if (peakLen > 0.1) {
-          const pdx = peakDirX / peakLen;
-          const pdy = peakDirY / peakLen;
-          const pdz = peakDirZ / peakLen;
-          const dot = nx * pdx + ny * pdy + nz * pdz;
-          if (dot > 0) {
-            const peakFactor = Math.pow(dot, 3) * peakStrength;
-            x += pdx * peakFactor;
-            y += pdy * peakFactor;
-            z += pdz * peakFactor;
-          }
+      if (peakLen > 0.1) {
+        const pdx = peakDirX / peakLen;
+        const pdy = peakDirY / peakLen;
+        const pdz = peakDirZ / peakLen;
+        const dot = nx * pdx + ny * pdy + nz * pdz;
+        if (dot > 0) {
+          const peakFactor = Math.pow(dot, 3) * peakStrength;
+          x += pdx * peakFactor;
+          y += pdy * peakFactor;
+          z += pdz * peakFactor;
         }
-
-        // Surface detail
-        const largeDetail = fbm3D(nx * 3 + seed, ny * 3 + seed * 0.7, nz * 3 + seed * 0.3, 2) * 0.12;
-        const mediumDetail = fbm3D(nx * 6 + seed * 2, ny * 6 + seed * 1.5, nz * 6 + seed, 2) * 0.06;
-        const smallDetail = noise3D(nx * 12 + seed * 3, ny * 12 + seed * 2.5, nz * 12) * 0.03;
-        const surfaceDisp = largeDetail + mediumDetail + smallDetail;
-        x += nx * surfaceDisp;
-        y += ny * surfaceDisp;
-        z += nz * surfaceDisp;
-
-        newPositions[i] = x;
-        newPositions[i + 1] = y;
-        newPositions[i + 2] = z;
       }
 
-      rock.updateVerticesData(VertexBuffer.PositionKind, newPositions);
+      const largeDetail = fbm3D(nx * 3 + seed, ny * 3 + seed * 0.7, nz * 3 + seed * 0.3, 2) * 0.12;
+      const mediumDetail = fbm3D(nx * 6 + seed * 2, ny * 6 + seed * 1.5, nz * 6 + seed, 2) * 0.06;
+      const smallDetail = noise3D(nx * 12 + seed * 3, ny * 12 + seed * 2.5, nz * 12) * 0.03;
+      const surfaceDisp = largeDetail + mediumDetail + smallDetail;
+      x += nx * surfaceDisp;
+      y += ny * surfaceDisp;
+      z += nz * surfaceDisp;
 
-      const indices = rock.getIndices();
-      const normals = rock.getVerticesData(VertexBuffer.NormalKind);
-      if (indices && normals) {
-        VertexData.ComputeNormals(newPositions, indices, normals);
-        rock.updateVerticesData(VertexBuffer.NormalKind, normals);
-      }
+      positions[i] = x;
+      positions[i + 1] = y;
+      positions[i + 2] = z;
     }
 
-    setRockVertexColors(rock, seed);
-    rock.scaling.setAll(params.size);
-    return rock;
+    posAttr.needsUpdate = true;
+    geometry.computeVertexNormals();
+
+    setRockVertexColors(geometry, seed);
+    return geometry;
   }
 
   // ============================================
   // Tree Generation
   // ============================================
 
-  private generateTree(params: GeneratorParams): Mesh {
+  private generateTree(params: GeneratorParams): THREE.BufferGeometry {
     const seed = params.seed;
-    const meshes: Mesh[] = [];
+    const geometries: THREE.BufferGeometry[] = [];
 
     // Trunk parameters
     const trunkHeight = 0.8 + Math.abs(noise3D(seed, 0, 0)) * 1.2;
@@ -1489,57 +1440,54 @@ export class ProceduralAssetGenerator {
     const trunkBendZ = noise3D(0, 0, seed * 2) * 0.3;
     const trunkTwist = noise3D(seed * 3, seed * 0.5, 0) * 0.5;
 
-    const trunk = MeshBuilder.CreateCylinder(
-      "trunk",
-      {
-        height: trunkHeight,
-        diameterTop: trunkThickness * 2 * trunkTaper,
-        diameterBottom: trunkThickness * 2,
-        tessellation: 8,
-        subdivisions: 8,
-        updatable: true,
-      },
-      this.scene
+    const trunkGeo = new THREE.CylinderGeometry(
+      trunkThickness * trunkTaper,
+      trunkThickness,
+      trunkHeight,
+      8,
+      8
     );
 
     // Deform trunk
-    const trunkPositions = trunk.getVerticesData(VertexBuffer.PositionKind);
-    if (trunkPositions) {
-      const newPositions = new Float32Array(trunkPositions.length);
-      const halfHeight = trunkHeight / 2;
+    const trunkPositions = trunkGeo.getAttribute("position").array as Float32Array;
+    const halfHeight = trunkHeight / 2;
 
-      for (let i = 0; i < trunkPositions.length; i += 3) {
-        let x = trunkPositions[i];
-        const y = trunkPositions[i + 1];
-        let z = trunkPositions[i + 2];
+    for (let i = 0; i < trunkPositions.length; i += 3) {
+      let x = trunkPositions[i];
+      const y = trunkPositions[i + 1];
+      let z = trunkPositions[i + 2];
 
-        const t = (y + halfHeight) / trunkHeight;
+      const t = (y + halfHeight) / trunkHeight;
 
-        x += trunkBendX * t * t;
-        z += trunkBendZ * t * t;
+      x += trunkBendX * t * t;
+      z += trunkBendZ * t * t;
 
-        const twistAngle = trunkTwist * t;
-        const cosT = Math.cos(twistAngle);
-        const sinT = Math.sin(twistAngle);
-        const rx = x * cosT - z * sinT;
-        const rz = x * sinT + z * cosT;
-        x = rx;
-        z = rz;
+      const twistAngle = trunkTwist * t;
+      const cosT = Math.cos(twistAngle);
+      const sinT = Math.sin(twistAngle);
+      const rx = x * cosT - z * sinT;
+      const rz = x * sinT + z * cosT;
+      x = rx;
+      z = rz;
 
-        const bark = fbm3D(x * 20 + seed, y * 10, z * 20 + seed, 2) * 0.015;
-        x += bark;
-        z += bark;
+      const bark = fbm3D(x * 20 + seed, y * 10, z * 20 + seed, 2) * 0.015;
+      x += bark;
+      z += bark;
 
-        newPositions[i] = x;
-        newPositions[i + 1] = y;
-        newPositions[i + 2] = z;
-      }
-      trunk.updateVerticesData(VertexBuffer.PositionKind, newPositions);
+      trunkPositions[i] = x;
+      trunkPositions[i + 1] = y;
+      trunkPositions[i + 2] = z;
     }
+    trunkGeo.getAttribute("position").needsUpdate = true;
+    trunkGeo.computeVertexNormals();
 
-    trunk.position.y = trunkHeight / 2;
-    setBarkVertexColors(trunk, seed, false);
-    meshes.push(trunk);
+    // Translate trunk up so bottom is at y=0
+    const trunkTranslate = new THREE.Matrix4().makeTranslation(0, trunkHeight / 2, 0);
+    trunkGeo.applyMatrix4(trunkTranslate);
+
+    setBarkVertexColors(trunkGeo, seed, false);
+    ensureAttributes(trunkGeo);
+    geometries.push(trunkGeo);
 
     // Branches
     const branchCount = 3 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 4);
@@ -1589,68 +1537,61 @@ export class ProceduralAssetGenerator {
       const branchCenterY = (branchY + branchEndY) / 2;
       const branchCenterZ = (branchStartZ + branchEndZ) / 2;
 
-      const branch = MeshBuilder.CreateCylinder(
-        "branch_" + i,
-        {
-          height: branchLength,
-          diameterTop: branchThick * 0.5,
-          diameterBottom: branchThick,
-          tessellation: 6,
-          subdivisions: 4,
-          updatable: true,
-        },
-        this.scene
+      const branchGeo = new THREE.CylinderGeometry(
+        branchThick * 0.5,
+        branchThick,
+        branchLength,
+        6,
+        4
       );
 
-      // Apply curvature deformation to branch (droop + slight S-curve)
-      const branchPositions = branch.getVerticesData(VertexBuffer.PositionKind);
-      if (branchPositions) {
-        const newBranchPositions = new Float32Array(branchPositions.length);
-        const halfLen = branchLength / 2;
-        // Curve parameters: droop and sideways bend
-        const droopAmount = 0.08 + Math.abs(noise3D(bSeed * 7.3, 0, 0)) * 0.12;
-        const sideBend = (noise3D(0, bSeed * 8.1, 0) - 0.5) * 0.06;
+      // Apply curvature deformation to branch
+      const branchPositions = branchGeo.getAttribute("position").array as Float32Array;
+      const halfLen = branchLength / 2;
+      const droopAmount = 0.08 + Math.abs(noise3D(bSeed * 7.3, 0, 0)) * 0.12;
+      const sideBend = (noise3D(0, bSeed * 8.1, 0) - 0.5) * 0.06;
 
-        for (let vi = 0; vi < branchPositions.length; vi += 3) {
-          let bx = branchPositions[vi];
-          const by = branchPositions[vi + 1];
-          let bz = branchPositions[vi + 2];
+      for (let vi = 0; vi < branchPositions.length; vi += 3) {
+        let bx = branchPositions[vi];
+        const by = branchPositions[vi + 1];
+        let bz = branchPositions[vi + 2];
 
-          // t: 0 at base, 1 at tip
-          const bt = (by + halfLen) / branchLength;
-          // Quadratic droop (stronger toward tip)
-          bz += droopAmount * bt * bt * branchLength;
-          // Slight S-curve sideways
-          bx += sideBend * Math.sin(bt * Math.PI) * branchLength;
+        const bt = (by + halfLen) / branchLength;
+        bz += droopAmount * bt * bt * branchLength;
+        bx += sideBend * Math.sin(bt * Math.PI) * branchLength;
 
-          newBranchPositions[vi] = bx;
-          newBranchPositions[vi + 1] = by;
-          newBranchPositions[vi + 2] = bz;
-        }
-        branch.updateVerticesData(VertexBuffer.PositionKind, newBranchPositions);
+        branchPositions[vi] = bx;
+        branchPositions[vi + 1] = by;
+        branchPositions[vi + 2] = bz;
       }
+      branchGeo.getAttribute("position").needsUpdate = true;
+      branchGeo.computeVertexNormals();
 
-      // Rotate branch
-      const branchDirVec = new Vector3(branchDirX, branchDirY, branchDirZ).normalize();
-      const upVec = Vector3.Up();
-      const dot = Vector3.Dot(upVec, branchDirVec);
+      // Rotate branch to point in direction
+      const branchDirVec = new THREE.Vector3(branchDirX, branchDirY, branchDirZ).normalize();
+      const upVec = new THREE.Vector3(0, 1, 0);
+      const quat = new THREE.Quaternion();
 
+      const dot = upVec.dot(branchDirVec);
       if (Math.abs(dot + 1) < 0.0001) {
-        branch.rotationQuaternion = Quaternion.RotationAxis(Vector3.Right(), Math.PI);
+        quat.setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
       } else if (Math.abs(dot - 1) < 0.0001) {
-        branch.rotationQuaternion = Quaternion.Identity();
+        quat.identity();
       } else {
-        const axis = Vector3.Cross(upVec, branchDirVec).normalize();
+        const axis = new THREE.Vector3().crossVectors(upVec, branchDirVec).normalize();
         const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
-        branch.rotationQuaternion = Quaternion.RotationAxis(axis, angle);
+        quat.setFromAxisAngle(axis, angle);
       }
 
-      branch.position.x = branchCenterX;
-      branch.position.y = branchCenterY;
-      branch.position.z = branchCenterZ;
-      setBarkVertexColors(branch, bSeed, true);
+      // Build transform: rotate then translate
+      const branchMatrix = new THREE.Matrix4()
+        .makeRotationFromQuaternion(quat)
+        .setPosition(branchCenterX, branchCenterY, branchCenterZ);
+      branchGeo.applyMatrix4(branchMatrix);
 
-      meshes.push(branch);
+      setBarkVertexColors(branchGeo, bSeed, true);
+      ensureAttributes(branchGeo);
+      geometries.push(branchGeo);
 
       // Leaf-card clusters at branch end
       const leafClusterCount = 1 + Math.floor(Math.abs(noise3D(bSeed * 5, 0, 0)) * 2.2);
@@ -1669,16 +1610,12 @@ export class ProceduralAssetGenerator {
           const cardHeight =
             clusterRadius * (0.9 + Math.abs(noise3D(0, cardSeed * 2, 0)) * 1.05);
 
-          const card = createLeafCardMesh(
-            `leaf_card_${i}_${lc}_${c}`,
-            this.scene,
-            {
-              width: cardWidth,
-              height: cardHeight,
-              seed: cardSeed,
-              curve: clusterRadius * 0.35,
-            }
-          );
+          const cardGeo = createLeafCardGeometry({
+            width: cardWidth,
+            height: cardHeight,
+            seed: cardSeed,
+            curve: clusterRadius * 0.35,
+          });
 
           const radial =
             Math.pow(Math.abs(noise3D(cardSeed * 3.1, 0, 0)), 0.7) *
@@ -1687,19 +1624,25 @@ export class ProceduralAssetGenerator {
           const theta = (noise3D(0, cardSeed * 4.1, 0) + 0.5) * Math.PI * 2;
           const lift = Math.abs(noise3D(0, 0, cardSeed * 5.1)) * clusterRadius * 0.7;
 
-          card.position.x =
+          const cardX =
             branchEndX + Math.cos(theta) * radial + branchDirX * clusterRadius * 0.08;
-          card.position.y = branchEndY + lift + branchDirY * clusterRadius * 0.1;
-          card.position.z =
+          const cardY = branchEndY + lift + branchDirY * clusterRadius * 0.1;
+          const cardZ =
             branchEndZ + Math.sin(theta) * radial + branchDirZ * clusterRadius * 0.08;
 
-          card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.6;
-          card.rotation.x =
-            -0.12 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.45;
-          card.rotation.z = noise3D(0, 0, cardSeed * 6.5) * 0.25;
+          const rotY = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.6;
+          const rotX = -0.12 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.45;
+          const rotZ = noise3D(0, 0, cardSeed * 6.5) * 0.25;
 
-          setLeafVertexColors(card, cardSeed, heightRatio > 0.7);
-          meshes.push(card);
+          const euler = new THREE.Euler(rotX, rotY, rotZ);
+          const cardMatrix = new THREE.Matrix4()
+            .makeRotationFromEuler(euler)
+            .setPosition(cardX, cardY, cardZ);
+          cardGeo.applyMatrix4(cardMatrix);
+
+          setLeafVertexColors(cardGeo, cardSeed, heightRatio > 0.7);
+          ensureAttributes(cardGeo);
+          geometries.push(cardGeo);
         }
       }
     }
@@ -1729,7 +1672,7 @@ export class ProceduralAssetGenerator {
         const cardHeight =
           clusterRadius * (0.95 + Math.abs(noise3D(0, cardSeed * 2.4, 0)) * 1.1);
 
-        const card = createLeafCardMesh(`top_leaf_card_${i}_${c}`, this.scene, {
+        const cardGeo = createLeafCardGeometry({
           width: cardWidth,
           height: cardHeight,
           seed: cardSeed,
@@ -1741,32 +1684,37 @@ export class ProceduralAssetGenerator {
           clusterRadius *
           1.05;
         const theta = (noise3D(0, cardSeed * 4.7, 0) + 0.5) * Math.PI * 2;
-        card.position.x = clusterCenterX + Math.cos(theta) * radial;
-        card.position.y =
+        const cardX = clusterCenterX + Math.cos(theta) * radial;
+        const cardY =
           clusterCenterY + Math.abs(noise3D(0, 0, cardSeed * 5.2)) * clusterRadius * 0.85;
-        card.position.z = clusterCenterZ + Math.sin(theta) * radial;
-        card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.8;
-        card.rotation.x = -0.08 + Math.abs(noise3D(0, cardSeed * 6.7, 0)) * 0.4;
-        card.rotation.z = noise3D(0, 0, cardSeed * 6.9) * 0.28;
+        const cardZ = clusterCenterZ + Math.sin(theta) * radial;
+        const rotY = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.8;
+        const rotX = -0.08 + Math.abs(noise3D(0, cardSeed * 6.7, 0)) * 0.4;
+        const rotZ = noise3D(0, 0, cardSeed * 6.9) * 0.28;
 
-        setLeafVertexColors(card, cardSeed, true);
-        meshes.push(card);
+        const euler = new THREE.Euler(rotX, rotY, rotZ);
+        const cardMatrix = new THREE.Matrix4()
+          .makeRotationFromEuler(euler)
+          .setPosition(cardX, cardY, cardZ);
+        cardGeo.applyMatrix4(cardMatrix);
+
+        setLeafVertexColors(cardGeo, cardSeed, true);
+        ensureAttributes(cardGeo);
+        geometries.push(cardGeo);
       }
     }
 
-    const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true);
+    const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
     if (merged) {
-      merged.name = "tree_" + seed;
-      merged.scaling.setAll(params.size);
       return merged;
     }
 
-    return new Mesh("tree_" + seed, this.scene);
+    return new THREE.BufferGeometry();
   }
 
-  private generateBush(params: GeneratorParams): Mesh {
+  private generateBush(params: GeneratorParams): THREE.BufferGeometry {
     const seed = params.seed;
-    const meshes: Mesh[] = [];
+    const geometries: THREE.BufferGeometry[] = [];
 
     const overallSpread = 0.25 + Math.abs(noise3D(0, seed, 0)) * 0.35;
     const clusterCount = 6 + Math.floor(Math.abs(noise3D(seed * 4, seed, 0)) * 7);
@@ -1776,26 +1724,29 @@ export class ProceduralAssetGenerator {
       const twigSeed = seed + i * 37.13;
       const twigLength = 0.11 + Math.abs(noise3D(twigSeed, 0, 0)) * 0.16;
       const twigRadius = 0.01 + Math.abs(noise3D(0, twigSeed, 0)) * 0.015;
-      const twig = MeshBuilder.CreateCylinder(
-        `bush_twig_${i}`,
-        {
-          height: twigLength,
-          diameterTop: twigRadius * 0.6,
-          diameterBottom: twigRadius,
-          tessellation: 5,
-        },
-        this.scene
+      const twigGeo = new THREE.CylinderGeometry(
+        twigRadius * 0.6,
+        twigRadius,
+        twigLength,
+        5
       );
 
       const yaw = (noise3D(0, twigSeed * 2.1, 0) + 0.5) * Math.PI * 2;
       const pitch = 0.2 + Math.abs(noise3D(twigSeed * 2.3, 0, 0)) * 0.45;
-      twig.rotation.y = yaw;
-      twig.rotation.z = pitch;
-      twig.position.x = Math.cos(yaw) * 0.04;
-      twig.position.z = Math.sin(yaw) * 0.04;
-      twig.position.y = twigLength * 0.35;
-      setBarkVertexColors(twig, twigSeed, true);
-      meshes.push(twig);
+
+      const euler = new THREE.Euler(0, yaw, pitch);
+      const twigMatrix = new THREE.Matrix4()
+        .makeRotationFromEuler(euler)
+        .setPosition(
+          Math.cos(yaw) * 0.04,
+          twigLength * 0.35,
+          Math.sin(yaw) * 0.04
+        );
+      twigGeo.applyMatrix4(twigMatrix);
+
+      setBarkVertexColors(twigGeo, twigSeed, true);
+      ensureAttributes(twigGeo);
+      geometries.push(twigGeo);
     }
 
     for (let i = 0; i < clusterCount; i++) {
@@ -1817,7 +1768,7 @@ export class ProceduralAssetGenerator {
         const cardHeight =
           clusterRadius * (0.95 + Math.abs(noise3D(0, cardSeed * 2.2, 0)) * 1.0);
 
-        const card = createLeafCardMesh(`bush_leaf_card_${i}_${c}`, this.scene, {
+        const cardGeo = createLeafCardGeometry({
           width: cardWidth,
           height: cardHeight,
           seed: cardSeed,
@@ -1831,32 +1782,37 @@ export class ProceduralAssetGenerator {
         const theta = (noise3D(0, cardSeed * 4.6, 0) + 0.5) * Math.PI * 2;
         const lift = Math.abs(noise3D(0, 0, cardSeed * 5.3)) * clusterRadius * 0.85;
 
-        card.position.x = centerX + Math.cos(theta) * radial;
-        card.position.y = centerY + lift;
-        card.position.z = centerZ + Math.sin(theta) * radial;
+        const cardX = centerX + Math.cos(theta) * radial;
+        const cardY = centerY + lift;
+        const cardZ = centerZ + Math.sin(theta) * radial;
 
-        card.rotation.y = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.7;
-        card.rotation.x = -0.1 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.5;
-        card.rotation.z = noise3D(0, 0, cardSeed * 6.5) * 0.3;
+        const rotY = theta + noise3D(cardSeed * 6.1, 0, 0) * 0.7;
+        const rotX = -0.1 + Math.abs(noise3D(0, cardSeed * 6.3, 0)) * 0.5;
+        const rotZ = noise3D(0, 0, cardSeed * 6.5) * 0.3;
 
-        setLeafVertexColors(card, cardSeed, false);
-        meshes.push(card);
+        const euler = new THREE.Euler(rotX, rotY, rotZ);
+        const cardMatrix = new THREE.Matrix4()
+          .makeRotationFromEuler(euler)
+          .setPosition(cardX, cardY, cardZ);
+        cardGeo.applyMatrix4(cardMatrix);
+
+        setLeafVertexColors(cardGeo, cardSeed, false);
+        ensureAttributes(cardGeo);
+        geometries.push(cardGeo);
       }
     }
 
-    const merged = Mesh.MergeMeshes(meshes, true, true, undefined, false, true);
+    const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
     if (merged) {
-      merged.name = "bush_" + seed;
-      merged.scaling.setAll(params.size);
       return merged;
     }
 
-    return new Mesh("bush_" + seed, this.scene);
+    return new THREE.BufferGeometry();
   }
 
-  private generateGrassClump(params: GeneratorParams): Mesh {
+  private generateGrassClump(params: GeneratorParams): THREE.BufferGeometry {
     const seed = params.seed;
-    const blades: Mesh[] = [];
+    const bladeGeometries: THREE.BufferGeometry[] = [];
 
     const clumpDensity = 0.3 + Math.abs(noise3D(seed * 0.5, 0, 0)) * 0.7;
     const clumpSpread = 0.04 + Math.abs(noise3D(0, seed * 0.5, 0)) * 0.16;
@@ -1919,41 +1875,41 @@ export class ProceduralAssetGenerator {
 
       const uvs = [0, 0, 1, 0, 0.1, 0.35, 0.9, 0.35, 0.2, 0.65, 0.8, 0.65, 0.35, 0.9, 0.65, 0.9, 0.5, 1];
 
-      const blade = new Mesh("blade_" + i, this.scene);
-      const vertexData = new VertexData();
-      vertexData.positions = positions;
-      vertexData.indices = indices;
-      vertexData.normals = normals;
-      vertexData.uvs = uvs;
-      vertexData.applyToMesh(blade);
+      const bladeGeo = new THREE.BufferGeometry();
+      bladeGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+      bladeGeo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(normals), 3));
+      bladeGeo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(uvs), 2));
+      bladeGeo.setIndex(indices);
 
+      // Position and rotate blade
       const angle = (noise3D(iSeed * 2, 0, 0) + 0.5) * Math.PI * 2;
       const distFactor = Math.pow(Math.abs(noise3D(0, iSeed * 2, 0)), 1.0 / clumpDensity);
       const dist = distFactor * clumpSpread;
 
-      blade.position.x = Math.cos(angle) * dist;
-      blade.position.z = Math.sin(angle) * dist;
+      const posX = Math.cos(angle) * dist;
+      const posZ = Math.sin(angle) * dist;
 
-      blade.rotation.y = (noise3D(iSeed, iSeed, 0) + 0.5) * Math.PI * 2;
-      blade.rotation.x = noise3D(iSeed * 3, 0, 0) * 0.12;
-      blade.rotation.z = noise3D(0, iSeed * 3, 0) * 0.1;
+      const rotY = (noise3D(iSeed, iSeed, 0) + 0.5) * Math.PI * 2;
+      const rotX = noise3D(iSeed * 3, 0, 0) * 0.12;
+      const rotZ = noise3D(0, iSeed * 3, 0) * 0.1;
 
-      blades.push(blade);
+      const euler = new THREE.Euler(rotX, rotY, rotZ);
+      const bladeMatrix = new THREE.Matrix4()
+        .makeRotationFromEuler(euler)
+        .setPosition(posX, 0, posZ);
+      bladeGeo.applyMatrix4(bladeMatrix);
+
+      setGeometryVertexColor(bladeGeo, 0.35, 0.45, 0.22);
+      ensureAttributes(bladeGeo);
+      bladeGeometries.push(bladeGeo);
     }
 
-    // Set grass vertex colors
-    for (const blade of blades) {
-      setMeshVertexColor(blade, 0.35, 0.45, 0.22);
-    }
-
-    const merged = Mesh.MergeMeshes(blades, true, true, undefined, false, true);
+    const merged = BufferGeometryUtils.mergeGeometries(bladeGeometries, false);
     if (merged) {
-      merged.name = "grass_" + seed;
-      merged.scaling.setAll(params.size);
       return merged;
     }
 
-    return new Mesh("grass_" + seed, this.scene);
+    return new THREE.BufferGeometry();
   }
 
   dispose(): void {

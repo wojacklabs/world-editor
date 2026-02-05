@@ -2,7 +2,7 @@
  * ProceduralPropsRenderer - Renders procedural props (tree, rock, bush, grass_clump)
  *
  * Uses ProceduralAssetGenerator to create identical meshes as the editor.
- * Supports both individual meshes and thin instancing for performance.
+ * Supports both individual meshes and InstancedMesh for performance.
  *
  * Usage:
  * ```typescript
@@ -14,16 +14,11 @@
  * ```
  */
 
-import {
-  Scene,
-  Mesh,
-  Vector3,
-  Matrix,
-  Vector2,
-} from "@babylonjs/core";
+import * as THREE from "three";
 import type { ProceduralPropInstance } from "./types";
 import { ProceduralAssetGenerator, GeneratorParams } from "./ProceduralAssetGenerator";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../shared/foliage/FoliageQualityProfile";
+import { disposeMesh } from "../shared/rendering/threeHelpers";
 
 export interface ProceduralPropsRendererOptions {
   /** Use instancing for better performance (default: false - uses individual meshes to preserve unique params) */
@@ -52,21 +47,20 @@ type NormalizedProceduralPropsRendererOptions = {
 };
 
 export class ProceduralPropsRenderer {
-  private scene: Scene;
+  private scene: THREE.Scene;
   private options: NormalizedProceduralPropsRendererOptions;
   private generator: ProceduralAssetGenerator;
 
   // Individual meshes (preserves unique params)
-  private propMeshes: Mesh[] = [];
+  private propMeshes: THREE.Mesh[] = [];
 
   // Instancing (for performance when params similarity is acceptable)
-  private baseMeshes: Map<string, Mesh> = new Map();
-  private instanceMeshes: Map<string, Mesh> = new Map();
+  private instanceMeshes: THREE.InstancedMesh[] = [];
 
   private lastTime: number = 0;
   private referenceReadyPromise: Promise<void>;
 
-  constructor(scene: Scene, options: ProceduralPropsRendererOptions = {}) {
+  constructor(scene: THREE.Scene, options: ProceduralPropsRendererOptions = {}) {
     this.scene = scene;
     this.options = {
       useInstancing: options.useInstancing ?? false, // Default to individual for quality
@@ -87,19 +81,22 @@ export class ProceduralPropsRenderer {
       this.generator.setTextureUrls(options.textureUrls);
     }
     this.generator.setWind(
-      new Vector2(Math.cos(this.options.windAngle), Math.sin(this.options.windAngle)),
+      new THREE.Vector2(Math.cos(this.options.windAngle), Math.sin(this.options.windAngle)),
       this.options.windStrength
     );
     this.referenceReadyPromise = this.generator.ensureReferenceTemplatesLoaded();
 
-    // Register time update for wind animation
     this.lastTime = performance.now();
-    this.scene.registerBeforeRender(() => {
-      const now = performance.now();
-      const deltaTime = (now - this.lastTime) / 1000;
-      this.lastTime = now;
-      this.generator.updateTime(deltaTime);
-    });
+  }
+
+  /**
+   * Call from your animation loop to advance wind animation.
+   */
+  update(): void {
+    const now = performance.now();
+    const deltaTime = (now - this.lastTime) / 1000;
+    this.lastTime = now;
+    this.generator.updateTime(deltaTime);
   }
 
   /**
@@ -127,8 +124,8 @@ export class ProceduralPropsRenderer {
   }
 
   /**
-   * Load props using thin instancing for better performance
-   * Note: This mode uses shared base meshes, so individual params are not fully preserved
+   * Load props using InstancedMesh for better performance.
+   * Note: This mode uses shared base meshes, so individual params are not fully preserved.
    */
   private loadPropsInstanced(props: ProceduralPropInstance[]): void {
     // Group by asset type
@@ -142,7 +139,7 @@ export class ProceduralPropsRenderer {
       byType.get(type)!.push(prop);
     }
 
-    // Create instance buffers for each type
+    // Create InstancedMesh for each type
     for (const [type, typeProps] of byType) {
       if (typeProps.length === 0) continue;
 
@@ -162,37 +159,40 @@ export class ProceduralPropsRenderer {
       const baseMesh = this.generator.generate(params);
       if (!baseMesh) continue;
 
-      baseMesh.isVisible = false;
-      this.baseMeshes.set(type, baseMesh);
-
-      // Create instance mesh
-      const instanceMesh = baseMesh.clone(`${type}_instances`);
-      instanceMesh.isVisible = true;
-
-      // Create material
+      // Create InstancedMesh from base geometry and material
       const material = this.generator.createMaterial(params);
-      instanceMesh.material = material;
+      const instancedMesh = new THREE.InstancedMesh(
+        baseMesh.geometry,
+        material,
+        typeProps.length
+      );
+      instancedMesh.name = `${type}_instances`;
 
-      // Build matrix buffer
+      // Build instance matrices
       // Note: instance.scale already contains the final intended size
       // (params.size and scale are kept in sync in the editor)
-      const matrices = new Float32Array(typeProps.length * 16);
+      const mat4 = new THREE.Matrix4();
+      const position = new THREE.Vector3();
+      const quaternion = new THREE.Quaternion();
+      const scale = new THREE.Vector3();
 
       for (let i = 0; i < typeProps.length; i++) {
         const prop = typeProps[i];
-        const matrix = Matrix.Compose(
-          new Vector3(prop.scale.x, prop.scale.y, prop.scale.z),
-          Vector3.Zero().toQuaternion(),
-          new Vector3(prop.position.x, prop.position.y, prop.position.z)
-        );
-        matrix.copyToArray(matrices, i * 16);
+        position.set(prop.position.x, prop.position.y, prop.position.z);
+        quaternion.identity();
+        scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
+        mat4.compose(position, quaternion, scale);
+        instancedMesh.setMatrixAt(i, mat4);
       }
 
-      instanceMesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
-      instanceMesh.thinInstanceCount = typeProps.length;
-      instanceMesh.thinInstanceRefreshBoundingInfo();
+      instancedMesh.instanceMatrix.needsUpdate = true;
+      instancedMesh.computeBoundingSphere();
 
-      this.instanceMeshes.set(type, instanceMesh);
+      this.scene.add(instancedMesh);
+      this.instanceMeshes.push(instancedMesh);
+
+      // Dispose the temporary base mesh (geometry is shared, don't dispose it)
+      this.scene.remove(baseMesh);
     }
   }
 
@@ -211,14 +211,14 @@ export class ProceduralPropsRenderer {
   /**
    * Create a single prop mesh with full params
    */
-  private createPropMesh(prop: ProceduralPropInstance): Mesh | null {
+  private createPropMesh(prop: ProceduralPropInstance): THREE.Mesh | null {
     // Generate mesh at unit size (1.0) - actual scaling comes from instance.scale
     // In the editor, params.size and instance.scale are kept in sync,
     // so we ignore params.size and apply only instance.scale
     const params: GeneratorParams = {
       type: prop.assetType,
       seed: prop.params.seed,
-      size: 1.0,  // Unit size - scaling handled by instance.scale below
+      size: 1.0, // Unit size - scaling handled by instance.scale below
       sizeVariation: prop.params.sizeVariation,
       noiseScale: prop.params.noiseScale,
       noiseAmplitude: prop.params.noiseAmplitude,
@@ -229,14 +229,10 @@ export class ProceduralPropsRenderer {
     const mesh = this.generator.generate(params);
     if (!mesh) return null;
 
-    // Apply material
-    const material = this.generator.createMaterial(params);
-    mesh.material = material;
-
     // Apply transform - instance.scale contains the final intended size
-    mesh.position = new Vector3(prop.position.x, prop.position.y, prop.position.z);
-    mesh.rotation = new Vector3(prop.rotation.x, prop.rotation.y, prop.rotation.z);
-    mesh.scaling = new Vector3(prop.scale.x, prop.scale.y, prop.scale.z);
+    mesh.position.set(prop.position.x, prop.position.y, prop.position.z);
+    mesh.rotation.set(prop.rotation.x, prop.rotation.y, prop.rotation.z);
+    mesh.scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
 
     mesh.name = `prop_${prop.id}`;
 
@@ -249,7 +245,7 @@ export class ProceduralPropsRenderer {
   setWind(angleDegrees: number, strength: number): void {
     const angleRad = angleDegrees * Math.PI / 180;
     this.generator.setWind(
-      new Vector2(Math.cos(angleRad), Math.sin(angleRad)),
+      new THREE.Vector2(Math.cos(angleRad), Math.sin(angleRad)),
       strength
     );
   }
@@ -258,11 +254,11 @@ export class ProceduralPropsRenderer {
    * Set visibility
    */
   setVisible(visible: boolean): void {
-    for (const mesh of this.instanceMeshes.values()) {
-      mesh.isVisible = visible;
+    for (const mesh of this.instanceMeshes) {
+      mesh.visible = visible;
     }
     for (const mesh of this.propMeshes) {
-      mesh.isVisible = visible;
+      mesh.visible = visible;
     }
   }
 
@@ -271,8 +267,8 @@ export class ProceduralPropsRenderer {
    */
   getPropCount(): number {
     let count = this.propMeshes.length;
-    for (const mesh of this.instanceMeshes.values()) {
-      count += mesh.thinInstanceCount;
+    for (const mesh of this.instanceMeshes) {
+      count += mesh.count;
     }
     return count;
   }
@@ -281,20 +277,13 @@ export class ProceduralPropsRenderer {
    * Dispose all resources
    */
   dispose(): void {
-    for (const mesh of this.baseMeshes.values()) {
-      mesh.dispose();
+    for (const mesh of this.instanceMeshes) {
+      disposeMesh(this.scene, mesh);
     }
-    this.baseMeshes.clear();
-
-    for (const mesh of this.instanceMeshes.values()) {
-      mesh.material?.dispose();
-      mesh.dispose();
-    }
-    this.instanceMeshes.clear();
+    this.instanceMeshes = [];
 
     for (const mesh of this.propMeshes) {
-      mesh.material?.dispose();
-      mesh.dispose();
+      disposeMesh(this.scene, mesh);
     }
     this.propMeshes = [];
 

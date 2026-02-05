@@ -19,22 +19,12 @@
  *   size: tile.size,
  *   seaLevel: tile.seaLevel,
  * });
- * water.startAnimation();
+ * // In render loop:
+ * water.update(time, camera.position);
  * ```
  */
 
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  ShaderMaterial,
-  Vector2,
-  Vector3,
-  Vector4,
-  Color3,
-  Effect,
-  Observer,
-} from "@babylonjs/core";
+import * as THREE from "three";
 
 // ============================================
 // Water Vertex Shader (Gerstner Waves)
@@ -43,11 +33,6 @@ import {
 const waterVertexShader = `
 precision highp float;
 
-attribute vec3 position;
-attribute vec2 uv;
-
-uniform mat4 world;
-uniform mat4 viewProjection;
 uniform float uTime;
 
 uniform vec4 uWave0;
@@ -79,7 +64,7 @@ vec3 gerstnerWave(vec4 wave, vec3 p) {
 }
 
 void main() {
-    vec3 worldPos = (world * vec4(position, 1.0)).xyz;
+    vec3 worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
     vOrigXZ = worldPos.xz;
 
     vec3 displacement = vec3(0.0);
@@ -95,7 +80,7 @@ void main() {
     vUV = uv;
     vViewVector = normalize(uCameraPosition - worldPos);
 
-    gl_Position = viewProjection * vec4(worldPos, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
 }
 `;
 
@@ -222,10 +207,8 @@ void main() {
 // WaterRenderer Class
 // ============================================
 
-let waterShaderCounter = 0;
-
 interface GerstnerWave {
-  direction: Vector2;
+  direction: THREE.Vector2;
   steepness: number;
   wavelength: number;
 }
@@ -234,44 +217,33 @@ export interface WaterConfig {
   size: number;
   seaLevel: number;
   // Colors
-  shallowColor?: Color3;
-  deepColor?: Color3;
-  fresnelColor?: Color3;
+  shallowColor?: THREE.Color;
+  deepColor?: THREE.Color;
+  fresnelColor?: THREE.Color;
   // Waves
   waves?: GerstnerWave[];
   fresnelPower?: number;
   // Sun
-  sunDirection?: Vector3;
-  sunColor?: Color3;
+  sunDirection?: THREE.Vector3;
+  sunColor?: THREE.Color;
 }
 
 const DEFAULT_WAVES: GerstnerWave[] = [
-  { direction: new Vector2(1.0, 0.3), steepness: 0.375, wavelength: 8.0 },
-  { direction: new Vector2(0.3, 1.0), steepness: 0.27, wavelength: 5.0 },
-  { direction: new Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 3.0 },
-  { direction: new Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.5 },
+  { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.375, wavelength: 8.0 },
+  { direction: new THREE.Vector2(0.3, 1.0), steepness: 0.27, wavelength: 5.0 },
+  { direction: new THREE.Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 3.0 },
+  { direction: new THREE.Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.5 },
 ];
 
 export class WaterRenderer {
-  private scene: Scene;
-  private mesh: Mesh | null = null;
-  private material: ShaderMaterial | null = null;
-  private renderObserver: Observer<Scene> | null = null;
-  private startTime: number = 0;
-  private animating: boolean = false;
-  private shaderId: number;
+  private scene: THREE.Scene;
+  private mesh: THREE.Mesh | null = null;
+  private material: THREE.ShaderMaterial | null = null;
 
-  private sunDirection: Vector3 = new Vector3(0.5, 0.8, 0.3).normalize();
+  private sunDirection: THREE.Vector3 = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
 
-  constructor(scene: Scene) {
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
-    this.shaderId = ++waterShaderCounter;
-    this.registerShaders();
-  }
-
-  private registerShaders(): void {
-    Effect.ShadersStore[`gameWater${this.shaderId}VertexShader`] = waterVertexShader;
-    Effect.ShadersStore[`gameWater${this.shaderId}FragmentShader`] = waterFragmentShader;
   }
 
   create(config: WaterConfig): void {
@@ -280,120 +252,91 @@ export class WaterRenderer {
     const {
       size,
       seaLevel,
-      shallowColor = new Color3(0.04, 0.12, 0.15),
-      deepColor = new Color3(0.01, 0.04, 0.08),
-      fresnelColor = new Color3(0.45, 0.65, 0.75),
+      shallowColor = new THREE.Color(0.04, 0.12, 0.15),
+      deepColor = new THREE.Color(0.01, 0.04, 0.08),
+      fresnelColor = new THREE.Color(0.45, 0.65, 0.75),
       waves = DEFAULT_WAVES,
       fresnelPower = 2.0,
       sunDirection,
-      sunColor = new Color3(1.0, 0.95, 0.8),
+      sunColor = new THREE.Color(1.0, 0.95, 0.8),
     } = config;
 
     if (sunDirection) {
-      this.sunDirection = sunDirection.normalize();
+      this.sunDirection = sunDirection.clone().normalize();
     }
 
-    // Create water plane
-    this.mesh = MeshBuilder.CreateGround(
-      "gameWater",
-      { width: size, height: size, subdivisions: 64 },
-      this.scene
-    );
-    this.mesh.position.y = seaLevel;
-    this.mesh.isPickable = false;
+    // Create water plane geometry (PlaneGeometry is XY, rotate to XZ)
+    const geometry = new THREE.PlaneGeometry(size, size, 64, 64);
+    geometry.rotateX(-Math.PI / 2);
 
     // Create material
-    this.material = new ShaderMaterial(
-      `gameWaterMat_${this.shaderId}`,
-      this.scene,
-      { vertex: `gameWater${this.shaderId}`, fragment: `gameWater${this.shaderId}` },
-      {
-        attributes: ["position", "uv"],
-        uniforms: [
-          "world",
-          "viewProjection",
-          "uTime",
-          "uWave0", "uWave1", "uWave2", "uWave3",
-          "uWaveAngle",
-          "uCameraPosition",
-          "uSunDirection",
-          "uSunColor",
-          "uShallowColor",
-          "uDeepColor",
-          "uFresnelColor",
-          "uFresnelPower",
-        ],
-        needAlphaBlending: true,
-      }
-    );
-
-    this.material.backFaceCulling = false;
-    this.material.setFloat("uTime", 0);
-    this.material.setFloat("uWaveAngle", 0);
-    this.material.setFloat("uFresnelPower", fresnelPower);
-    this.material.setColor3("uShallowColor", shallowColor);
-    this.material.setColor3("uDeepColor", deepColor);
-    this.material.setColor3("uFresnelColor", fresnelColor);
-    this.material.setVector3("uSunDirection", this.sunDirection);
-    this.material.setColor3("uSunColor", sunColor);
+    this.material = new THREE.ShaderMaterial({
+      vertexShader: waterVertexShader,
+      fragmentShader: waterFragmentShader,
+      uniforms: {
+        uTime: { value: 0 },
+        uWaveAngle: { value: 0 },
+        uFresnelPower: { value: fresnelPower },
+        uShallowColor: { value: shallowColor },
+        uDeepColor: { value: deepColor },
+        uFresnelColor: { value: fresnelColor },
+        uSunDirection: { value: this.sunDirection.clone() },
+        uSunColor: { value: sunColor },
+        uCameraPosition: { value: new THREE.Vector3() },
+        uWave0: { value: new THREE.Vector4() },
+        uWave1: { value: new THREE.Vector4() },
+        uWave2: { value: new THREE.Vector4() },
+        uWave3: { value: new THREE.Vector4() },
+      },
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
 
     // Set wave uniforms
     for (let i = 0; i < 4; i++) {
-      const wave = waves[i] || { direction: new Vector2(0, 0), steepness: 0, wavelength: 0 };
-      this.material.setVector4(
-        `uWave${i}`,
-        new Vector4(wave.direction.x, wave.direction.y, wave.steepness, wave.wavelength)
-      );
+      const wave = waves[i] || { direction: new THREE.Vector2(0, 0), steepness: 0, wavelength: 0 };
+      const uniform = this.material.uniforms[`uWave${i}`];
+      uniform.value.set(wave.direction.x, wave.direction.y, wave.steepness, wave.wavelength);
     }
 
-    this.mesh.material = this.material;
+    // Create mesh and position at center offset + sea level
+    this.mesh = new THREE.Mesh(geometry, this.material);
+    this.mesh.position.set(size / 2, seaLevel, size / 2);
+    this.mesh.layers.set(1);
+
+    this.scene.add(this.mesh);
   }
 
-  setSunDirection(direction: Vector3): void {
-    this.sunDirection = direction.normalize();
+  /**
+   * Update water animation. Call this every frame from the render loop.
+   * @param time Elapsed time in seconds
+   * @param cameraPosition Current camera world position
+   */
+  update(time: number, cameraPosition: THREE.Vector3): void {
+    if (!this.material) return;
+
+    this.material.uniforms.uTime.value = time;
+    this.material.uniforms.uCameraPosition.value.copy(cameraPosition);
+  }
+
+  setSunDirection(direction: THREE.Vector3): void {
+    this.sunDirection = direction.clone().normalize();
     if (this.material) {
-      this.material.setVector3("uSunDirection", this.sunDirection);
+      this.material.uniforms.uSunDirection.value.copy(this.sunDirection);
     }
-  }
-
-  startAnimation(): void {
-    if (this.animating) return;
-
-    this.animating = true;
-    this.startTime = performance.now() / 1000;
-
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      if (!this.material) return;
-
-      const time = performance.now() / 1000 - this.startTime;
-      this.material.setFloat("uTime", time);
-
-      const camera = this.scene.activeCamera;
-      if (camera) {
-        this.material.setVector3("uCameraPosition", camera.position);
-      }
-    });
-  }
-
-  stopAnimation(): void {
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
-    }
-    this.animating = false;
   }
 
   setEnabled(enabled: boolean): void {
     if (this.mesh) {
-      this.mesh.setEnabled(enabled);
+      this.mesh.visible = enabled;
     }
   }
 
   dispose(): void {
-    this.stopAnimation();
-
     if (this.mesh) {
-      this.mesh.dispose();
+      this.scene.remove(this.mesh);
+      this.mesh.geometry.dispose();
       this.mesh = null;
     }
     if (this.material) {

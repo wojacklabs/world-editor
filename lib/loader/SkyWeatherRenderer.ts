@@ -1,11 +1,11 @@
 /**
- * SkyWeatherRenderer - Sky and weather rendering for game use
+ * SkyWeatherRenderer - Sky and weather rendering for game use (Three.js)
  *
  * Features:
  * - Procedural sky with atmospheric scattering
  * - Dynamic clouds
  * - Rain/snow precipitation effects
- * - Fog system
+ * - Fog values exposed (caller applies to scene)
  *
  * Usage:
  * ```typescript
@@ -18,42 +18,24 @@
  * if (weather) {
  *   sky.setWeather(weather);
  * }
- * sky.startAnimation();
+ * // In render loop:
+ * sky.update(time, deltaTime, camera.position);
  * ```
  */
 
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  ShaderMaterial,
-  Vector3,
-  Vector2,
-  Color3,
-  Color4,
-  Effect,
-  Observer,
-  VertexData,
-  Engine,
-} from "@babylonjs/core";
+import * as THREE from "three";
 import type { WeatherData, WeatherPreset } from "./types";
 
 // ============================================
-// Sky Shader (Simplified from Editor)
+// Sky Shader (Three.js)
 // ============================================
 
 const skyVertexShader = `
-precision highp float;
-
-attribute vec3 position;
-
-uniform mat4 worldViewProjection;
-
 varying vec3 vViewDirection;
 
 void main() {
     vViewDirection = normalize(position);
-    gl_Position = worldViewProjection * vec4(position, 1.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
@@ -205,17 +187,12 @@ void main() {
 `;
 
 // ============================================
-// Precipitation Shader
+// Precipitation Shader (Three.js)
 // ============================================
 
 const precipVertexShader = `
-precision highp float;
-
-attribute vec3 position;
-attribute vec2 uv;
 attribute vec3 particleSeed;
 
-uniform mat4 viewProjection;
 uniform float uTime;
 uniform vec3 uCameraPosition;
 uniform vec3 uWindDirection;
@@ -266,7 +243,7 @@ void main() {
 
     vec3 billboardPos = particlePos + right * position.x * sizeMultiplier + up * stretchedY * sizeMultiplier;
 
-    gl_Position = viewProjection * vec4(billboardPos, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * vec4(billboardPos, 1.0);
     vUV = uv;
 
     vec3 boxPos = relPos / uBoxSize;
@@ -345,8 +322,6 @@ const WEATHER_PRESETS: Record<WeatherPreset, WeatherConfig> = {
 // SkyWeatherRenderer Class
 // ============================================
 
-let shaderCounter = 0;
-
 export interface SkyWeatherOptions {
   skyRadius?: number;
   precipitationParticleCount?: number;
@@ -358,30 +333,31 @@ const DEFAULT_OPTIONS: Required<SkyWeatherOptions> = {
 };
 
 export class SkyWeatherRenderer {
-  private scene: Scene;
+  private scene: THREE.Scene;
   private options: Required<SkyWeatherOptions>;
 
   // Sky
-  private skyMesh: Mesh | null = null;
-  private skyMaterial: ShaderMaterial | null = null;
+  private skyMesh: THREE.Mesh | null = null;
+  private skyGeometry: THREE.SphereGeometry | null = null;
+  private skyMaterial: THREE.ShaderMaterial | null = null;
 
   // Precipitation
-  private precipMesh: Mesh | null = null;
-  private precipMaterial: ShaderMaterial | null = null;
+  private precipMesh: THREE.Mesh | null = null;
+  private precipGeometry: THREE.BufferGeometry | null = null;
+  private precipMaterial: THREE.ShaderMaterial | null = null;
 
   // State
   private weather: WeatherData;
-  private sunDirection: Vector3 = new Vector3(0.5, 0.8, 0.3).normalize();
-  private sunColor: Color3 = new Color3(1.0, 0.95, 0.85);
-  private windOffset: Vector2 = new Vector2(0, 0);
+  private sunDirection: THREE.Vector3 = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+  private sunColor: THREE.Color = new THREE.Color(1.0, 0.95, 0.85);
+  private windOffset: THREE.Vector2 = new THREE.Vector2(0, 0);
   private nightFactor: number = 0;
 
-  // Animation
-  private renderObserver: Observer<Scene> | null = null;
-  private startTime: number = 0;
-  private animating: boolean = false;
+  // Fog (exposed for caller to apply)
+  fogColor: THREE.Color = new THREE.Color(0.8, 0.85, 0.9);
+  fogDensity: number = 0.008;
 
-  constructor(scene: Scene, options: SkyWeatherOptions = {}) {
+  constructor(scene: THREE.Scene, options: SkyWeatherOptions = {}) {
     this.scene = scene;
     this.options = { ...DEFAULT_OPTIONS, ...options };
 
@@ -396,60 +372,49 @@ export class SkyWeatherRenderer {
       fogDensity: 0.008,
     };
 
-    this.registerShaders();
     this.createSky();
   }
 
-  private registerShaders(): void {
-    const id = ++shaderCounter;
-    Effect.ShadersStore[`gameSky${id}VertexShader`] = skyVertexShader;
-    Effect.ShadersStore[`gameSky${id}FragmentShader`] = skyFragmentShader;
-    Effect.ShadersStore[`gamePrecip${id}VertexShader`] = precipVertexShader;
-    Effect.ShadersStore[`gamePrecip${id}FragmentShader`] = precipFragmentShader;
-  }
-
   private createSky(): void {
-    const id = shaderCounter;
-
     // Create sky dome
-    this.skyMesh = MeshBuilder.CreateSphere(
-      "gameSky",
-      { diameter: this.options.skyRadius * 2, segments: 32 },
-      this.scene
-    );
-    this.skyMesh.infiniteDistance = true;
-    this.skyMesh.isPickable = false;
-
-    // Create material
-    this.skyMaterial = new ShaderMaterial(
-      `gameSkyMat_${id}`,
-      this.scene,
-      { vertex: `gameSky${id}`, fragment: `gameSky${id}` },
-      {
-        attributes: ["position"],
-        uniforms: [
-          "worldViewProjection",
-          "uSunDirection",
-          "uSunColor",
-          "uCloudCoverage",
-          "uNightFactor",
-          "uWindOffset",
-          "uCloudTime",
-        ],
-      }
+    this.skyGeometry = new THREE.SphereGeometry(
+      this.options.skyRadius,
+      32,
+      32
     );
 
-    this.skyMaterial.backFaceCulling = false;
-    this.skyMaterial.disableDepthWrite = true;
-    this.skyMesh.material = this.skyMaterial;
+    this.skyMaterial = new THREE.ShaderMaterial({
+      vertexShader: skyVertexShader,
+      fragmentShader: skyFragmentShader,
+      uniforms: {
+        uSunDirection: { value: this.sunDirection.clone() },
+        uSunColor: { value: this.sunColor.clone() },
+        uCloudCoverage: { value: this.weather.cloudCoverage },
+        uNightFactor: { value: this.nightFactor },
+        uWindOffset: { value: this.windOffset.clone() },
+        uCloudTime: { value: 0 },
+      },
+      side: THREE.BackSide,
+      depthWrite: false,
+    });
+
+    this.skyMesh = new THREE.Mesh(this.skyGeometry, this.skyMaterial);
+    this.skyMesh.renderOrder = -100;
+    this.skyMesh.layers.set(1);
+    this.scene.add(this.skyMesh);
 
     this.updateSkyUniforms();
   }
 
   private createPrecipitation(): void {
+    // Dispose existing
     if (this.precipMesh) {
-      this.precipMesh.dispose();
+      this.scene.remove(this.precipMesh);
       this.precipMesh = null;
+    }
+    if (this.precipGeometry) {
+      this.precipGeometry.dispose();
+      this.precipGeometry = null;
     }
     if (this.precipMaterial) {
       this.precipMaterial.dispose();
@@ -458,7 +423,6 @@ export class SkyWeatherRenderer {
 
     if (this.weather.precipitationIntensity <= 0) return;
 
-    const id = shaderCounter;
     const isSnow = this.weather.weatherPreset === "snowy";
     const count = Math.floor(
       this.options.precipitationParticleCount * this.weather.precipitationIntensity
@@ -466,7 +430,7 @@ export class SkyWeatherRenderer {
 
     if (count === 0) return;
 
-    // Create particle mesh
+    // Create particle geometry
     const positions = new Float32Array(count * 4 * 3);
     const uvs = new Float32Array(count * 4 * 2);
     const seeds = new Float32Array(count * 4 * 3);
@@ -506,75 +470,56 @@ export class SkyWeatherRenderer {
       indices[iIdx + 5] = vBase + 3;
     }
 
-    this.precipMesh = new Mesh("gamePrecip", this.scene);
-    this.precipMesh.isPickable = false;
+    this.precipGeometry = new THREE.BufferGeometry();
+    this.precipGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    this.precipGeometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    this.precipGeometry.setAttribute("particleSeed", new THREE.BufferAttribute(seeds, 3));
+    this.precipGeometry.setIndex(new THREE.BufferAttribute(indices, 1));
 
-    const vertexData = new VertexData();
-    vertexData.positions = positions;
-    vertexData.uvs = uvs;
-    vertexData.indices = indices;
-    vertexData.applyToMesh(this.precipMesh);
-
-    this.precipMesh.setVerticesData("particleSeed", seeds, false, 3);
-
-    // Create material
-    this.precipMaterial = new ShaderMaterial(
-      `gamePrecipMat_${id}`,
-      this.scene,
-      { vertex: `gamePrecip${id}`, fragment: `gamePrecip${id}` },
-      {
-        attributes: ["position", "uv", "particleSeed"],
-        uniforms: [
-          "viewProjection",
-          "uTime",
-          "uCameraPosition",
-          "uWindDirection",
-          "uWindSpeed",
-          "uFallSpeed",
-          "uBoxSize",
-          "uStreakLength",
-          "uParticleSize",
-          "uColor",
-          "uPrecipitationType",
-        ],
-        needAlphaBlending: true,
-      }
-    );
-
-    this.precipMaterial.backFaceCulling = false;
-    this.precipMaterial.alphaMode = Engine.ALPHA_ADD;
-
-    // Set uniforms
-    const boxSize = isSnow ? new Vector3(60, 30, 60) : new Vector3(60, 40, 60);
-    this.precipMaterial.setFloat("uFallSpeed", isSnow ? 2.5 : 22);
-    this.precipMaterial.setVector3("uBoxSize", boxSize);
-    this.precipMaterial.setFloat("uStreakLength", isSnow ? 0 : 4.0);
-    this.precipMaterial.setFloat("uParticleSize", isSnow ? 0.03 : 0.06);
-    this.precipMaterial.setColor4(
-      "uColor",
-      isSnow ? new Color4(0.95, 0.95, 1.0, 0.7) : new Color4(0.5, 0.55, 0.6, 0.35)
-    );
-    this.precipMaterial.setFloat("uPrecipitationType", isSnow ? 1.0 : 0.0);
-
+    // Precipitation uniforms
+    const boxSize = isSnow ? new THREE.Vector3(60, 30, 60) : new THREE.Vector3(60, 40, 60);
     const windRad = (this.weather.windDirection * Math.PI) / 180;
-    this.precipMaterial.setVector3(
-      "uWindDirection",
-      new Vector3(Math.cos(windRad), 0, Math.sin(windRad))
-    );
-    this.precipMaterial.setFloat("uWindSpeed", this.weather.windSpeed);
 
-    this.precipMesh.material = this.precipMaterial;
+    this.precipMaterial = new THREE.ShaderMaterial({
+      vertexShader: precipVertexShader,
+      fragmentShader: precipFragmentShader,
+      uniforms: {
+        uTime: { value: 0 },
+        uCameraPosition: { value: new THREE.Vector3() },
+        uWindDirection: { value: new THREE.Vector3(Math.cos(windRad), 0, Math.sin(windRad)) },
+        uWindSpeed: { value: this.weather.windSpeed },
+        uFallSpeed: { value: isSnow ? 2.5 : 22 },
+        uBoxSize: { value: boxSize },
+        uStreakLength: { value: isSnow ? 0 : 4.0 },
+        uParticleSize: { value: isSnow ? 0.03 : 0.06 },
+        uColor: {
+          value: isSnow
+            ? new THREE.Vector4(0.95, 0.95, 1.0, 0.7)
+            : new THREE.Vector4(0.5, 0.55, 0.6, 0.35),
+        },
+        uPrecipitationType: { value: isSnow ? 1.0 : 0.0 },
+      },
+      side: THREE.DoubleSide,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    this.precipMesh = new THREE.Mesh(this.precipGeometry, this.precipMaterial);
+    this.precipMesh.frustumCulled = false;
+    this.precipMesh.layers.set(1);
+    this.scene.add(this.precipMesh);
   }
 
   private updateSkyUniforms(): void {
     if (!this.skyMaterial) return;
 
-    this.skyMaterial.setVector3("uSunDirection", this.sunDirection);
-    this.skyMaterial.setColor3("uSunColor", this.sunColor);
-    this.skyMaterial.setFloat("uCloudCoverage", this.weather.cloudCoverage);
-    this.skyMaterial.setFloat("uNightFactor", this.nightFactor);
-    this.skyMaterial.setVector2("uWindOffset", this.windOffset);
-    this.skyMaterial.setFloat("uCloudTime", 0);
+    this.skyMaterial.uniforms.uSunDirection.value.copy(this.sunDirection);
+    this.skyMaterial.uniforms.uSunColor.value.copy(this.sunColor);
+    this.skyMaterial.uniforms.uCloudCoverage.value = this.weather.cloudCoverage;
+    this.skyMaterial.uniforms.uNightFactor.value = this.nightFactor;
+    this.skyMaterial.uniforms.uWindOffset.value.copy(this.windOffset);
+    this.skyMaterial.uniforms.uCloudTime.value = 0;
   }
 
   private updateTimeOfDay(): void {
@@ -586,7 +531,7 @@ export class SkyWeatherRenderer {
     const sunY = Math.sin(sunAngle);
     const sunXZ = Math.cos(sunAngle);
 
-    this.sunDirection = new Vector3(sunXZ * 0.7, Math.max(0.05, sunY), sunXZ * 0.7).normalize();
+    this.sunDirection = new THREE.Vector3(sunXZ * 0.7, Math.max(0.05, sunY), sunXZ * 0.7).normalize();
 
     // Night factor
     if (hour < 6 || hour > 20) {
@@ -601,11 +546,11 @@ export class SkyWeatherRenderer {
 
     // Sun color
     if (hour < 7 || hour > 18) {
-      this.sunColor = new Color3(1.0, 0.5, 0.3);
+      this.sunColor = new THREE.Color(1.0, 0.5, 0.3);
     } else if (hour < 8 || hour > 17) {
-      this.sunColor = new Color3(1.0, 0.8, 0.6);
+      this.sunColor = new THREE.Color(1.0, 0.8, 0.6);
     } else {
-      this.sunColor = new Color3(1.0, 0.95, 0.85);
+      this.sunColor = new THREE.Color(1.0, 0.95, 0.85);
     }
   }
 
@@ -619,12 +564,9 @@ export class SkyWeatherRenderer {
     this.updateSkyUniforms();
     this.createPrecipitation();
 
-    // Update fog
-    if (this.scene.fogMode !== undefined) {
-      this.scene.fogMode = 3; // Exponential fog
-      this.scene.fogDensity = weather.fogDensity;
-      this.scene.fogColor = new Color3(0.8, 0.85, 0.9);
-    }
+    // Expose fog values for caller
+    this.fogDensity = weather.fogDensity;
+    this.fogColor = new THREE.Color(0.8, 0.85, 0.9);
   }
 
   setTimeOfDay(hour: number): void {
@@ -641,66 +583,59 @@ export class SkyWeatherRenderer {
     this.weather.fogDensity = config.fogDensity;
     this.updateSkyUniforms();
     this.createPrecipitation();
+
+    // Expose fog values for caller
+    this.fogDensity = config.fogDensity;
   }
 
-  startAnimation(): void {
-    if (this.animating) return;
+  update(time: number, deltaTime: number, cameraPosition: THREE.Vector3): void {
+    // Update wind offset
+    const windRad = (this.weather.windDirection * Math.PI) / 180;
+    const windX = Math.cos(windRad) * this.weather.windSpeed * deltaTime * 0.1;
+    const windY = Math.sin(windRad) * this.weather.windSpeed * deltaTime * 0.1;
+    this.windOffset.x += windX;
+    this.windOffset.y += windY;
 
-    this.animating = true;
-    this.startTime = performance.now() / 1000;
-
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      const time = performance.now() / 1000 - this.startTime;
-      const deltaTime = this.scene.getEngine().getDeltaTime() / 1000;
-
-      // Update wind offset
-      const windRad = (this.weather.windDirection * Math.PI) / 180;
-      const windX = Math.cos(windRad) * this.weather.windSpeed * deltaTime * 0.1;
-      const windY = Math.sin(windRad) * this.weather.windSpeed * deltaTime * 0.1;
-      this.windOffset.x += windX;
-      this.windOffset.y += windY;
-
-      if (this.skyMaterial) {
-        this.skyMaterial.setVector2("uWindOffset", this.windOffset);
-        this.skyMaterial.setFloat("uCloudTime", time);
-      }
-
-      if (this.precipMaterial) {
-        this.precipMaterial.setFloat("uTime", time);
-        const camera = this.scene.activeCamera;
-        if (camera) {
-          this.precipMaterial.setVector3("uCameraPosition", camera.position);
-        }
-      }
-    });
-  }
-
-  stopAnimation(): void {
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
+    // Sky follows camera (replaces infiniteDistance)
+    if (this.skyMesh) {
+      this.skyMesh.position.copy(cameraPosition);
     }
-    this.animating = false;
+
+    if (this.skyMaterial) {
+      this.skyMaterial.uniforms.uWindOffset.value.copy(this.windOffset);
+      this.skyMaterial.uniforms.uCloudTime.value = time;
+    }
+
+    if (this.precipMaterial) {
+      this.precipMaterial.uniforms.uTime.value = time;
+      this.precipMaterial.uniforms.uCameraPosition.value.copy(cameraPosition);
+    }
   }
 
-  getSunDirection(): Vector3 {
+  getSunDirection(): THREE.Vector3 {
     return this.sunDirection.clone();
   }
 
   dispose(): void {
-    this.stopAnimation();
-
     if (this.skyMesh) {
-      this.skyMesh.dispose();
+      this.scene.remove(this.skyMesh);
       this.skyMesh = null;
+    }
+    if (this.skyGeometry) {
+      this.skyGeometry.dispose();
+      this.skyGeometry = null;
     }
     if (this.skyMaterial) {
       this.skyMaterial.dispose();
       this.skyMaterial = null;
     }
     if (this.precipMesh) {
-      this.precipMesh.dispose();
+      this.scene.remove(this.precipMesh);
       this.precipMesh = null;
+    }
+    if (this.precipGeometry) {
+      this.precipGeometry.dispose();
+      this.precipGeometry = null;
     }
     if (this.precipMaterial) {
       this.precipMaterial.dispose();
