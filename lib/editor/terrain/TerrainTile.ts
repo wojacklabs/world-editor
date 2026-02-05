@@ -157,14 +157,14 @@ export const TILE_COLORS: Record<TileType, { base: THREE.Color; detail: THREE.Co
 // TerrainTile Class
 // ============================================
 export class TerrainTile {
-  private scene: any;
+  private scene: THREE.Scene;
   private config: TileConfig;
   private groundMesh: THREE.Mesh | null = null;
   private material: THREE.ShaderMaterial | null = null;
   private decorationMeshes: THREE.Mesh[] = [];
   private decorationConfig: TileDecorationConfig;
 
-  constructor(scene: any, config: TileConfig) {
+  constructor(scene: THREE.Scene, config: TileConfig) {
     this.scene = scene;
     this.config = config;
     this.decorationConfig = {

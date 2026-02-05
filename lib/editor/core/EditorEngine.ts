@@ -1,31 +1,12 @@
-import {
-  Engine,
-  WebGPUEngine,
-  Scene,
-  ArcRotateCamera,
-  Vector3,
-  HemisphericLight,
-  DirectionalLight,
-  Color4,
-  Color3,
-  PointerEventTypes,
-  PointerInfo,
-  KeyboardEventTypes,
-  KeyboardInfo,
-  Mesh,
-  MeshBuilder,
-  StandardMaterial,
-  ShaderMaterial,
-  PickingInfo,
-  IKeyboardEvent,
-  VertexData,
-  VertexBuffer,
-  RawTexture,
-  Texture,
-  Matrix,
-  Quaternion,
-} from "@babylonjs/core";
-import { GridMaterial } from "@babylonjs/materials";
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
+
+// Extend Three.js prototypes for BVH-accelerated raycasting
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 import type { BrushSettings, ToolType, HeightmapTool, MaterialType, WaterType, WeatherState, WeatherPreset } from "../types/EditorTypes";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
@@ -44,17 +25,18 @@ import { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
 
 export class EditorEngine {
   private canvas: HTMLCanvasElement;
-  private engine!: Engine | WebGPUEngine;
-  private scene!: Scene;
-  private camera!: ArcRotateCamera;
-  private gridMesh: Mesh | null = null;
+  private renderer!: THREE.WebGLRenderer;
+  private scene!: THREE.Scene;
+  private camera!: THREE.PerspectiveCamera;
+  private controls!: OrbitControls;
+  private gridMesh: THREE.GridHelper | null = null;
 
   // Terrain
   private heightmap: Heightmap | null = null;
   private terrainMesh: TerrainMesh | null = null;
 
   // Brush preview
-  private brushPreview: Mesh | null = null;
+  private brushPreview: THREE.Mesh | null = null;
 
   // Props
   private propManager: PropManager | null = null;
@@ -68,7 +50,7 @@ export class EditorEngine {
   private waterDepth: number = 2.0;  // How deep water carves into terrain
   private waterType: WaterType = "lake";
   private waterFlowAngle: number = 0;  // degrees 0-360
-  private waterDirectionIndicator: Mesh | null = null;
+  private waterDirectionIndicator: THREE.Mesh | null = null;
 
   // Foliage system (Thin Instance based)
   private foliageSystem: FoliageSystem | null = null;
@@ -85,7 +67,7 @@ export class EditorEngine {
   // Game preview
   private gamePreview: GamePreview | null = null;
   private isGameMode = false;
-  private savedClearColor: Color4 | null = null;
+  private savedClearColor: THREE.Color | null = null;
 
   // Sky and weather system
   private skyWeatherSystem: SkyWeatherSystem | null = null;
@@ -97,9 +79,27 @@ export class EditorEngine {
   // State
   private isInitialized = false;
   private isPointerDown = false;
-  private currentPickInfo: PickingInfo | null = null;
+  private currentPickPoint: THREE.Vector3 | null = null;
+  private currentPickHit: boolean = false;
   private lastPointerX: number = 0;
   private lastPointerY: number = 0;
+
+  // Raycasting
+  private raycaster: THREE.Raycaster = new THREE.Raycaster();
+  private readonly _ndcVec = new THREE.Vector2();
+
+  // Render loop
+  private animationFrameId: number = 0;
+
+  // Camera animation state
+  private cameraAnimation: {
+    startPosition: THREE.Vector3;
+    endPosition: THREE.Vector3;
+    startTarget: THREE.Vector3;
+    endTarget: THREE.Vector3;
+    startTime: number;
+    duration: number;
+  } | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -109,26 +109,20 @@ export class EditorEngine {
     // Initialize KTX2 texture support
     await initializeKTX2Support();
 
-    // Check WebGPU support
-    const webGPUSupported = await WebGPUEngine.IsSupportedAsync;
-    console.log("[EditorEngine] WebGPU supported:", webGPUSupported);
+    // Create WebGL renderer
+    this.renderer = new THREE.WebGLRenderer({
+      canvas: this.canvas,
+      antialias: true,
+      stencil: true,
+      preserveDrawingBuffer: true,
+    });
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setSize(this.canvas.clientWidth, this.canvas.clientHeight);
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    console.log("[EditorEngine] Using WebGL renderer");
 
-    if (webGPUSupported) {
-      this.engine = new WebGPUEngine(this.canvas, {
-        antialias: true,
-      });
-      await (this.engine as WebGPUEngine).initAsync();
-      console.log("[EditorEngine] Using WebGPU engine");
-    } else {
-      this.engine = new Engine(this.canvas, true, {
-        preserveDrawingBuffer: true,
-        stencil: true,
-      });
-      console.log("[EditorEngine] Using WebGL engine");
-    }
-
-    this.scene = new Scene(this.engine);
-    this.scene.clearColor = new Color4(0.08, 0.08, 0.1, 1);
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0.08, 0.08, 0.1);
 
     this.setupCamera();
     this.setupLighting();
@@ -143,18 +137,18 @@ export class EditorEngine {
 
     // Start render loop
     const startTime = performance.now() / 1000;
-    this.engine.runRenderLoop(() => {
+    const animate = () => {
+      this.animationFrameId = requestAnimationFrame(animate);
       const time = (performance.now() / 1000) - startTime;
 
       // Update terrain shader uniforms for water effects
       if (this.terrainMesh) {
-        const material = this.terrainMesh.getMaterial() as ShaderMaterial | null;
-        if (material && material.setFloat) {
-          material.setFloat("uWaterLevel", this.seaLevel);
-          material.setFloat("uTime", time);
+        const material = this.terrainMesh.getMaterial() as THREE.ShaderMaterial | null;
+        if (material && material.uniforms) {
+          material.uniforms.uWaterLevel.value = this.seaLevel;
+          material.uniforms.uTime.value = time;
         }
       }
-
 
       // Update foliage in editor mode (visibility culling + LOD + wind animation)
       if (this.foliageSystem && !this.isGameMode) {
@@ -164,8 +158,15 @@ export class EditorEngine {
         this.foliageSystem.updateTime(performance.now() / 1000);
       }
 
-      this.scene.render();
-    });
+      // Update sky weather
+      if (this.skyWeatherSystem) {
+        this.skyWeatherSystem.update();
+      }
+
+      this.controls.update();
+      this.renderer.render(this.scene, this.camera);
+    };
+    animate();
     console.log("[EditorEngine] Render loop started");
 
     // Handle resize
@@ -185,7 +186,7 @@ export class EditorEngine {
     this.skyWeatherSystem.init();
     // Connect terrain material for shader sync
     if (this.terrainMesh) {
-      const material = this.terrainMesh.getMaterial() as ShaderMaterial | null;
+      const material = this.terrainMesh.getMaterial() as THREE.ShaderMaterial | null;
       if (material) {
         this.skyWeatherSystem.setTerrainMaterial(material);
       }
@@ -210,116 +211,94 @@ export class EditorEngine {
   }
 
   private setupCamera(): void {
-    this.camera = new ArcRotateCamera(
-      "editorCamera",
-      -Math.PI / 4,
-      Math.PI / 3,
-      100,
-      new Vector3(32, 0, 32),
-      this.scene
+    this.camera = new THREE.PerspectiveCamera(
+      45,
+      this.canvas.clientWidth / this.canvas.clientHeight,
+      0.1,
+      2000
     );
+    this.camera.position.set(32 + 70, 50, 32 + 70); // Approximate ArcRotateCamera alpha=-PI/4, beta=PI/3, radius=100
 
-    this.camera.attachControl(this.canvas, true);
-    this.camera.lowerRadiusLimit = 10;
-    this.camera.upperRadiusLimit = 300;
-    this.camera.wheelPrecision = 10;
-    this.camera.panningSensibility = 100;
-    this.camera.lowerBetaLimit = 0.1;
-    this.camera.upperBetaLimit = Math.PI / 2 - 0.1;
-
-    // Enable panning with shift
-    this.camera.panningAxis = new Vector3(1, 0, 1);
+    this.controls = new OrbitControls(this.camera, this.canvas);
+    this.controls.target.set(32, 0, 32);
+    this.controls.minDistance = 10;
+    this.controls.maxDistance = 300;
+    this.controls.minPolarAngle = 0.1;
+    this.controls.maxPolarAngle = Math.PI / 2 - 0.1;
+    this.controls.enablePan = true;
+    this.controls.panSpeed = 1.0;
+    this.controls.update();
   }
 
   private setupLighting(): void {
-    const hemiLight = new HemisphericLight(
-      "hemiLight",
-      new Vector3(0, 1, 0),
-      this.scene
-    );
-    hemiLight.intensity = 0.6;
-    hemiLight.groundColor = new Color3(0.3, 0.3, 0.35);
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4d4d59, 0.6);
+    // groundColor = Color3(0.3, 0.3, 0.35) ~ #4d4d59
+    this.scene.add(hemiLight);
 
-    const dirLight = new DirectionalLight(
-      "dirLight",
-      new Vector3(-0.5, -1, -0.5),
-      this.scene
-    );
-    dirLight.intensity = 0.6;
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(0.5, 1, 0.5); // Opposite of direction (-0.5,-1,-0.5)
+    this.scene.add(dirLight);
   }
 
   private setupGrid(): void {
-    const gridMaterial = new GridMaterial("gridMaterial", this.scene);
-    gridMaterial.majorUnitFrequency = 8;
-    gridMaterial.minorUnitVisibility = 0.3;
-    gridMaterial.gridRatio = 1;
-    gridMaterial.backFaceCulling = false;
-    gridMaterial.mainColor = new Color3(0.3, 0.3, 0.35);
-    gridMaterial.lineColor = new Color3(0.4, 0.4, 0.45);
-    gridMaterial.opacity = 0.8;
-
-    this.gridMesh = MeshBuilder.CreateGround(
-      "grid",
-      { width: 256, height: 256, subdivisions: 1 },
-      this.scene
-    );
-    this.gridMesh.material = gridMaterial;
-    this.gridMesh.position.y = -0.01;
-    this.gridMesh.position.x = 32;
-    this.gridMesh.position.z = 32;
-    this.gridMesh.isPickable = false;
+    this.gridMesh = new THREE.GridHelper(256, 256, 0x666673, 0x4d4d59);
+    // majorUnitFrequency=8 -> minor divisions with 256 total
+    // mainColor=Color3(0.3,0.3,0.35)=#4d4d59, lineColor=Color3(0.4,0.4,0.45)=#666673
+    this.gridMesh.position.set(32, -0.01, 32);
+    this.scene.add(this.gridMesh);
   }
 
   private setupInputHandlers(): void {
-    // Pointer events
-    this.scene.onPointerObservable.add((pointerInfo: PointerInfo) => {
-      // Disable editing in game mode
-      if (this.isGameMode) return;
-
-      switch (pointerInfo.type) {
-        case PointerEventTypes.POINTERDOWN:
-          if (pointerInfo.event.button === 0) {
-            this.isPointerDown = true;
-          }
-          break;
-        case PointerEventTypes.POINTERUP:
-          if (pointerInfo.event.button === 0) {
-            this.isPointerDown = false;
-            // Rebuild biome decorations if dirty
-            if (this.biomeDirty && this.biomeDecorator) {
-              this.biomeDecorator.rebuildAll();
-              this.biomeDirty = false;
-            }
-            // Rebuild foliage if dirty
-            if (this.foliageDirty && this.foliageSystem) {
-              this.foliageSystem.generateAll();
-              this.foliageDirty = false;
-            }
-            // Update prop heights to match terrain
-            if (this.propsDirty && this.propManager) {
-              this.propManager.updateAllHeights();
-              this.propManager.rebuildDirtyGroups();
-              this.propsDirty = false;
-            }
-          }
-          break;
-        case PointerEventTypes.POINTERMOVE:
-          this.handlePointerMove(pointerInfo);
-          break;
-      }
-    });
-
-    // Keyboard events
-    this.scene.onKeyboardObservable.add((kbInfo: KeyboardInfo) => {
-      if (kbInfo.type === KeyboardEventTypes.KEYDOWN) {
-        this.handleKeyDown(kbInfo.event);
-      }
-    });
+    this.canvas.addEventListener("pointerdown", this.onPointerDown);
+    this.canvas.addEventListener("pointerup", this.onPointerUp);
+    this.canvas.addEventListener("pointermove", this.onPointerMove);
+    window.addEventListener("keydown", this.onKeyDown);
   }
 
-  private handlePointerMove(pointerInfo: PointerInfo): void {
-    const currentX = this.scene.pointerX;
-    const currentY = this.scene.pointerY;
+  private onPointerDown = (event: PointerEvent): void => {
+    if (this.isGameMode) return;
+    if (event.button === 0) {
+      this.isPointerDown = true;
+    }
+  };
+
+  private onPointerUp = (event: PointerEvent): void => {
+    if (this.isGameMode) return;
+    if (event.button === 0) {
+      this.isPointerDown = false;
+      // Rebuild biome decorations if dirty
+      if (this.biomeDirty && this.biomeDecorator) {
+        this.biomeDecorator.rebuildAll();
+        this.biomeDirty = false;
+      }
+      // Rebuild foliage if dirty
+      if (this.foliageDirty && this.foliageSystem) {
+        this.foliageSystem.generateAll();
+        this.foliageDirty = false;
+      }
+      // Update prop heights to match terrain
+      if (this.propsDirty && this.propManager) {
+        this.propManager.updateAllHeights();
+        this.propManager.rebuildDirtyGroups();
+        this.propsDirty = false;
+      }
+    }
+  };
+
+  private onPointerMove = (event: PointerEvent): void => {
+    if (this.isGameMode) return;
+    this.handlePointerMove(event);
+  };
+
+  private onKeyDown = (event: KeyboardEvent): void => {
+    if (this.isGameMode) return;
+    this.handleKeyDown(event);
+  };
+
+  private handlePointerMove(event: PointerEvent): void {
+    const rect = this.canvas.getBoundingClientRect();
+    const currentX = event.clientX - rect.left;
+    const currentY = event.clientY - rect.top;
 
     // When pointer is down, only update pick info if mouse actually moved
     // This prevents terrain carving from chasing the raycast as ground lowers
@@ -337,52 +316,60 @@ export class EditorEngine {
     this.lastPointerX = currentX;
     this.lastPointerY = currentY;
 
-    // Raycast to terrain
-    const pickResult = this.scene.pick(
-      currentX,
-      currentY,
-      (mesh) => mesh.name.startsWith("terrain")
-    );
+    // Convert to NDC (-1 to +1)
+    const ndcX = (currentX / this.canvas.clientWidth) * 2 - 1;
+    const ndcY = -(currentY / this.canvas.clientHeight) * 2 + 1;
 
-    this.currentPickInfo = pickResult;
+    // Raycast to terrain (uses cached mesh reference + BVH acceleration)
+    this._ndcVec.set(ndcX, ndcY);
+    this.raycaster.setFromCamera(this._ndcVec, this.camera);
 
-    // Update brush preview position
-    if (pickResult?.hit && pickResult.pickedPoint && this.brushPreview) {
-      this.brushPreview.position.x = pickResult.pickedPoint.x;
-      this.brushPreview.position.z = pickResult.pickedPoint.z;
-      this.brushPreview.position.y = pickResult.pickedPoint.y + 0.1;
-      this.brushPreview.isVisible = true;
-    } else if (this.brushPreview) {
-      this.brushPreview.isVisible = false;
+    const activeMesh = this.terrainMesh?.getMesh() as THREE.Mesh | null;
+    const intersections = activeMesh
+      ? this.raycaster.intersectObject(activeMesh, false)
+      : [];
+
+    if (intersections.length > 0) {
+      this.currentPickHit = true;
+      this.currentPickPoint = intersections[0].point.clone();
+
+      // Update brush preview position
+      if (this.brushPreview) {
+        this.brushPreview.position.set(
+          intersections[0].point.x,
+          intersections[0].point.y + 0.1,
+          intersections[0].point.z
+        );
+        this.brushPreview.visible = true;
+      }
+    } else {
+      this.currentPickHit = false;
+      this.currentPickPoint = null;
+      if (this.brushPreview) {
+        this.brushPreview.visible = false;
+      }
     }
   }
 
-  private handleKeyDown(event: IKeyboardEvent): void {
-    // Bracket keys for brush size
-    if (event.key === "[") {
-      // Decrease brush size - handled by React
-    } else if (event.key === "]") {
-      // Increase brush size - handled by React
-    }
+  private handleKeyDown(event: KeyboardEvent): void {
+    // Bracket keys for brush size - handled by React
   }
 
   private createBrushPreview(): void {
-    this.brushPreview = MeshBuilder.CreateDisc(
-      "brushPreview",
-      { radius: 2.5, tessellation: 32 },
-      this.scene
-    );
+    const geometry = new THREE.CircleGeometry(2.5, 32);
+    geometry.rotateX(-Math.PI / 2); // Lay flat on XZ plane
 
-    const brushMaterial = new StandardMaterial("brushMaterial", this.scene);
-    brushMaterial.diffuseColor = new Color3(0.3, 0.7, 1);
-    brushMaterial.alpha = 0.3;
-    brushMaterial.emissiveColor = new Color3(0.2, 0.5, 0.8);
-    brushMaterial.backFaceCulling = false;
+    const material = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(0.3, 0.7, 1),
+      transparent: true,
+      opacity: 0.3,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
 
-    this.brushPreview.material = brushMaterial;
-    this.brushPreview.rotation.x = Math.PI / 2;
-    this.brushPreview.isPickable = false;
-    this.brushPreview.isVisible = false;
+    this.brushPreview = new THREE.Mesh(geometry, material);
+    this.brushPreview.visible = false;
+    this.scene.add(this.brushPreview);
   }
 
   createNewTerrain(size: number, resolution: number): void {
@@ -450,16 +437,18 @@ export class EditorEngine {
       this.propManager.dispose();
     }
     this.propManager = new PropManager(this.scene, this.heightmap);
-    this.propManager.setTileSize(size);  // Set tile size for streaming grouping
+    this.propManager.setTileSize(size);
+    this.propManager.setCamera(this.camera);
 
 
     // Update grid and camera to match terrain size
     if (this.gridMesh) {
       const gridScale = Math.max(256, size * 4);
-      this.gridMesh.scaling.x = gridScale / 256;
-      this.gridMesh.scaling.z = gridScale / 256;
-      this.gridMesh.position.x = size / 2;
-      this.gridMesh.position.z = size / 2;
+      // Remove old grid and create new one with correct size
+      this.scene.remove(this.gridMesh);
+      this.gridMesh = new THREE.GridHelper(gridScale, gridScale, 0x666673, 0x4d4d59);
+      this.gridMesh.position.set(size / 2, -0.01, size / 2);
+      this.scene.add(this.gridMesh);
     }
     this.focusOnTerrain();
   }
@@ -474,10 +463,10 @@ export class EditorEngine {
     settings: BrushSettings,
     deltaTime: number
   ): void {
-    if (!this.isPointerDown || !this.currentPickInfo?.hit) return;
-    if (!this.currentPickInfo.pickedPoint || !this.heightmap || !this.terrainMesh) return;
+    if (!this.isPointerDown || !this.currentPickHit) return;
+    if (!this.currentPickPoint || !this.heightmap || !this.terrainMesh) return;
 
-    const point = this.currentPickInfo.pickedPoint;
+    const point = this.currentPickPoint;
 
     const modified = this.heightmap.applyBrush(
       point.x,
@@ -554,10 +543,10 @@ export class EditorEngine {
     material: MaterialType,
     settings: BrushSettings
   ): void {
-    if (!this.isPointerDown || !this.currentPickInfo?.hit) return;
-    if (!this.currentPickInfo.pickedPoint || !this.heightmap || !this.terrainMesh) return;
+    if (!this.isPointerDown || !this.currentPickHit) return;
+    if (!this.currentPickPoint || !this.heightmap || !this.terrainMesh) return;
 
-    const point = this.currentPickInfo.pickedPoint;
+    const point = this.currentPickPoint;
     const splatMap = this.terrainMesh.getSplatMap();
 
     // Convert world coordinates to splat map coordinates
@@ -589,10 +578,10 @@ export class EditorEngine {
     material: MaterialType,
     settings: BrushSettings
   ): void {
-    if (!this.isPointerDown || !this.currentPickInfo?.hit) return;
-    if (!this.currentPickInfo.pickedPoint || !this.heightmap || !this.terrainMesh) return;
+    if (!this.isPointerDown || !this.currentPickHit) return;
+    if (!this.currentPickPoint || !this.heightmap || !this.terrainMesh) return;
 
-    const point = this.currentPickInfo.pickedPoint;
+    const point = this.currentPickPoint;
     const splatMap = this.terrainMesh.getSplatMap();
     const scale = this.heightmap.getScale();
     const resolution = splatMap.getResolution();
@@ -982,26 +971,24 @@ export class EditorEngine {
     if (this.waterType !== "river") {
       // Hide indicator for lake type
       if (this.waterDirectionIndicator) {
-        this.waterDirectionIndicator.isVisible = false;
+        this.waterDirectionIndicator.visible = false;
       }
       return;
     }
 
     // Create indicator if it doesn't exist
     if (!this.waterDirectionIndicator) {
-      this.waterDirectionIndicator = MeshBuilder.CreateDisc(
-        "water_direction_indicator",
-        { radius: 2, tessellation: 3 },
-        this.scene
-      );
-      const mat = new StandardMaterial("water_dir_mat", this.scene);
-      mat.diffuseColor = new Color3(0.2, 0.6, 1.0);
-      mat.emissiveColor = new Color3(0.1, 0.3, 0.6);
-      mat.alpha = 0.5;
-      mat.backFaceCulling = false;
-      this.waterDirectionIndicator.material = mat;
-      this.waterDirectionIndicator.rotation.x = Math.PI / 2; // Lay flat
-      this.waterDirectionIndicator.isPickable = false;
+      const geometry = new THREE.CircleGeometry(2, 3); // 3 segments = triangle
+      geometry.rotateX(-Math.PI / 2);
+      const mat = new THREE.MeshBasicMaterial({
+        color: new THREE.Color(0.2, 0.6, 1.0),
+        transparent: true,
+        opacity: 0.5,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      });
+      this.waterDirectionIndicator = new THREE.Mesh(geometry, mat);
+      this.scene.add(this.waterDirectionIndicator);
     }
 
     // Position at water level
@@ -1021,7 +1008,7 @@ export class EditorEngine {
     // Rotate to match flow direction (Y-axis rotation on the flat disc)
     const angleRadians = (this.waterFlowAngle * Math.PI) / 180;
     this.waterDirectionIndicator.rotation.y = angleRadians;
-    this.waterDirectionIndicator.isVisible = true;
+    this.waterDirectionIndicator.visible = true;
   }
 
   /**
@@ -1029,7 +1016,7 @@ export class EditorEngine {
    */
   private disposeWaterDirectionIndicator(): void {
     if (this.waterDirectionIndicator) {
-      this.waterDirectionIndicator.dispose();
+      disposeMesh(this.scene, this.waterDirectionIndicator);
       this.waterDirectionIndicator = null;
     }
   }
@@ -1100,13 +1087,14 @@ export class EditorEngine {
 
   updateBrushPreview(size: number): void {
     if (this.brushPreview) {
-      this.brushPreview.scaling.setAll(size / 5);
+      const scale = size / 5;
+      this.brushPreview.scale.set(scale, scale, scale);
     }
   }
 
   setGridVisible(visible: boolean): void {
     if (this.gridMesh) {
-      this.gridMesh.isVisible = visible;
+      this.gridMesh.visible = visible;
     }
   }
 
@@ -1121,7 +1109,7 @@ export class EditorEngine {
     if (this.terrainMesh) {
       const mesh = this.terrainMesh.getMesh();
       if (mesh) {
-        mesh.isVisible = visible;
+        mesh.visible = visible;
       }
     }
   }
@@ -1167,7 +1155,7 @@ export class EditorEngine {
       if (waterSystem) {
         const waterMesh = waterSystem.getMesh();
         if (waterMesh) {
-          waterMesh.isVisible = visible;
+          waterMesh.visible = visible;
         }
       }
     }
@@ -1201,32 +1189,50 @@ export class EditorEngine {
    * This processes heightmap, splat map (biome data), and water mask,
    * then regenerates all dependent systems (terrain mesh, biome decorations, foliage).
    */
-  getScene(): Scene {
+  getScene(): THREE.Scene {
     return this.scene;
   }
 
-  getEngine(): Engine | WebGPUEngine {
-    return this.engine;
+  getRenderer(): THREE.WebGLRenderer {
+    return this.renderer;
+  }
+
+  getCamera(): THREE.PerspectiveCamera {
+    return this.camera;
+  }
+
+  /**
+   * Raycast to terrain mesh and return the intersection point.
+   * Used by WorldEditor.tsx for prop placement and asset placement.
+   */
+  pickTerrain(clientX: number, clientY: number): THREE.Vector3 | null {
+    const rect = this.canvas.getBoundingClientRect();
+    const ndcX = ((clientX - rect.left) / this.canvas.clientWidth) * 2 - 1;
+    const ndcY = -((clientY - rect.top) / this.canvas.clientHeight) * 2 + 1;
+
+    this._ndcVec.set(ndcX, ndcY);
+    this.raycaster.setFromCamera(this._ndcVec, this.camera);
+
+    const activeMesh = this.terrainMesh?.getMesh() as THREE.Mesh | null;
+    if (!activeMesh) return null;
+
+    const intersections = this.raycaster.intersectObject(activeMesh, false);
+    if (intersections.length > 0) {
+      return intersections[0].point.clone();
+    }
+    return null;
   }
 
   focusOnTerrain(): void {
     if (this.heightmap) {
       const size = this.heightmap.getScale();
-      this.camera.target = new Vector3(size / 2, 0, size / 2);
-      this.camera.radius = size * 1.5;
+      this.controls.target.set(size / 2, 0, size / 2);
+      // Approximate radius = size * 1.5 -> set camera distance
+      const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).normalize();
+      this.camera.position.copy(this.controls.target).add(dir.multiplyScalar(size * 1.5));
+      this.controls.update();
     }
   }
-
-  // Camera animation state
-  private cameraAnimation: {
-    startPosition: Vector3;
-    endPosition: Vector3;
-    startTarget: Vector3;
-    endTarget: Vector3;
-    startTime: number;
-    duration: number;
-  } | null = null;
-  private cameraAnimationObserver: any = null;
 
   /**
    * Focus camera on a specific grid cell and show tile boundary highlight
@@ -1237,64 +1243,63 @@ export class EditorEngine {
    */
   moveCamera(direction: "forward" | "backward" | "left" | "right", speed: number = 2): void {
     // Get camera forward direction (projected onto XZ plane)
-    const forward = this.camera.getForwardRay().direction;
-    const forwardXZ = new Vector3(forward.x, 0, forward.z).normalize();
-    const rightXZ = Vector3.Cross(Vector3.Up(), forwardXZ).normalize();
+    const forward = new THREE.Vector3();
+    this.camera.getWorldDirection(forward);
+    forward.y = 0;
+    forward.normalize();
 
-    let movement = Vector3.Zero();
+    const right = new THREE.Vector3();
+    right.crossVectors(new THREE.Vector3(0, 1, 0), forward).normalize();
+
+    let movement = new THREE.Vector3();
 
     switch (direction) {
       case "forward":
-        movement = forwardXZ.scale(speed);
+        movement = forward.multiplyScalar(speed);
         break;
       case "backward":
-        movement = forwardXZ.scale(-speed);
+        movement = forward.multiplyScalar(-speed);
         break;
       case "left":
-        movement = rightXZ.scale(-speed);
+        movement = right.multiplyScalar(-speed);
         break;
       case "right":
-        movement = rightXZ.scale(speed);
+        movement = right.multiplyScalar(speed);
         break;
     }
 
-    this.camera.target.addInPlace(movement);
+    this.controls.target.add(movement);
+    this.camera.position.add(movement);
   }
 
   // Control camera wheel zoom
   setCameraWheelEnabled(enabled: boolean): void {
-    // Use wheelDeltaPercentage instead of wheelPrecision for more reliable control
-    if (enabled) {
-      this.camera.wheelPrecision = 10;
-      this.camera.wheelDeltaPercentage = 0;
-    } else {
-      // Disable wheel by setting precision very high
-      this.camera.wheelPrecision = 999999;
-      this.camera.wheelDeltaPercentage = 0;
-    }
+    this.controls.enableZoom = enabled;
   }
 
   // Manual camera zoom using raw deltaY from wheel event
   zoomCamera(deltaY: number): void {
-    const minRadius = this.camera.lowerRadiusLimit || 10;
-    const maxRadius = this.camera.upperRadiusLimit || 300;
+    const minDist = this.controls.minDistance;
+    const maxDist = this.controls.maxDistance;
 
-    // Use deltaY directly: positive = scroll down = zoom out, negative = scroll up = zoom in
-    const zoomAmount = deltaY * 0.002 * this.camera.radius;
-    const newRadius = this.camera.radius + zoomAmount;
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const zoomAmount = deltaY * 0.002 * dist;
 
-    this.camera.radius = Math.max(minRadius, Math.min(maxRadius, newRadius));
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target).normalize();
+    const newDist = Math.max(minDist, Math.min(maxDist, dist + zoomAmount));
+    this.camera.position.copy(this.controls.target).add(dir.multiplyScalar(newDist));
   }
 
   setTopView(): void {
-    this.camera.alpha = 0;
-    this.camera.beta = 0.01;
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const target = this.controls.target.clone();
+    this.camera.position.set(target.x, target.y + dist, target.z + 0.01);
+    this.controls.update();
   }
 
   // Game Preview Mode
   enterGameMode(): void {
     if (this.isGameMode || !this.heightmap || !this.terrainMesh) return;
-
 
     // Disable terrain LOD FIRST so getMesh() returns the full resolution mesh
     this.terrainMesh.setLODEnabled(false);
@@ -1303,15 +1308,15 @@ export class EditorEngine {
     if (!mesh) return;
 
     // Save current state
-    this.savedClearColor = this.scene.clearColor.clone();
+    this.savedClearColor = (this.scene.background as THREE.Color)?.clone() || null;
 
     // Hide editor elements
-    if (this.gridMesh) this.gridMesh.isVisible = false;
-    if (this.brushPreview) this.brushPreview.isVisible = false;
-    if (this.waterDirectionIndicator) this.waterDirectionIndicator.isVisible = false;
+    if (this.gridMesh) this.gridMesh.visible = false;
+    if (this.brushPreview) this.brushPreview.visible = false;
+    if (this.waterDirectionIndicator) this.waterDirectionIndicator.visible = false;
 
-    // Detach editor camera
-    this.camera.detachControl();
+    // Disable editor controls
+    this.controls.enabled = false;
 
     // Create and enable game preview with foliage and water systems
     this.gamePreview = new GamePreview(
@@ -1342,7 +1347,7 @@ export class EditorEngine {
       this.terrainMesh.setLODEnabled(true);
       const mesh = this.terrainMesh.getMesh();
       if (mesh) {
-        mesh.setEnabled(true);
+        mesh.visible = true;
       }
     }
 
@@ -1351,20 +1356,19 @@ export class EditorEngine {
       this.foliageSystem.resetAllChunkVisibility();
     }
 
-    // Restore editor camera
-    this.camera.attachControl(this.canvas, true);
-    this.scene.activeCamera = this.camera;
+    // Restore editor controls
+    this.controls.enabled = true;
 
     // Restore clear color
     if (this.savedClearColor) {
-      this.scene.clearColor = this.savedClearColor;
+      this.scene.background = this.savedClearColor;
     }
 
     // Show editor elements
-    if (this.gridMesh) this.gridMesh.isVisible = true;
+    if (this.gridMesh) this.gridMesh.visible = true;
     // Restore direction indicator if river type
     if (this.waterDirectionIndicator && this.waterType === "river") {
-      this.waterDirectionIndicator.isVisible = true;
+      this.waterDirectionIndicator.visible = true;
     }
 
     this.isGameMode = false;
@@ -1393,7 +1397,11 @@ export class EditorEngine {
    * Clone mode uses simple tile repetition
    */
   private handleResize = (): void => {
-    this.engine.resize();
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+    this.renderer.setSize(width, height, false);
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
   };
 
   // ============================================
@@ -1563,13 +1571,17 @@ export class EditorEngine {
       this.assetPool.dispose();
       this.assetPool = null;
     }
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.dispose();
+      this.skyWeatherSystem = null;
+    }
     this.disposeWaterDirectionIndicator();
     if (this.brushPreview) {
-      this.brushPreview.dispose();
+      disposeMesh(this.scene, this.brushPreview);
       this.brushPreview = null;
     }
     if (this.gridMesh) {
-      this.gridMesh.dispose();
+      this.scene.remove(this.gridMesh);
       this.gridMesh = null;
     }
     if (this.terrainMesh) {
@@ -1577,8 +1589,18 @@ export class EditorEngine {
       this.terrainMesh = null;
     }
     this.heightmap = null;
+
+    // Remove event listeners
+    this.canvas.removeEventListener("pointerdown", this.onPointerDown);
+    this.canvas.removeEventListener("pointerup", this.onPointerUp);
+    this.canvas.removeEventListener("pointermove", this.onPointerMove);
+    window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("resize", this.handleResize);
-    this.scene.dispose();
-    this.engine.dispose();
+
+    // Stop render loop
+    cancelAnimationFrame(this.animationFrameId);
+
+    // Dispose renderer
+    this.renderer.dispose();
   }
 }

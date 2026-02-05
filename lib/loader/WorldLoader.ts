@@ -2,7 +2,7 @@
  * WorldLoader - Independent world data loader
  *
  * Features:
- * - No Babylon.js runtime dependency
+ * - No 3D engine runtime dependency
  * - Browser/Node.js compatible
  * - JSON parsing + data decoding only (no rendering)
  * - Compatible with existing JSON export format

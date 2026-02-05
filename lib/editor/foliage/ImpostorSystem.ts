@@ -118,7 +118,7 @@ void main() {
  * - InstancedMesh based for performance
  */
 export class ImpostorSystem {
-  private scene: any;
+  private scene: THREE.Scene;
   private impostorCache: Map<string, ImpostorCache> = new Map();
   private impostorMaterial: THREE.ShaderMaterial | null = null;
   private captureCamera: THREE.PerspectiveCamera | null = null;
@@ -132,7 +132,7 @@ export class ImpostorSystem {
   // Shared geometry for all billboard instances
   private billboardGeometry: THREE.PlaneGeometry | null = null;
 
-  constructor(scene: any) {
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.createImpostorMaterial();
     this.setupCaptureCamera();
@@ -179,7 +179,7 @@ export class ImpostorSystem {
 
   /**
    * Update camera position uniform for billboard facing.
-   * Call this each frame (replaces Babylon's onBindObservable).
+   * Call this each frame to keep billboards facing the camera.
    */
   updateCameraPosition(cameraPosition: THREE.Vector3): void {
     if (this.impostorMaterial) {
@@ -235,6 +235,9 @@ export class ImpostorSystem {
     const renderTarget = new THREE.WebGLRenderTarget(atlasWidth, atlasHeight, {
       format: THREE.RGBAFormat,
       type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      colorSpace: THREE.SRGBColorSpace,
     });
 
     cache.atlasTexture = renderTarget;

@@ -800,12 +800,12 @@ function ensureAttributes(geometry: THREE.BufferGeometry): void {
 }
 
 export class ProceduralAsset {
-  private scene: any;
+  private scene: THREE.Scene | null;
   private mesh: THREE.Mesh | null = null;
   private material: THREE.ShaderMaterial | null = null;
   private params: AssetParams;
 
-  constructor(scene: any, params: AssetParams) {
+  constructor(scene: THREE.Scene | null, params: AssetParams) {
     this.scene = scene;
     this.params = { ...params };
   }
@@ -1221,6 +1221,7 @@ export class ProceduralAsset {
     }
 
     const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+    for (const geo of geometries) geo.dispose();
     if (merged) {
       return merged;
     }
@@ -1320,6 +1321,7 @@ export class ProceduralAsset {
     }
 
     const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+    for (const geo of geometries) geo.dispose();
     if (merged) {
       return merged;
     }
@@ -1423,6 +1425,7 @@ export class ProceduralAsset {
     }
 
     const merged = BufferGeometryUtils.mergeGeometries(bladeGeometries, false);
+    for (const geo of bladeGeometries) geo.dispose();
     if (merged) {
       return merged;
     }

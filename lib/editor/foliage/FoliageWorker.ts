@@ -130,7 +130,7 @@ function calculateSlope(heightmapData, resolution, x, z, terrainScale) {
   return 1 - (ny / len);
 }
 
-// Create transformation matrix (column-major for Babylon.js)
+// Create transformation matrix (column-major, Three.js Matrix4 convention)
 function createMatrix(scaleX, scaleY, scaleZ, rotY, rotX, rotZ, posX, posY, posZ) {
   // Rotation matrices
   const cy = Math.cos(rotY), sy = Math.sin(rotY);

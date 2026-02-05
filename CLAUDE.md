@@ -4,7 +4,7 @@
 
 - **Framework:** Next.js 16 (App Router) + React 19
 - **Language:** TypeScript 5.9 (strict mode)
-- **3D Engine:** Babylon.js 8 (WebGPU primary, WebGL2 fallback)
+- **3D Engine:** Three.js (WebGL2, custom GLSL shaders)
 - **Styling:** Tailwind CSS v4 (utility classes only, no CSS modules)
 - **State:** Zustand 5 (`lib/editor/store/editorStore.ts`)
 - **Package Manager:** npm
@@ -23,7 +23,7 @@ After modifying config values, shader code, or terrain parameters, always run `n
 ## Code Conventions
 
 - **Imports:** Use `@/*` path alias (e.g., `import { EditorEngine } from "@/lib/editor/core/EditorEngine"`)
-- **Babylon.js imports:** Use modular subpath imports (e.g., `import { Vector3 } from "@babylonjs/core/Maths/math.vector"`)
+- **Three.js imports:** Use `import * as THREE from "three"` and `import { X } from "three/addons/..."` for addons
 - **Components:** `"use client"` directive, props typed with `interface Props`, default export
 - **Styling:** Tailwind utilities inline, dark theme palette (`bg-zinc-950`, `text-zinc-300`, `border-zinc-800/50`)
 - **State access:** `const { activeTool, setActiveTool } = useEditorStore()`
@@ -60,8 +60,8 @@ EditorEngine (orchestrator)
 ### Editor ↔ Game Mode Sync
 
 Changes must work in **both modes**:
-- Editor: Full resolution, ArcRotateCamera, no LOD culling
-- Game: NxN tile grid, FreeCamera, visibility culling enabled
+- Editor: Full resolution, PerspectiveCamera + OrbitControls, no LOD culling
+- Game: NxN tile grid, PerspectiveCamera + PointerLockControls, visibility culling enabled
 
 **Verify in both modes when modifying:**
 - Terrain rendering
@@ -103,94 +103,95 @@ User action → marks dirty → on pointer-up → rebuild
 
 ---
 
-## Babylon.js Gotchas
-
-### WebGPU Compatibility
-
-```typescript
-// ❌ DON'T - GL extensions are built into WebGL2/WebGPU
-#extension GL_OES_standard_derivatives : enable
-
-// ❌ DON'T - WGSL doesn't support sampler function parameters
-vec4 triplanarSample(sampler2D tex, ...) { ... }
-
-// ✅ DO - Inline triplanar sampling directly in main()
-vec4 sampleX = texture2D(rockTexture, coords.zy);
-```
-
-### Buffer Sharing (Critical)
-
-```typescript
-// ❌ DON'T - Reuses buffer, causes WebGPU issues
-const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
-newMesh.setVerticesData(VertexBuffer.PositionKind, positions);
-
-// ✅ DO - Copy to independent array
-const positions = baseMesh.getVerticesData(VertexBuffer.PositionKind);
-if (positions) {
-  newMesh.setVerticesData(VertexBuffer.PositionKind, new Float32Array(positions));
-}
-```
-
-### Disposal Rules
-
-| Resource | Dispose? | Reason |
-|----------|----------|--------|
-| Cloned mesh | ✅ Yes | Independent resource |
-| Shared ShaderMaterial | ❌ No | Used by multiple meshes |
-| Foliage mesh material | ❌ No | Shared with base mesh |
-| Water shader material | ❌ No | Shared across water meshes |
-| Reference tiles (GamePreview) | ❌ No | Original mesh, not clone |
-
-### Thin Instances
-
-```typescript
-// ✅ Correct order - always refresh bounding info last
-mesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
-mesh.thinInstanceCount = count;
-mesh.thinInstanceRefreshBoundingInfo();  // Must call after buffer set
-```
+## Three.js Patterns
 
 ### ShaderMaterial
 
 ```typescript
-// ✅ Use unique name to prevent caching issues
-const material = new ShaderMaterial(
-  `terrain_${Date.now()}`,  // Unique name
-  scene,
-  { vertex: "terrain", fragment: "terrain" },
-  options
-);
-
-// ✅ Always add error handler for debugging
-material.onError = (effect, errors) => {
-  console.error("Shader compile error:", errors);
-};
-```
-
-### Material Cloning
-
-```typescript
-// ⚠️ Cloned mesh shares material by default
-const clone = originalMesh.clone("clone");
-clone.material = originalMesh.material;  // Same reference!
-
-// ✅ For independent material, explicitly clone
-clone.material = originalMesh.material.clone(`mat_${name}`);
-
-// ⚠️ Often need to disable backface culling for clones
-if (clone.material && "backFaceCulling" in clone.material) {
-  (clone.material as StandardMaterial).backFaceCulling = false;
-}
-```
-
-### Async Loading
-
-```typescript
-// ✅ Use observable for texture loading
-texture.onLoadObservable.addOnce(async () => {
-  const pixels = await texture.readPixels();  // Async!
-  // Process pixels...
-  texture.dispose();  // Cleanup after use
+// Custom shader material with uniforms
+const material = new THREE.ShaderMaterial({
+  vertexShader: vertexCode,
+  fragmentShader: fragmentCode,
+  uniforms: {
+    uTime: { value: 0 },
+    uTexture: { value: texture },
+  },
+  side: THREE.DoubleSide,
 });
+
+// Update uniforms
+material.uniforms.uTime.value = time;
+```
+
+### InstancedMesh (replaces Thin Instances)
+
+```typescript
+const instMesh = new THREE.InstancedMesh(geometry, material, count);
+const mat4 = new THREE.Matrix4();
+for (let i = 0; i < count; i++) {
+  mat4.fromArray(matrices, i * 16);
+  instMesh.setMatrixAt(i, mat4);
+}
+instMesh.instanceMatrix.needsUpdate = true;
+```
+
+### Disposal Rules
+
+```typescript
+import { disposeMesh } from "@/lib/shared/rendering/threeHelpers";
+
+// Use helper for complete cleanup (removes from scene, disposes geo/mat/textures)
+disposeMesh(scene, mesh);
+
+// Or manual cleanup
+scene.remove(mesh);
+mesh.geometry?.dispose();
+mesh.material?.dispose();
+```
+
+| Resource | Dispose? | Reason |
+|----------|----------|--------|
+| Cloned mesh | Yes | Independent resource |
+| Shared ShaderMaterial | No | Used by multiple meshes |
+| Foliage mesh material | No | Shared with base mesh |
+| Water shader material | No | Shared across water meshes |
+
+### Texture Loading
+
+```typescript
+// Use RepeatWrapping explicitly (Three.js defaults to ClampToEdge)
+texture.wrapS = THREE.RepeatWrapping;
+texture.wrapT = THREE.RepeatWrapping;
+
+// Color space: sRGB for diffuse, Linear for data textures
+diffuseTexture.colorSpace = THREE.SRGBColorSpace;
+normalMap.colorSpace = THREE.LinearSRGBColorSpace;
+```
+
+### Raycasting
+
+```typescript
+// Terrain picking (use EditorEngine.pickTerrain for consistency)
+const point = engine.pickTerrain(clientX, clientY);
+
+// Manual raycasting
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2(ndcX, ndcY);
+raycaster.setFromCamera(ndc, camera);
+const intersections = raycaster.intersectObjects(meshes);
+```
+
+### Render Loop
+
+```typescript
+// requestAnimationFrame-based loop (no engine.runRenderLoop)
+const animate = () => {
+  requestAnimationFrame(animate);
+  // Update subsystems
+  foliageSystem?.updateVisibility(camera.position);
+  skyWeather?.update(time);
+  controls.update();
+  renderer.render(scene, camera);
+};
+animate();
 ```

@@ -7,13 +7,13 @@ import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from ".
  * Used in the editor UI for asset creation and customization
  */
 export class AssetGenerator {
-  private scene: any;
+  private scene: THREE.Scene;
   private currentAsset: ProceduralAsset | null = null;
   private currentMesh: THREE.Mesh | null = null;
   private params: AssetParams;
   private onUpdate: ((params: AssetParams) => void) | null = null;
 
-  constructor(scene: any, type: AssetType = "rock") {
+  constructor(scene: THREE.Scene, type: AssetType = "rock") {
     this.scene = scene;
     this.params = { ...DEFAULT_ASSET_PARAMS[type] };
   }

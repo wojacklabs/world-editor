@@ -46,7 +46,7 @@ interface PropCollisionData {
  * - Bounding box fallbacks
  */
 export class CollisionProxy {
-  private scene: any;
+  private scene: THREE.Scene;
   private config: CollisionProxyConfig;
 
   // Terrain collision
@@ -63,7 +63,7 @@ export class CollisionProxy {
   // Raycaster for picking
   private raycaster: THREE.Raycaster = new THREE.Raycaster();
 
-  constructor(scene: any, config?: Partial<CollisionProxyConfig>) {
+  constructor(scene: THREE.Scene, config?: Partial<CollisionProxyConfig>) {
     this.scene = scene;
     this.config = {
       terrainSimplification: 4,      // Use 1/4 resolution for terrain collision

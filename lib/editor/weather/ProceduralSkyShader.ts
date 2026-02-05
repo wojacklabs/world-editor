@@ -378,7 +378,7 @@ const DEFAULT_CONFIG: SkyShaderConfig = {
 };
 
 export class ProceduralSkyShader {
-  private scene: any;
+  private scene: THREE.Scene;
   private skyMesh: THREE.Mesh | null = null;
   private skyMaterial: THREE.ShaderMaterial | null = null;
   private config: SkyShaderConfig;
@@ -398,7 +398,7 @@ export class ProceduralSkyShader {
   private windDirection: number = 45; // degrees
   private startTime: number = 0;
 
-  constructor(scene: any, config: Partial<SkyShaderConfig> = {}) {
+  constructor(scene: THREE.Scene, config: Partial<SkyShaderConfig> = {}) {
     this.scene = scene;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.startTime = performance.now() / 1000;

@@ -52,6 +52,7 @@ export function createDataTexture(
   tex.needsUpdate = true;
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.LinearSRGBColorSpace;
   return tex;
 }
 
@@ -75,5 +76,6 @@ export function createFloatDataTexture(
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
+  tex.colorSpace = THREE.LinearSRGBColorSpace;
   return tex;
 }

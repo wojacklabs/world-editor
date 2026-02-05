@@ -203,21 +203,12 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const handleMouseMove = () => {
+    const handleMouseMove = (e: MouseEvent) => {
       if (!engineRef.current) return;
 
-      const scene = engineRef.current.getScene();
-      const pickResult = scene.pick(
-        scene.pointerX,
-        scene.pointerY,
-        (mesh) => mesh.name.startsWith("terrain")
-      );
-
-      if (pickResult?.hit && pickResult.pickedPoint) {
-        engineRef.current.updatePropPreviewPosition(
-          pickResult.pickedPoint.x,
-          pickResult.pickedPoint.z
-        );
+      const point = engineRef.current.pickTerrain(e.clientX, e.clientY);
+      if (point) {
+        engineRef.current.updatePropPreviewPosition(point.x, point.z);
       }
     };
 
@@ -238,15 +229,9 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       // Ignore if shift/ctrl is held (camera pan)
       if (e.shiftKey || e.ctrlKey) return;
 
-      const scene = engineRef.current.getScene();
-      const pickResult = scene.pick(
-        scene.pointerX,
-        scene.pointerY,
-        (mesh) => mesh.name.startsWith("terrain")
-      );
+      const pos = engineRef.current.pickTerrain(e.clientX, e.clientY);
 
-      if (pickResult?.hit && pickResult.pickedPoint) {
-        const pos = pickResult.pickedPoint;
+      if (pos) {
         const store = useEditorStore.getState();
 
         // Check if there's a pending asset to place
@@ -305,15 +290,9 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       // Ignore if shift/ctrl is held (camera pan)
       if (e.shiftKey || e.ctrlKey) return;
 
-      const scene = engineRef.current.getScene();
-      const pickResult = scene.pick(
-        scene.pointerX,
-        scene.pointerY,
-        (mesh) => mesh.name.startsWith("terrain")
-      );
+      const pos = engineRef.current.pickTerrain(e.clientX, e.clientY);
 
-      if (pickResult?.hit && pickResult.pickedPoint) {
-        const pos = pickResult.pickedPoint;
+      if (pos) {
         const store = useEditorStore.getState();
 
         if (store.pendingAsset?.type === "library" && store.pendingAsset.glbPath) {
@@ -374,10 +353,10 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
           store.setAssetSize(newSize);
         }
       }
-      // In other modes: Babylon.js camera handles zoom normally
+      // In other modes: OrbitControls handles zoom normally
     };
 
-    // Use window-level listener to catch event before Babylon.js scene handler
+    // Use window-level listener to catch event before OrbitControls
     window.addEventListener("wheel", handleWheel, { passive: false, capture: true });
     return () => window.removeEventListener("wheel", handleWheel, { capture: true });
   }, [engineReady, activeTool]);

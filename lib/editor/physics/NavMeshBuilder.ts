@@ -51,7 +51,7 @@ export interface PathResult {
  * - Supports slope and obstacle filtering
  */
 export class NavMeshBuilder {
-  private scene: any;
+  private scene: THREE.Scene;
   private heightmap: Heightmap | null = null;
   private terrainSize: number = 0;
 
@@ -71,7 +71,7 @@ export class NavMeshBuilder {
   // Debug mesh
   private debugMesh: THREE.Mesh | null = null;
 
-  constructor(scene: any, config?: Partial<NavMeshConfig>) {
+  constructor(scene: THREE.Scene, config?: Partial<NavMeshConfig>) {
     this.scene = scene;
     this.config = {
       cellSize: 0.3,

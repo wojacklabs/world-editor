@@ -667,7 +667,7 @@ void main() {
 `;
 
 export class FoliageSystem {
-  private scene: any; // any for EditorEngine compatibility during migration
+  private scene: THREE.Scene;
   private heightmap: Heightmap;
   private splatMap: SplatMap;
   private terrainScale: number;
@@ -733,6 +733,7 @@ export class FoliageSystem {
   private readonly _tempRotMatrix = new THREE.Matrix4();
   private readonly _tempFinalMatrix = new THREE.Matrix4();
   private readonly _tempEuler = new THREE.Euler();
+  private readonly _frustumSphere = new THREE.Sphere();
 
   // Wrapping mode for infinite terrain support (disable in game mode)
   private useWrapping = true;
@@ -747,7 +748,7 @@ export class FoliageSystem {
   private seed: number;
 
   constructor(
-    scene: any,
+    scene: THREE.Scene,
     heightmap: Heightmap,
     splatMap: SplatMap,
     terrainScale: number
@@ -767,8 +768,7 @@ export class FoliageSystem {
   /**
    * Set camera for frustum culling (replaces scene.activeCamera)
    */
-  // TODO: Restore THREE.Camera type after EditorEngine migration
-  setCamera(camera: any): void {
+  setCamera(camera: THREE.Camera): void {
     this.camera = camera;
   }
 
@@ -1128,16 +1128,16 @@ export class FoliageSystem {
       const distFactor = Math.pow(Math.abs(noise3D(0, iSeed * 2, 0)), 1.0 / clumpDensity);
       const dist = distFactor * clumpSpread;
 
-      const mat = new THREE.Matrix4();
-      const pos = new THREE.Vector3(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
-      const euler = new THREE.Euler(
+      this._tempPosition.set(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
+      this._tempEuler.set(
         noise3D(iSeed * 3, 0, 0) * 0.12,
         (noise3D(iSeed, iSeed, 0) + 0.5) * Math.PI * 2,
         noise3D(0, iSeed * 3, 0) * 0.1
       );
-      const quat = new THREE.Quaternion().setFromEuler(euler);
-      mat.compose(pos, quat, new THREE.Vector3(1, 1, 1));
-      bladeGeo.applyMatrix4(mat);
+      this._tempQuaternion.setFromEuler(this._tempEuler);
+      this._tempScale.set(1, 1, 1);
+      this._tempMatrix.compose(this._tempPosition, this._tempQuaternion, this._tempScale);
+      bladeGeo.applyMatrix4(this._tempMatrix);
 
       setGeometryVertexColor(bladeGeo, 0.35, 0.45, 0.22);
 
@@ -1399,9 +1399,8 @@ export class FoliageSystem {
   /**
    * Sync fog settings with scene fog for consistent appearance
    */
-  // TODO: Restore THREE.Color type after EditorEngine migration
   syncFogSettings(
-    fogColor: any,
+    fogColor: THREE.Color,
     fogDensity: number,
     fogHeightFalloff: number = 5.0,
     fogHeightDensity: number = 0.1
@@ -1433,8 +1432,7 @@ export class FoliageSystem {
    * (Three.js auto-injects cameraPosition for ShaderMaterial, but we keep this
    *  for any custom usage and impostor materials)
    */
-  // TODO: Restore THREE.Vector3 type after EditorEngine migration
-  updateCameraPosition(_cameraPosition: any): void {
+  updateCameraPosition(_cameraPosition: THREE.Vector3): void {
     // Three.js automatically provides cameraPosition uniform to ShaderMaterial.
     // No manual setting needed.
   }
@@ -1442,8 +1440,7 @@ export class FoliageSystem {
   /**
    * Sync sun direction and color for lighting
    */
-  // TODO: Restore THREE.Vector3, THREE.Color types after EditorEngine migration
-  syncSunDirection(sunDirection: any, sunColor: any): void {
+  syncSunDirection(sunDirection: THREE.Vector3, sunColor: THREE.Color): void {
     if (this.grassMaterial) {
       this.grassMaterial.uniforms.uSunDirection.value.copy(sunDirection);
       this.grassMaterial.uniforms.uSunColor.value.copy(sunColor);
@@ -1697,7 +1694,6 @@ export class FoliageSystem {
       this._tempQuaternion.setFromEuler(this._tempEuler);
 
       // Build final matrix: Translation * RotZ * RotX * RotY * Scale
-      // Replicate Babylon's multiplication order
       this._tempMatrix.compose(this._tempPosition, this._tempQuaternion, this._tempScale);
 
       const variationIndex = Math.floor(this.seededRandom() * this.rockVariationGeometries.length);
@@ -1780,7 +1776,7 @@ export class FoliageSystem {
       const slope = this.calculateSlope(x, z);
       if (slope > config.slopeMax) continue;
 
-      // Consume random values to maintain seed consistency (matching Babylon version)
+      // Consume random values to maintain seed consistency
       const _unusedScaleBase = config.minScale + this.seededRandom() * (config.maxScale - config.minScale);
       const _unusedSuppressionScale = 1.0 - stoneInfluence * (DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression * 0.55);
       this.seededRandom(); // was scale variation
@@ -1937,19 +1933,15 @@ export class FoliageSystem {
   private isChunkInFrustum(chunkCenterX: number, chunkCenterY: number, chunkCenterZ: number): boolean {
     if (!this.camera) return true;
 
-    const radius = this.chunkSize * 0.7071;
-    const sphere = new THREE.Sphere(
-      new THREE.Vector3(chunkCenterX, chunkCenterY, chunkCenterZ),
-      radius
-    );
-    return this.frustum.intersectsSphere(sphere);
+    this._frustumSphere.center.set(chunkCenterX, chunkCenterY, chunkCenterZ);
+    this._frustumSphere.radius = this.chunkSize * 0.7071;
+    return this.frustum.intersectsSphere(this._frustumSphere);
   }
 
   /**
    * Update foliage visibility based on camera position
    */
-  // TODO: Restore THREE.Vector3 type after EditorEngine migration
-  updateVisibility(cameraPosition: any): void {
+  updateVisibility(cameraPosition: THREE.Vector3): void {
     let camX: number;
     let camZ: number;
 
@@ -2099,14 +2091,6 @@ export class FoliageSystem {
     } else {
       return this.baseGeometries.get(baseTypeName);
     }
-  }
-
-  /**
-   * Backward-compatible alias for getBaseGeometry (used by external code expecting Babylon Mesh)
-   * Returns any to maintain compatibility during migration.
-   */
-  getBaseMesh(typeName: string): any {
-    return this.getBaseGeometry(typeName);
   }
 
   /**

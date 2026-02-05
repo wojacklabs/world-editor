@@ -38,8 +38,7 @@ function getAtlasRect(
   const padU = cellU * 0.08;
   const padV = cellV * 0.08;
 
-  // Three.js UV origin is bottom-left (same as OpenGL), so row order is natural.
-  // Babylon.js had top-to-bottom V axis, so we keep the same flip for atlas consistency.
+  // UV origin is bottom-left (OpenGL convention), flip row for top-to-bottom atlas layout.
   const vRow = rows - 1 - row;
 
   return {

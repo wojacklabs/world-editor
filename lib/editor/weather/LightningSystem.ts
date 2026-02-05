@@ -18,7 +18,7 @@ const DEFAULT_CONFIG: LightningConfig = {
 };
 
 export class LightningSystem {
-  private scene: any;
+  private scene: THREE.Scene;
   private config: LightningConfig;
 
   // Flash overlay
@@ -37,7 +37,7 @@ export class LightningSystem {
   // Reference to scene light for ambient boost
   private hemisphericLight: THREE.HemisphereLight | null = null;
 
-  constructor(scene: any, config: Partial<LightningConfig> = {}) {
+  constructor(scene: THREE.Scene, config: Partial<LightningConfig> = {}) {
     this.scene = scene;
     this.config = { ...DEFAULT_CONFIG, ...config };
   }

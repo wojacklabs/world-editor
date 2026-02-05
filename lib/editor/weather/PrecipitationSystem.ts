@@ -216,7 +216,7 @@ const SNOW_CONFIG: PrecipitationConfig = {
 };
 
 export class PrecipitationSystem {
-  private scene: any;
+  private scene: THREE.Scene;
   private particleMesh: THREE.Mesh | null = null;
   private material: THREE.ShaderMaterial | null = null;
 
@@ -232,7 +232,7 @@ export class PrecipitationSystem {
   // Animation
   private startTime: number = 0;
 
-  constructor(scene: any) {
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.startTime = performance.now() / 1000;
   }

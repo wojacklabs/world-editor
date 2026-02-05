@@ -75,6 +75,4 @@ export type { GLBPropsRendererOptions } from "./GLBPropsRenderer";
 export { ProceduralAssetGenerator } from "./ProceduralAssetGenerator";
 export type { GeneratorParams } from "./ProceduralAssetGenerator";
 
-// Interactive Water (WebGPU Compute Shader)
-export { InteractiveWater } from "../editor/terrain/InteractiveWater";
-export type { InteractiveWaterOptions } from "../editor/terrain/InteractiveWater";
+// Interactive Water (WebGPU Compute Shader) - temporarily excluded pending Three.js WebGPU compute support

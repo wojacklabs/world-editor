@@ -14,7 +14,7 @@ export interface MeshData {
  */
 export function createMeshFromData(
   meshData: MeshData,
-  scene: any
+  scene: THREE.Scene
 ): THREE.Mesh {
   const geometry = new THREE.BufferGeometry();
 

@@ -120,7 +120,7 @@ interface CloudLayer {
 }
 
 export class CloudSystem {
-  private scene: any;
+  private scene: THREE.Scene;
   private layers: CloudLayer[] = [];
   private noiseTexture: THREE.DataTexture | null = null;
 
@@ -135,7 +135,7 @@ export class CloudSystem {
   private windOffset: THREE.Vector2 = new THREE.Vector2(0, 0);
   private startTime: number = 0;
 
-  constructor(scene: any) {
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
     this.startTime = performance.now() / 1000;
   }

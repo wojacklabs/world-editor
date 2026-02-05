@@ -2,7 +2,7 @@
  * DataCodec - Pure encoding/decoding utilities
  *
  * Features:
- * - No Babylon.js runtime dependency
+ * - No 3D engine runtime dependency
  * - Browser/Node.js compatible
  * - Static methods for easy use
  */

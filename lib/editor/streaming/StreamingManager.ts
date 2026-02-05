@@ -66,8 +66,7 @@ const DEFAULT_CONFIG: StreamingConfig = {
  * - Beyond far ring: Unloaded
  */
 export class StreamingManager {
-  // TODO: Change back to THREE.Scene after EditorEngine migration
-  private scene: any;
+  private scene: THREE.Scene;
   private camera: THREE.Camera | null = null;
   private config: StreamingConfig;
   private cells: Map<string, StreamingCell> = new Map();
@@ -91,7 +90,7 @@ export class StreamingManager {
   private onUnloadCell: ((x: number, z: number) => void) | null = null;
   private onUpdateCellLOD: ((x: number, z: number, lod: StreamingLOD) => void) | null = null;
 
-  constructor(scene: any, config: Partial<StreamingConfig> = {}) {
+  constructor(scene: THREE.Scene, config: Partial<StreamingConfig> = {}) {
     this.scene = scene;
     this.config = { ...DEFAULT_CONFIG, ...config };
   }

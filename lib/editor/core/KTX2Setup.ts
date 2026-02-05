@@ -75,14 +75,5 @@ async function canReachDecoder(basePath: string): Promise<boolean> {
     // Ignore and report unavailable.
   }
 
-  // Also check for the old Babylon.js decoder name as fallback
-  try {
-    const altUrl = `${base}/babylon.ktx2Decoder.js`;
-    const resp = await fetch(altUrl, { method: "HEAD", cache: "no-store" });
-    if (resp.ok) return true;
-  } catch {
-    // Ignore
-  }
-
   return false;
 }

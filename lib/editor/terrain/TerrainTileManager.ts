@@ -1,3 +1,4 @@
+import * as THREE from "three";
 import { TerrainTile, TileType, TileConfig, TILE_COLORS } from "./TerrainTile";
 
 export interface TileGridConfig {
@@ -18,12 +19,12 @@ export interface TileData {
  * Manages a grid of terrain tiles with automatic edge blending
  */
 export class TerrainTileManager {
-  private scene: any;
+  private scene: THREE.Scene;
   private config: TileGridConfig;
   private tiles: Map<string, TerrainTile> = new Map();
   private tileTypes: TileType[][] = [];
 
-  constructor(scene: any, config: TileGridConfig) {
+  constructor(scene: THREE.Scene, config: TileGridConfig) {
     this.scene = scene;
     this.config = config;
 

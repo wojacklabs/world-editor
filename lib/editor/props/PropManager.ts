@@ -431,7 +431,7 @@ function ensureAttributes(geometry: THREE.BufferGeometry): void {
 }
 
 export class PropManager {
-  private scene: any;
+  private scene: THREE.Scene;
   private heightmap: Heightmap;
   private instances: Map<string, PropInstance> = new Map();
 
@@ -454,6 +454,7 @@ export class PropManager {
   private readonly _tempVector3 = new THREE.Vector3();
   private readonly _tempScale = new THREE.Vector3();
   private readonly _tempEuler = new THREE.Euler();
+  private readonly _tempSphere = new THREE.Sphere();
 
   // Tile-based grouping for streaming
   private propsByTile: Map<string, Set<string>> = new Map();  // tileKey -> Set<propId>
@@ -478,6 +479,9 @@ export class PropManager {
   private initializationPromise: Promise<void> | null = null;
   private isDisposed = false;
 
+  // Camera reference for frustum culling
+  private camera: THREE.Camera | null = null;
+
   // Frustum culling
   private frustum = new THREE.Frustum();
   private frustumMatrix = new THREE.Matrix4();
@@ -488,7 +492,7 @@ export class PropManager {
   // Material start time for wind animation
   private materialStartTime = 0;
 
-  constructor(scene: any, heightmap: Heightmap) {
+  constructor(scene: THREE.Scene, heightmap: Heightmap) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.materialStartTime = performance.now();
@@ -1172,27 +1176,22 @@ export class PropManager {
   private updateFrustumPlanes(): void {
     if (this.lastFrustumUpdateFrame === this.frameCounter) return;
 
-    const camera = this.scene.activeCamera ?? this.scene.camera;
-    if (!camera) return;
+    if (!this.camera) return;
 
-    // For Three.js cameras with projectionMatrix and matrixWorldInverse
-    if (camera.projectionMatrix && camera.matrixWorldInverse) {
-      this.frustumMatrix.multiplyMatrices(
-        camera.projectionMatrix,
-        camera.matrixWorldInverse
-      );
-      this.frustum.setFromProjectionMatrix(this.frustumMatrix);
-      this.lastFrustumUpdateFrame = this.frameCounter;
-    }
+    this.frustumMatrix.multiplyMatrices(
+      this.camera.projectionMatrix,
+      this.camera.matrixWorldInverse
+    );
+    this.frustum.setFromProjectionMatrix(this.frustumMatrix);
+    this.lastFrustumUpdateFrame = this.frameCounter;
   }
 
   /**
    * Check if a point is inside the camera frustum
    */
   private isInFrustum(position: THREE.Vector3, radius: number = 1): boolean {
-    // Simple sphere-frustum test using Three.js Frustum
-    const sphere = new THREE.Sphere(position, radius);
-    return this.frustum.intersectsSphere(sphere);
+    this._tempSphere.set(position, radius);
+    return this.frustum.intersectsSphere(this._tempSphere);
   }
 
   /**
@@ -1200,6 +1199,10 @@ export class PropManager {
    */
   setTileSize(tileSize: number): void {
     this.tileSize = tileSize;
+  }
+
+  setCamera(camera: THREE.Camera): void {
+    this.camera = camera;
   }
 
   /**
@@ -1448,8 +1451,7 @@ export class PropManager {
     if (!lodGeoMap) return;
 
     // Get camera position for LOD calculation
-    const camera = this.scene.activeCamera ?? this.scene.camera;
-    const cameraPos = camera ? camera.position : new THREE.Vector3();
+    const cameraPos = this.camera ? this.camera.position : new THREE.Vector3();
 
     // Categorize instances by LOD level
     const lodInstanceLists: Map<MeshLOD, { position: THREE.Vector3; rotation: THREE.Vector3; scale: THREE.Vector3 }[]> = new Map();

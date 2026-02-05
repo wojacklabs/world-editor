@@ -12,7 +12,7 @@ interface LODLevel {
 }
 
 export class TerrainMesh {
-  private scene: any;
+  private scene: THREE.Scene;
   private heightmap: Heightmap;
   private splatMap: SplatMap;
   private mesh: THREE.Mesh | null = null;  // Current active mesh
@@ -35,7 +35,7 @@ export class TerrainMesh {
   private currentLOD = 0;
   private lodEnabled = true;
 
-  constructor(scene: any, heightmap: Heightmap) {
+  constructor(scene: THREE.Scene, heightmap: Heightmap) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.splatMap = new SplatMap(heightmap.getResolution() * 2);
@@ -226,6 +226,9 @@ export class TerrainMesh {
 
     // Calculate normals
     this.calculateNormalsForMesh(mesh, actualResolution, cellSize, positions);
+
+    // Build BVH for accelerated raycasting (three-mesh-bvh)
+    geometry.computeBoundsTree();
 
     console.log(`[TerrainMesh] Created ${name}: ${actualResolution}x${actualResolution} = ${positions.length / 3} vertices`);
     return mesh;
@@ -473,6 +476,11 @@ export class TerrainMesh {
     this.calculateNormalsForMesh(mesh, actualResolution, cellSize, Array.from(positions));
     mesh.geometry.computeBoundingBox();
     mesh.geometry.computeBoundingSphere();
+
+    // Refit BVH after vertex position changes (topology unchanged)
+    if (mesh.geometry.boundsTree) {
+      mesh.geometry.boundsTree.refit();
+    }
   }
 
   /**
@@ -545,11 +553,11 @@ export class TerrainMesh {
     }
   }
 
-  getMesh(): any {
+  getMesh(): THREE.Mesh | null {
     return this.mesh;
   }
 
-  getMaterial(): any {
+  getMaterial(): THREE.Material | null {
     return this.useShader ? this.shaderMaterial : this.simpleMaterial;
   }
 
@@ -557,8 +565,7 @@ export class TerrainMesh {
    * Create a mesh with displacement baked into vertices for export
    * This replicates what the vertex shader does but on CPU
    */
-  // TODO: Restore THREE.Mesh return type after page.tsx migration
-  createBakedMeshForExport(): any {
+  createBakedMeshForExport(): THREE.Mesh | null {
     if (!this.dispTextureLoaded || !this.dispTextureData) {
       console.warn("[TerrainMesh] Displacement texture not loaded yet, exporting without displacement");
     }

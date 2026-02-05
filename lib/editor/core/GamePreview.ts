@@ -8,7 +8,7 @@ import { BiomeDecorator } from "../terrain/BiomeDecorator";
 import type { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
 
 export class GamePreview {
-  private scene: any;
+  private scene: THREE.Scene;
   private heightmap: Heightmap;
   private terrainMeshRef: TerrainMesh | null = null;
   private foliageSystem: FoliageSystem | null = null;
@@ -41,7 +41,7 @@ export class GamePreview {
   private onWheel: ((e: WheelEvent) => void) | null = null;
 
   constructor(
-    scene: any,
+    scene: THREE.Scene,
     heightmap: Heightmap,
     terrainMesh?: TerrainMesh | null,
     foliageSystem?: FoliageSystem | null,
@@ -273,7 +273,7 @@ export class GamePreview {
   }
 
   private setupInput(): void {
-    this.canvas = this.scene.getEngine?.()?.getRenderingCanvas?.() ?? document.querySelector("canvas");
+    this.canvas = document.querySelector("canvas");
     if (!this.canvas) return;
 
     const canvas = this.canvas;

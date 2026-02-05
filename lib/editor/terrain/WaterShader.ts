@@ -376,8 +376,7 @@ export const LAKE_WATER_CONFIG: WaterConfig = {
  * - Uses heightmap texture for depth calculation instead
  */
 export class WaterSystem {
-  // TODO: Change back to THREE.Scene after EditorEngine migration
-  private scene: any;
+  private scene: THREE.Scene;
   private heightmap: Heightmap;
 
   private waterMesh: THREE.Mesh | null = null;
@@ -390,8 +389,7 @@ export class WaterSystem {
   private startTime: number;
   private reflectionRenderTarget: THREE.WebGLRenderTarget | null = null;
 
-  // TODO: Change back to THREE.Scene after EditorEngine migration
-  constructor(scene: any, heightmap: Heightmap, config?: Partial<WaterConfig>) {
+  constructor(scene: THREE.Scene, heightmap: Heightmap, config?: Partial<WaterConfig>) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.config = { ...DEFAULT_WATER_CONFIG, ...config };
@@ -703,16 +701,14 @@ export class WaterSystem {
   /**
    * Get water mesh for adding to render lists
    */
-  // TODO: Restore THREE.Mesh return type after EditorEngine migration
-  getMesh(): any {
+  getMesh(): THREE.Mesh | null {
     return this.waterMesh;
   }
 
   /**
    * Get water material for sharing with other meshes
    */
-  // TODO: Restore THREE.ShaderMaterial return type after EditorEngine migration
-  getMaterial(): any {
+  getMaterial(): THREE.ShaderMaterial | null {
     return this.waterMaterial;
   }
 

@@ -60,7 +60,7 @@ const WEATHER_PRESETS: Record<WeatherPreset, WeatherConfig> = {
 };
 
 export class SkyWeatherSystem {
-  private scene: any;
+  private scene: THREE.Scene;
   private skyShader: ProceduralSkyShader | null = null;
   private cloudSystem: CloudSystem | null = null;
   private precipitationSystem: PrecipitationSystem | null = null;
@@ -79,9 +79,8 @@ export class SkyWeatherSystem {
   private nightFactor: number = 0;
 
   // References to external systems for synchronization
-  // TODO: Restore THREE.ShaderMaterial type after EditorEngine migration
-  private terrainMaterial: any = null;
-  private waterMaterial: any = null;
+  private terrainMaterial: THREE.ShaderMaterial | null = null;
+  private waterMaterial: THREE.ShaderMaterial | null = null;
   private foliageSystem: FoliageSystem | null = null;
   private directionalLight: THREE.DirectionalLight | null = null;
   private hemisphericLight: THREE.HemisphereLight | null = null;
@@ -92,7 +91,7 @@ export class SkyWeatherSystem {
   // Dirty flag for batched updates
   private shadersDirty: boolean = true;
 
-  constructor(scene: any, initialState?: Partial<WeatherState>) {
+  constructor(scene: THREE.Scene, initialState?: Partial<WeatherState>) {
     this.scene = scene;
     this.state = {
       timeOfDay: 12,
@@ -222,13 +221,12 @@ export class SkyWeatherSystem {
   }
 
   // Register external systems for synchronization
-  // TODO: Restore THREE.ShaderMaterial type after EditorEngine migration
-  setTerrainMaterial(material: any): void {
+  setTerrainMaterial(material: THREE.ShaderMaterial | null): void {
     this.terrainMaterial = material;
     this.shadersDirty = true;
   }
 
-  setWaterMaterial(material: any): void {
+  setWaterMaterial(material: THREE.ShaderMaterial | null): void {
     this.waterMaterial = material;
     this.shadersDirty = true;
   }
@@ -339,31 +337,16 @@ export class SkyWeatherSystem {
   }
 
   /**
-   * Sync uniforms to an external material (Babylon.js or Three.js).
-   * TODO: Remove Babylon.js path after EditorEngine migration.
+   * Sync uniforms to an external Three.js ShaderMaterial.
    */
-  private syncExternalMaterial(material: any, uniforms: Record<string, any>): void {
-    if (material.uniforms) {
-      // Three.js ShaderMaterial
-      for (const [key, val] of Object.entries(uniforms)) {
-        const u = material.uniforms[key];
-        if (!u) continue;
-        if (typeof val === "number") {
-          u.value = val;
-        } else if (val && typeof val.clone === "function") {
-          u.value.copy(val);
-        }
-      }
-    } else if (typeof material.setFloat === "function") {
-      // Babylon.js ShaderMaterial
-      for (const [key, val] of Object.entries(uniforms)) {
-        if (typeof val === "number") {
-          material.setFloat(key, val);
-        } else if (val && val.z !== undefined && val.y !== undefined && val.x !== undefined && val.w === undefined) {
-          if (typeof material.setVector3 === "function") material.setVector3(key, val);
-        } else if (val && val.r !== undefined) {
-          if (typeof material.setColor3 === "function") material.setColor3(key, val);
-        }
+  private syncExternalMaterial(material: THREE.ShaderMaterial, uniforms: Record<string, any>): void {
+    for (const [key, val] of Object.entries(uniforms)) {
+      const u = material.uniforms[key];
+      if (!u) continue;
+      if (typeof val === "number") {
+        u.value = val;
+      } else if (val && typeof val.clone === "function") {
+        u.value.copy(val);
       }
     }
   }
@@ -386,7 +369,6 @@ export class SkyWeatherSystem {
     }
 
     // Update terrain shader
-    // TODO: Switch to Three.js uniform access after EditorEngine migration
     if (this.terrainMaterial) {
       this.syncExternalMaterial(this.terrainMaterial, {
         uSunDirection: this.sunDirection,
@@ -398,7 +380,6 @@ export class SkyWeatherSystem {
     }
 
     // Update water shader
-    // TODO: Switch to Three.js uniform access after EditorEngine migration
     if (this.waterMaterial) {
       this.syncExternalMaterial(this.waterMaterial, {
         uSunDirection: this.sunDirection,

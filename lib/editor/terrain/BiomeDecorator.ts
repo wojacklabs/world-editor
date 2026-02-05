@@ -1,10 +1,10 @@
+import * as THREE from "three";
 import { Heightmap } from "./Heightmap";
 import { TerrainMesh } from "./TerrainMesh";
 import { WaterSystem } from "./WaterShader";
 
 export class BiomeDecorator {
-  // TODO: Change back to THREE.Scene after EditorEngine migration
-  private scene: any;
+  private scene: THREE.Scene;
   private heightmap: Heightmap;
   private terrainMesh: TerrainMesh;
 
@@ -13,7 +13,7 @@ export class BiomeDecorator {
   private waterLevel: number = -100;  // Default below terrain, synced with EditorEngine.seaLevel
   private useFixedSeaLevel: boolean = false;  // If true, use waterLevel directly instead of calculating
 
-  constructor(scene: any, heightmap: Heightmap, terrainMesh: TerrainMesh) {
+  constructor(scene: THREE.Scene, heightmap: Heightmap, terrainMesh: TerrainMesh) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.terrainMesh = terrainMesh;

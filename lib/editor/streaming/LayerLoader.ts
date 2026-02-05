@@ -1,3 +1,5 @@
+import * as THREE from "three";
+
 /**
  * Loading layer types with priority order
  * Lower number = higher priority (loads first)
@@ -61,7 +63,7 @@ export interface LayerStats {
  * - Error handling with retry
  */
 export class LayerLoader {
-  private scene: any;
+  private scene: THREE.Scene;
 
   // Loading queue
   private queue: LayerRequest[] = [];
@@ -81,7 +83,7 @@ export class LayerLoader {
   private onLayerError?: (layer: LoadingLayer, cellX: number, cellZ: number, error: string) => void;
   private onProgress?: (loaded: number, total: number) => void;
 
-  constructor(scene: any) {
+  constructor(scene: THREE.Scene) {
     this.scene = scene;
   }
 

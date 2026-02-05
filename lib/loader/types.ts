@@ -21,7 +21,7 @@ export interface TileConnections {
 // ============================================
 
 /**
- * Decoded tile data ready for use in Babylon.js/Three.js
+ * Decoded tile data ready for use in Three.js
  */
 export interface DecodedTileData {
   id: string;
@@ -293,7 +293,7 @@ export interface WorldMetadata {
 }
 
 // ============================================
-// Terrain Rendering (Babylon.js)
+// Terrain Rendering
 // ============================================
 
 /**
@@ -352,7 +352,7 @@ export interface TerrainTextureUrls {
 }
 
 // ============================================
-// Foliage Rendering (Babylon.js)
+// Foliage Rendering
 // ============================================
 
 /**

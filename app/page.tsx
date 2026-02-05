@@ -15,10 +15,8 @@ import { MeshData, createMeshFromData } from "@/lib/editor/assets/CustomMeshBuil
 import { getManualTileManager } from "@/lib/editor/tiles/ManualTileManager";
 import { createWorldRenderingConfig } from "@/lib/shared/foliage/FoliageQualityProfile";
 
-import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
-import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
-import { Vector3 } from "@babylonjs/core/Maths/math.vector";
-import "@babylonjs/loaders/glTF";
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 const WorldEditor = dynamic(
   () => import("@/components/editor/WorldEditor"),
@@ -30,7 +28,7 @@ export interface PlacedAsset {
   id: string;
   name: string;
   glbPath?: string;
-  node: TransformNode;
+  node: THREE.Group;
   position: { x: number; y: number; z: number };
   rotation: { x: number; y: number; z: number };
   scale: { x: number; y: number; z: number };
@@ -64,7 +62,8 @@ export default function EditorPage() {
       engine.createNewTerrain(terrainSize, terrainResolution);
       resetState();
       // Clear all placed assets
-      placedAssets.forEach((asset) => asset.node.dispose());
+      const scene = engine.getScene();
+      placedAssets.forEach((asset) => scene.remove(asset.node));
       setPlacedAssets([]);
       setSelectedAssetId(null);
     }
@@ -148,10 +147,9 @@ export default function EditorPage() {
     const terrainMesh = engine.getTerrainMesh();
     if (!terrainMesh) return;
 
-    let bakedMesh = null;
+    let bakedMesh: THREE.Mesh | null = null;
     try {
-      const serializers = await import("@babylonjs/serializers");
-      const { GLTF2Export } = serializers;
+      const { GLTFExporter } = await import("three/addons/exporters/GLTFExporter.js");
 
       // Create baked mesh with displacement applied to vertices
       bakedMesh = terrainMesh.createBakedMeshForExport();
@@ -160,12 +158,13 @@ export default function EditorPage() {
         return;
       }
 
-      const scene = engine.getScene();
-      const glb = await GLTF2Export.GLBAsync(scene, "terrain", {
-        shouldExportNode: (node) => node.name === "terrain_export",
-      });
+      const exporter = new GLTFExporter();
+      const glb = await exporter.parseAsync(bakedMesh, { binary: true });
 
-      const blob = glb.glTFFiles["terrain.glb"] as Blob;
+      const blob = new Blob(
+        [glb instanceof ArrayBuffer ? glb : JSON.stringify(glb)],
+        { type: "application/octet-stream" }
+      );
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement("a");
@@ -180,8 +179,16 @@ export default function EditorPage() {
     } finally {
       // Clean up temporary export mesh
       if (bakedMesh) {
-        bakedMesh.material?.dispose();
-        bakedMesh.dispose();
+        const scene = engine.getScene();
+        scene.remove(bakedMesh);
+        bakedMesh.geometry?.dispose();
+        if (bakedMesh.material) {
+          if (Array.isArray(bakedMesh.material)) {
+            bakedMesh.material.forEach((m) => m.dispose());
+          } else {
+            bakedMesh.material.dispose();
+          }
+        }
       }
     }
   }, [engine]);
@@ -330,9 +337,19 @@ export default function EditorPage() {
     const scene = engine.getScene();
 
     // Remove previous preview if exists
-    const existingPreview = scene.getMeshByName("claude_preview");
+    const existingPreview = scene.getObjectByName("claude_preview");
     if (existingPreview) {
-      existingPreview.dispose();
+      scene.remove(existingPreview);
+      if (existingPreview instanceof THREE.Mesh) {
+        existingPreview.geometry?.dispose();
+        if (existingPreview.material) {
+          if (Array.isArray(existingPreview.material)) {
+            existingPreview.material.forEach((m) => m.dispose());
+          } else {
+            existingPreview.material.dispose();
+          }
+        }
+      }
     }
 
     // Create mesh from data
@@ -360,76 +377,53 @@ export default function EditorPage() {
     const scene = engine.getScene();
 
     try {
-      // Parse the URL for SceneLoader
-      // For local files like "/assets/model.glb", we need to split into rootUrl and filename
-      let rootUrl: string;
-      let fileName: string;
+      console.log(`Loading GLB: ${glbPath}`);
 
-      if (glbPath.startsWith("/")) {
-        // Local file
-        const lastSlash = glbPath.lastIndexOf("/");
-        rootUrl = glbPath.substring(0, lastSlash + 1);
-        fileName = glbPath.substring(lastSlash + 1);
-      } else if (glbPath.startsWith("http")) {
-        // Remote URL
-        const url = new URL(glbPath);
-        const pathParts = url.pathname.split("/");
-        fileName = pathParts.pop() || "";
-        rootUrl = url.origin + pathParts.join("/") + "/";
-      } else {
-        rootUrl = "";
-        fileName = glbPath;
+      const loader = new GLTFLoader();
+      const gltf = await loader.loadAsync(glbPath);
+
+      // Create a unique ID for this placed asset
+      const assetId = `asset_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      // Create a parent Group for all loaded meshes
+      const parent = new THREE.Group();
+      parent.name = assetId;
+
+      // Move children from loaded scene to parent group
+      while (gltf.scene.children.length > 0) {
+        const child = gltf.scene.children[0];
+        child.name = `${assetId}_mesh_${parent.children.length}`;
+        parent.add(child);
       }
 
-      console.log(`Loading GLB: rootUrl=${rootUrl}, fileName=${fileName}`);
-
-      // Load GLB
-      const result = await SceneLoader.ImportMeshAsync(
-        "",
-        rootUrl,
-        fileName,
-        scene
-      );
-
-      if (result.meshes.length > 0) {
-        // Create a unique ID for this placed asset
-        const assetId = `asset_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-        // Create a parent TransformNode for all loaded meshes
-        const parent = new TransformNode(assetId, scene);
-
-        result.meshes.forEach((mesh, index) => {
-          mesh.name = `${assetId}_mesh_${index}`;
-          mesh.parent = parent;
-        });
-
-        // Position at center of terrain
-        const heightmap = engine.getHeightmap();
-        let posX = 32, posY = 1, posZ = 32;
-        if (heightmap) {
-          posX = heightmap.getScale() / 2;
-          posZ = heightmap.getScale() / 2;
-          posY = heightmap.getInterpolatedHeight(posX, posZ) + 1;
-        }
-        parent.position.set(posX, posY, posZ);
-
-        // Add to placed assets list
-        const placedAsset: PlacedAsset = {
-          id: assetId,
-          name,
-          glbPath,
-          node: parent,
-          position: { x: posX, y: posY, z: posZ },
-          rotation: { x: 0, y: 0, z: 0 },
-          scale: { x: 1, y: 1, z: 1 },
-        };
-
-        setPlacedAssets((prev) => [...prev, placedAsset]);
-        setSelectedAssetId(assetId);
-        setModified(true);
-
-        console.log(`Placed asset: ${name} (${result.meshes.length} meshes)`);
+      // Position at center of terrain
+      const heightmap = engine.getHeightmap();
+      let posX = 32, posY = 1, posZ = 32;
+      if (heightmap) {
+        posX = heightmap.getScale() / 2;
+        posZ = heightmap.getScale() / 2;
+        posY = heightmap.getInterpolatedHeight(posX, posZ) + 1;
       }
+      parent.position.set(posX, posY, posZ);
+
+      scene.add(parent);
+
+      // Add to placed assets list
+      const placedAsset: PlacedAsset = {
+        id: assetId,
+        name,
+        glbPath,
+        node: parent,
+        position: { x: posX, y: posY, z: posZ },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      };
+
+      setPlacedAssets((prev) => [...prev, placedAsset]);
+      setSelectedAssetId(assetId);
+      setModified(true);
+
+      console.log(`Placed asset: ${name} (${parent.children.length} meshes)`);
     } catch (error) {
       console.error("Failed to load GLB:", error);
       alert(`GLB 로드 실패: ${error instanceof Error ? error.message : "알 수 없는 오류"}`);
@@ -449,7 +443,7 @@ export default function EditorPage() {
 
         if (updates.position) {
           updated.position = updates.position;
-          asset.node.position = new Vector3(
+          asset.node.position.set(
             updates.position.x,
             updates.position.y,
             updates.position.z
@@ -458,7 +452,7 @@ export default function EditorPage() {
 
         if (updates.rotation) {
           updated.rotation = updates.rotation;
-          asset.node.rotation = new Vector3(
+          asset.node.rotation.set(
             updates.rotation.x * Math.PI / 180,
             updates.rotation.y * Math.PI / 180,
             updates.rotation.z * Math.PI / 180
@@ -467,7 +461,7 @@ export default function EditorPage() {
 
         if (updates.scale) {
           updated.scale = updates.scale;
-          asset.node.scaling = new Vector3(
+          asset.node.scale.set(
             updates.scale.x,
             updates.scale.y,
             updates.scale.z
@@ -484,8 +478,8 @@ export default function EditorPage() {
   const handleDeleteAsset = useCallback((assetId: string) => {
     setPlacedAssets((prev) => {
       const asset = prev.find((a) => a.id === assetId);
-      if (asset) {
-        asset.node.dispose();
+      if (asset && engine) {
+        engine.getScene().remove(asset.node);
       }
       return prev.filter((a) => a.id !== assetId);
     });
@@ -534,53 +528,39 @@ export default function EditorPage() {
     const scene = engine.getScene();
 
     try {
-      let rootUrl: string;
-      let fileName: string;
+      const loader = new GLTFLoader();
+      const gltf = await loader.loadAsync(glbPath);
 
-      if (glbPath.startsWith("/")) {
-        const lastSlash = glbPath.lastIndexOf("/");
-        rootUrl = glbPath.substring(0, lastSlash + 1);
-        fileName = glbPath.substring(lastSlash + 1);
-      } else if (glbPath.startsWith("http")) {
-        const url = new URL(glbPath);
-        const pathParts = url.pathname.split("/");
-        fileName = pathParts.pop() || "";
-        rootUrl = url.origin + pathParts.join("/") + "/";
-      } else {
-        rootUrl = "";
-        fileName = glbPath;
+      const assetId = `asset_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const parent = new THREE.Group();
+      parent.name = assetId;
+
+      while (gltf.scene.children.length > 0) {
+        const child = gltf.scene.children[0];
+        child.name = `${assetId}_mesh_${parent.children.length}`;
+        parent.add(child);
       }
 
-      const result = await SceneLoader.ImportMeshAsync("", rootUrl, fileName, scene);
+      // Position at clicked location
+      parent.position.set(position.x, position.y, position.z);
 
-      if (result.meshes.length > 0) {
-        const assetId = `asset_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const parent = new TransformNode(assetId, scene);
+      scene.add(parent);
 
-        result.meshes.forEach((mesh, index) => {
-          mesh.name = `${assetId}_mesh_${index}`;
-          mesh.parent = parent;
-        });
+      const placedAsset: PlacedAsset = {
+        id: assetId,
+        name,
+        glbPath,
+        node: parent,
+        position,
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+      };
 
-        // Position at clicked location
-        parent.position.set(position.x, position.y, position.z);
+      setPlacedAssets((prev) => [...prev, placedAsset]);
+      setSelectedAssetId(assetId);
+      setModified(true);
 
-        const placedAsset: PlacedAsset = {
-          id: assetId,
-          name,
-          glbPath,
-          node: parent,
-          position,
-          rotation: { x: 0, y: 0, z: 0 },
-          scale: { x: 1, y: 1, z: 1 },
-        };
-
-        setPlacedAssets((prev) => [...prev, placedAsset]);
-        setSelectedAssetId(assetId);
-        setModified(true);
-
-        console.log(`Placed asset at clicked position: ${name}`);
-      }
+      console.log(`Placed asset at clicked position: ${name}`);
     } catch (error) {
       console.error("Failed to load GLB:", error);
     }

@@ -1102,6 +1102,7 @@ export class ProceduralAssetGenerator {
         }
 
         const merged = BufferGeometryUtils.mergeGeometries(bakedParts, false);
+        for (const part of bakedParts) part.dispose();
         if (!merged) {
           return null;
         }
@@ -1705,6 +1706,7 @@ export class ProceduralAssetGenerator {
     }
 
     const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+    for (const geo of geometries) geo.dispose();
     if (merged) {
       return merged;
     }
@@ -1803,6 +1805,7 @@ export class ProceduralAssetGenerator {
     }
 
     const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+    for (const geo of geometries) geo.dispose();
     if (merged) {
       return merged;
     }
@@ -1905,6 +1908,7 @@ export class ProceduralAssetGenerator {
     }
 
     const merged = BufferGeometryUtils.mergeGeometries(bladeGeometries, false);
+    for (const geo of bladeGeometries) geo.dispose();
     if (merged) {
       return merged;
     }

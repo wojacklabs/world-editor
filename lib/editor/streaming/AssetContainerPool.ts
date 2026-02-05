@@ -32,15 +32,14 @@ export interface AssetInstance {
  * - Memory management with LRU eviction
  */
 export class AssetContainerPool {
-  // TODO: Change back to THREE.Scene after EditorEngine migration
-  private parentScene: any;
+  private parentScene: THREE.Scene;
   private pool: Map<string, PooledAsset> = new Map();
   private instances: Map<string, AssetInstance> = new Map();
   private maxPoolSize: number;
   private instanceCounter: number = 0;
   private gltfLoader: GLTFLoader;
 
-  constructor(scene: any, maxPoolSize: number = 50) {
+  constructor(scene: THREE.Scene, maxPoolSize: number = 50) {
     this.parentScene = scene;
     this.maxPoolSize = maxPoolSize;
     this.gltfLoader = new GLTFLoader();
