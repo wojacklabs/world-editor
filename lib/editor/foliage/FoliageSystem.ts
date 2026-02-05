@@ -14,6 +14,9 @@ import {
   VertexBuffer,
   Geometry,
   Texture,
+  RawTexture,
+  Frustum,
+  Plane,
 } from "@babylonjs/core";
 import { Heightmap } from "../terrain/Heightmap";
 import { SplatMap } from "../terrain/SplatMap";
@@ -99,17 +102,14 @@ uniform vec2 uWindDirection;
 uniform vec3 uCameraPosition;
 uniform float uLodFar;
 uniform float uVariationStrength;
-uniform float uFlowersEnabled;
-uniform float uFlowerDensity;
-uniform float uFlowerNoiseScale;
-uniform float uFlowerHeightBoost;
-uniform float uFlowerTipStart;
-uniform float uFlowerBaseScale;
-uniform float uFlowerExpand;
 
 // Grass color uniforms (matching original infinite-terrain)
 uniform vec3 uGrassBaseColor;
 uniform vec3 uGrassTopColor;
+
+// Wind noise texture (pre-computed fbm for performance)
+uniform sampler2D uWindTexture;
+uniform float uWindTextureScale;  // terrain scale for UV mapping
 
 // Grass blade constants (matching original infinite-terrain)
 #define GRASS_SEGMENTS 4
@@ -122,8 +122,6 @@ varying vec3 vColor;
 varying float vHeight;
 varying vec3 vWorldPosition;
 varying float vVariation;
-varying float vIsFlower;
-varying float vFlowerColorIndex;
 varying float vGrassX;
 varying float vHeightPercent;
 
@@ -209,59 +207,42 @@ void main() {
     float heightBonus = cameraHeight * 1.5;
     float effectiveLodFar = uLodFar + heightBonus;
 
-    // Distance-based LOD scale (shrinks grass at distance)
+    // Distance for wind attenuation (no size scaling - perspective handles it naturally)
     float distanceToCamera = length(grassBase.xz - uCameraPosition.xz);
     float distanceRatio = distanceToCamera / effectiveLodFar;
-    float lodScale = 1.0 - smoothstep(0.7, 1.0, distanceRatio);
+    float lodScale = 1.0;  // No artificial scaling - perspective already makes distant objects smaller
     float variation = (hash2D(grassBase.xz * 0.12) - 0.5) * uVariationStrength;
 
     // Per-blade random height variation
     float randomHeight = (hash2D(grassBase.xz * 0.19) * 2.0 - 1.0) * 0.2;
 
-    // Flower detection (noise-based clustering)
-    float hFlower = hash2D(grassBase.xz * 0.17);
-    float flowerNoise = noise2D(grassBase.xz * uFlowerNoiseScale);
-    float isFlower = uFlowersEnabled * step(1.0 - uFlowerDensity * flowerNoise, hFlower);
-
-    // 4-color selection based on spatial noise
-    float colorNoiseSample = noise2D(grassBase.xz * uFlowerNoiseScale * 0.5 + vec2(123.4, 567.8));
-    float flowerColorIdx = floor(colorNoiseSample * 4.0);
-
-    // Tip mask for flower shape
-    float tipMask = smoothstep(uFlowerTipStart, 1.0, heightPercent);
-
-    // Flower shape modification (taller, wider tip)
-    float heightMod = mix(1.0, 1.0 + uFlowerHeightBoost, isFlower);
-    float baseMod = mix(1.0, uFlowerBaseScale, isFlower);
-    float tipExpand = mix(1.0, 1.0 + uFlowerExpand, isFlower * tipMask);
-
     // Blade dimensions
     float grassHeight = 1.0;  // base height multiplier
     float bladeWidth = GRASS_WIDTH * easeOut(1.08 - heightPercent, 2.0) * grassHeight;
-    float bladeHeight = (GRASS_HEIGHT * grassHeight + randomHeight) * heightMod;
-
-    // Apply flower width modification
-    bladeWidth *= baseMod * tipExpand;
+    float bladeHeight = GRASS_HEIGHT * grassHeight + randomHeight;
 
     // Local x position - use pre-calculated position.x (already has easeOut taper)
-    // Apply flower modifications to pre-calculated width
-    float x = position.x * baseMod * tipExpand;
+    float x = position.x;
 
-    // Wind attenuation: separate from lodScale, starts much earlier
-    float windScaleAtten = 1.0 - smoothstep(0.2, 0.55, distanceRatio);
+    // Wind attenuation: synced with grass LOD visibility
+    float windScaleAtten = 1.0 - smoothstep(0.6, 0.9, distanceRatio);
     float heightWindAtten = 1.0 / (1.0 + cameraHeight * 0.03);
     vec2 windDir = normalize(uWindDirection);
-    vec2 windUV = grassBase.xz * uWindScale + windDir * (uTime * uWindMacroSpeed);
-    float macroWind = fbm2D(windUV) * 2.0 - 1.0;
-    float microWind = fbm2D(windUV * 2.7 + vec2(31.7, 19.1) + uTime * uWindMicroSpeed) * 2.0 - 1.0;
-    float combinedWind = macroWind + microWind * uWindSecondaryStrength;
+
+    // Texture-based wind (infinite-terrain style) - single sample, slow scroll
+    vec2 windUV = grassBase.xz * 0.035 + windDir * uTime * 0.1;
+    float windNoise = texture2D(uWindTexture, windUV).r * 2.0 - 1.0;
+    // Secondary flutter (higher frequency, very subtle)
+    vec2 flutterUV = grassBase.xz * 0.08 + windDir * uTime * 0.15;
+    float flutter = texture2D(uWindTexture, flutterUV).r * 0.15;
+    float combinedWind = windNoise + flutter;
 
     // Base lean factor (random per blade, range ±0.2 like original)
     float baseLean = (hash2D(grassBase.xz * 0.31) - 0.5) * 0.4;
 
     // Wind animation
     float windStrengthNorm = combinedWind * uWindStrength * windScaleAtten * heightWindAtten;
-    float leanAnimation = windStrengthNorm * 0.15;
+    float leanAnimation = windStrengthNorm * 0.5;
     float leanFactor = baseLean + leanAnimation;
 
     // Random rotation angle for each blade (range -PI/4 to PI/4)
@@ -316,8 +297,6 @@ void main() {
     vWorldPosition = finalPos;
     vHeight = heightPercent * bladeHeight * lodScale * (1.0 + variation * 0.15);
     vVariation = variation;
-    vIsFlower = isFlower;
-    vFlowerColorIndex = flowerColorIdx;
 
     gl_Position = viewProjection * vec4(finalPos, 1.0);
 
@@ -528,8 +507,6 @@ varying vec3 vColor;
 varying float vHeight;
 varying vec3 vWorldPosition;
 varying float vVariation;
-varying float vIsFlower;
-varying float vFlowerColorIndex;
 varying float vGrassX;
 varying float vHeightPercent;
 
@@ -545,12 +522,6 @@ uniform float uFadeStart;
 uniform float uFadeEnd;
 uniform float uDitherPixelSize;
 uniform int uDitherMode;
-
-// Flower color uniforms
-uniform vec3 uFlowerColorA;
-uniform vec3 uFlowerColorB;
-uniform vec3 uFlowerColorC;
-uniform vec3 uFlowerColorD;
 
 // Noise functions (matching propThinWindFragmentShader)
 float hash3D(vec3 p) {
@@ -667,21 +638,6 @@ void main() {
     // Apply lighting to grass color (matching original infinite-terrain)
     vec3 color = vColor * lighting;
 
-    // Apply flower color at tips (with lighting)
-    if (vIsFlower > 0.5) {
-        vec3 flowerColor = uFlowerColorA;
-        if (vFlowerColorIndex > 2.5) {
-            flowerColor = uFlowerColorD;
-        } else if (vFlowerColorIndex > 1.5) {
-            flowerColor = uFlowerColorC;
-        } else if (vFlowerColorIndex > 0.5) {
-            flowerColor = uFlowerColorB;
-        }
-        vec3 blossomColor = flowerColor * lighting;
-        float tipBlend = smoothstep(0.5, 0.9, vHeightPercent);
-        color = mix(color, blossomColor, tipBlend);
-    }
-
     float distanceToCamera = length(vWorldPosition - uCameraPosition);
     float fadeAlpha = 1.0 - smoothstep(uFadeStart, uFadeEnd, distanceToCamera);
     float dither = sampleDitherThreshold(gl_FragCoord.xy);
@@ -735,7 +691,15 @@ export class FoliageSystem {
 
   // Impostor base mesh (simple quad billboard)
   private impostorBaseMesh: Mesh | null = null;
-  
+
+  // Wind noise texture for GPU-efficient wind animation
+  private windNoiseTexture: RawTexture | null = null;
+  private readonly WIND_TEXTURE_SIZE = 256;
+
+  // Frustum culling for performance optimization
+  private frustumPlanesCache: Plane[] = [];
+  private lastFrustumUpdateFrame = -1;
+
   // Performance settings
   private maxInstancesPerChunk = 5000;
   private lodDistances = {
@@ -1291,6 +1255,98 @@ export class FoliageSystem {
   }
 
   /**
+   * Create wind noise texture for GPU-efficient wind animation
+   * Pre-computes tileable fbm2D noise to replace per-vertex fbm calculations
+   */
+  private createWindTexture(): void {
+    const size = this.WIND_TEXTURE_SIZE;
+    const data = new Uint8Array(size * size * 4);  // RGBA
+
+    // Generate tileable fbm2D noise
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        // Normalized coordinates (0-1)
+        const nx = x / size;
+        const ny = y / size;
+
+        // Compute fbm2D with tileable wrapping
+        // Using multiple octaves like the original shader
+        let value = 0;
+        let amplitude = 0.5;
+        let frequency = 1;
+        let px = nx * 4;  // Scale for detail
+        let py = ny * 4;
+
+        for (let i = 0; i < 3; i++) {
+          // Simple 2D noise with tileable coordinates
+          const noiseVal = this.tileableNoise2D(px * frequency, py * frequency, 4);
+          value += amplitude * noiseVal;
+          frequency *= 2.02;
+          amplitude *= 0.5;
+        }
+
+        // Store raw fbm value (0 to ~0.875) directly
+        // Shader will transform with * 2.0 - 1.0 to get proper -1 to +0.75 range
+        const byteVal = Math.floor(Math.min(1, value) * 255);
+        const idx = (y * size + x) * 4;
+        data[idx] = byteVal;      // R - macro wind
+        data[idx + 1] = byteVal;  // G - same value (could use different offset for micro)
+        data[idx + 2] = byteVal;  // B
+        data[idx + 3] = 255;      // A
+      }
+    }
+
+    // Create RawTexture with WRAP addressing for seamless tiling
+    this.windNoiseTexture = RawTexture.CreateRGBATexture(
+      data,
+      size,
+      size,
+      this.scene,
+      false,  // generateMipMaps
+      false,  // invertY
+      Texture.TRILINEAR_SAMPLINGMODE
+    );
+    this.windNoiseTexture.wrapU = Texture.WRAP_ADDRESSMODE;
+    this.windNoiseTexture.wrapV = Texture.WRAP_ADDRESSMODE;
+
+    console.log(`[FoliageSystem] Created ${size}x${size} wind texture`);
+  }
+
+  /**
+   * Tileable 2D noise for wind texture generation
+   */
+  private tileableNoise2D(x: number, y: number, period: number): number {
+    // Simple hash-based noise that tiles at 'period'
+    const ix = Math.floor(x) % period;
+    const iy = Math.floor(y) % period;
+    const fx = x - Math.floor(x);
+    const fy = y - Math.floor(y);
+
+    // Smoothstep
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+
+    // Hash corners (tileable)
+    const n00 = this.hash2D(ix, iy);
+    const n10 = this.hash2D((ix + 1) % period, iy);
+    const n01 = this.hash2D(ix, (iy + 1) % period);
+    const n11 = this.hash2D((ix + 1) % period, (iy + 1) % period);
+
+    // Bilinear interpolation
+    const nx0 = n00 * (1 - ux) + n10 * ux;
+    const nx1 = n01 * (1 - ux) + n11 * ux;
+    return nx0 * (1 - uy) + nx1 * uy;
+  }
+
+  /**
+   * Simple hash function for noise generation
+   */
+  private hash2D(x: number, y: number): number {
+    const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+    return n - Math.floor(n);
+  }
+
+  /**
    * Create materials for foliage
    */
   private createMaterials(): void {
@@ -1391,20 +1447,11 @@ export class FoliageSystem {
           "uAmbient",
           "uFogColor",
           "uFogDensity",
-          "uFlowersEnabled",
-          "uFlowerDensity",
-          "uFlowerNoiseScale",
-          "uFlowerHeightBoost",
-          "uFlowerTipStart",
-          "uFlowerBaseScale",
-          "uFlowerExpand",
-          "uFlowerColorA",
-          "uFlowerColorB",
-          "uFlowerColorC",
-          "uFlowerColorD",
           "uGrassBaseColor",
           "uGrassTopColor",
+          "uWindTextureScale",
         ],
+        samplers: ["uWindTexture"],
         needAlphaBlending: false,
       }
     );
@@ -1480,31 +1527,12 @@ export class FoliageSystem {
       DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.ditherMode
     );
 
-    // Flower uniforms
-    const flowerProfile = DEFAULT_FOLIAGE_QUALITY_PROFILE.flower;
-    this.grassMaterial.setFloat("uFlowersEnabled", flowerProfile.enabled ? 1.0 : 0.0);
-    this.grassMaterial.setFloat("uFlowerDensity", flowerProfile.density);
-    this.grassMaterial.setFloat("uFlowerNoiseScale", flowerProfile.noiseScale);
-    this.grassMaterial.setFloat("uFlowerHeightBoost", flowerProfile.heightBoost);
-    this.grassMaterial.setFloat("uFlowerTipStart", flowerProfile.tipStart);
-    this.grassMaterial.setFloat("uFlowerBaseScale", flowerProfile.baseScale);
-    this.grassMaterial.setFloat("uFlowerExpand", flowerProfile.expand);
-    this.grassMaterial.setColor3(
-      "uFlowerColorA",
-      new Color3(flowerProfile.colorA.r, flowerProfile.colorA.g, flowerProfile.colorA.b)
-    );
-    this.grassMaterial.setColor3(
-      "uFlowerColorB",
-      new Color3(flowerProfile.colorB.r, flowerProfile.colorB.g, flowerProfile.colorB.b)
-    );
-    this.grassMaterial.setColor3(
-      "uFlowerColorC",
-      new Color3(flowerProfile.colorC.r, flowerProfile.colorC.g, flowerProfile.colorC.b)
-    );
-    this.grassMaterial.setColor3(
-      "uFlowerColorD",
-      new Color3(flowerProfile.colorD.r, flowerProfile.colorD.g, flowerProfile.colorD.b)
-    );
+    // Wind texture for GPU-efficient wind animation
+    this.createWindTexture();
+    if (this.windNoiseTexture) {
+      this.grassMaterial.setTexture("uWindTexture", this.windNoiseTexture);
+    }
+    this.grassMaterial.setFloat("uWindTextureScale", this.terrainScale);
 
     // Grass needs both sides rendered (thin blades)
     this.grassMaterial.backFaceCulling = false;
@@ -2250,10 +2278,54 @@ export class FoliageSystem {
   }
 
   /**
+   * Update frustum planes cache (call once per frame before visibility check)
+   */
+  private updateFrustumPlanes(): void {
+    const frameNumber = this.scene.getFrameId();
+    if (this.lastFrustumUpdateFrame === frameNumber) return;
+
+    const camera = this.scene.activeCamera;
+    if (!camera) return;
+
+    // Get view-projection matrix
+    const viewMatrix = camera.getViewMatrix();
+    const projMatrix = camera.getProjectionMatrix();
+    const vpMatrix = viewMatrix.multiply(projMatrix);
+
+    // Extract frustum planes
+    this.frustumPlanesCache = Frustum.GetPlanes(vpMatrix);
+    this.lastFrustumUpdateFrame = frameNumber;
+  }
+
+  /**
+   * Check if a chunk is inside the camera frustum
+   * Uses sphere-frustum test for efficiency
+   */
+  private isChunkInFrustum(chunkCenterX: number, chunkCenterY: number, chunkCenterZ: number): boolean {
+    if (this.frustumPlanesCache.length === 0) return true;
+
+    // Chunk bounding sphere radius (diagonal of half chunk)
+    const radius = this.chunkSize * 0.7071;  // sqrt(2)/2 for chunk diagonal
+
+    // Simple sphere-frustum test
+    for (const plane of this.frustumPlanesCache) {
+      const distance = plane.normal.x * chunkCenterX +
+                       plane.normal.y * chunkCenterY +
+                       plane.normal.z * chunkCenterZ +
+                       plane.d;
+      if (distance < -radius) {
+        return false;  // Outside this plane
+      }
+    }
+    return true;
+  }
+
+  /**
    * Update foliage visibility based on camera position
    * Supports infinite terrain by wrapping camera position to terrain bounds (when useWrapping is true)
    * Optimized: uses squared distance to avoid sqrt per chunk
    * Optimized: skips update if camera hasn't moved significantly
+   * Optimized: uses frustum culling to skip chunks outside view
    */
   updateVisibility(cameraPosition: Vector3): void {
     // Camera position for distance calculation
@@ -2287,24 +2359,17 @@ export class FoliageSystem {
     this.lastVisibilityCamZ = camZ;
     this.lastVisibilityCamY = cameraPosition.y;
 
-    // Calculate effective LOD distance (match GPU shader logic)
-    const cameraHeight = Math.max(0, cameraPosition.y - 10);
-    const heightBonus = cameraHeight * 1.5;
-    const effectiveLodFar = this.lodDistances.far + heightBonus;
-    // Pre-compute squared distance threshold (avoid sqrt per chunk)
-    const effectiveLodFarSq = effectiveLodFar * effectiveLodFar;
+    // Update frustum planes for culling
+    this.updateFrustumPlanes();
 
     for (const [key, chunk] of this.chunks) {
       const chunkCenterX = (chunk.x + 0.5) * this.chunkSize;
       const chunkCenterZ = (chunk.z + 0.5) * this.chunkSize;
+      // Estimate chunk center Y from terrain (use camera Y as fallback for simplicity)
+      const chunkCenterY = cameraPosition.y * 0.5;
 
-      // Use squared distance (no sqrt needed)
-      const dx = camX - chunkCenterX;
-      const dz = camZ - chunkCenterZ;
-      const distanceSq = dx * dx + dz * dz;
-
-      // Distance-based visibility with height-adjusted LOD distance
-      const visible = distanceSq < effectiveLodFarSq;
+      // Frustum culling only (no distance-based hiding - assets never disappear)
+      const visible = this.isChunkInFrustum(chunkCenterX, chunkCenterY, chunkCenterZ);
 
       if (chunk.visible !== visible) {
         chunk.visible = visible;
@@ -3054,6 +3119,12 @@ export class FoliageSystem {
     if (this.impostorRockMaterial) {
       this.impostorRockMaterial.dispose();
       this.impostorRockMaterial = null;
+    }
+
+    // Dispose wind texture
+    if (this.windNoiseTexture) {
+      this.windNoiseTexture.dispose();
+      this.windNoiseTexture = null;
     }
   }
 }

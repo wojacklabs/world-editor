@@ -248,13 +248,12 @@ void main() {
     // Reconstruct world matrix from thin instance attributes
     mat4 worldMatrix = mat4(world0, world1, world2, world3);
     vec4 worldPos = worldMatrix * vec4(position, 1.0);
-    vec3 localPos = position;
 
-    // Height factor for wind
-    float heightAboveMin = max(0.0, localPos.y - uMinWindHeight);
+    // Height factor for wind (use local Y) - cubic for natural tree sway
+    float heightAboveMin = max(0.0, position.y - uMinWindHeight);
     float heightRange = max(0.01, uMaxWindHeight - uMinWindHeight);
     float heightFactor = clamp(heightAboveMin / heightRange, 0.0, 1.0);
-    heightFactor = heightFactor * heightFactor;
+    heightFactor = heightFactor * heightFactor * heightFactor;  // Cubic: trunk stays still
 
     // Wind wave
     vec2 worldPosXZ = worldPos.xz;
@@ -265,20 +264,19 @@ void main() {
     float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * uPropsNoiseSpeed);
     float windAmount = (primaryWave * 0.7 + secondaryWave * 0.3 + noiseVal * 0.2) * heightFactor * uWindStrength;
 
-    // Apply wind displacement
-    localPos.x += uWindDirection.x * windAmount * 0.15;
-    localPos.z += uWindDirection.y * windAmount * 0.15;
-    localPos.y -= windAmount * 0.03;
+    // Apply wind displacement in world space (not local!)
+    worldPos.x += uWindDirection.x * windAmount * 0.2;
+    worldPos.z += uWindDirection.y * windAmount * 0.2;
+    worldPos.y -= windAmount * 0.04;
 
-    vec4 finalWorldPos = worldMatrix * vec4(localPos, 1.0);
-    gl_Position = viewProjection * finalWorldPos;
+    gl_Position = viewProjection * worldPos;
 
     vNormal = normalize(mat3(worldMatrix) * normal);
-    vPosition = finalWorldPos.xyz;
-    vLocalPosition = localPos;
+    vPosition = worldPos.xyz;
+    vLocalPosition = position;
     vUV = uv;
-    vCameraDistance = length(cameraPosition - finalWorldPos.xyz);
-    vViewDirection = normalize(cameraPosition - finalWorldPos.xyz);
+    vCameraDistance = length(cameraPosition - worldPos.xyz);
+    vViewDirection = normalize(cameraPosition - worldPos.xyz);
     vColor = color;
 }
 `;
@@ -372,14 +370,10 @@ void main() {
     // Use vertex color if available, otherwise use baseColor
     vec3 meshColor = vColor.a > 0.5 ? vColor.rgb : baseColor;
 
-    // Color variation
+    // For leaves: use vertex color directly (like grass shader)
+    // For bark: apply subtle noise variation
     float colorNoise = fbm(vPosition * 2.0);
-    vec3 color = mix(meshColor, meshColor * 0.8, colorNoise * 0.3);
-
-    // Height-based color (tips lighter)
-    float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y);
-    float isLeaf = mix(0.3, 1.0, leafMask);
-    color = mix(color * 0.85, color * 1.1, tipFactor * isLeaf);
+    vec3 color = mix(meshColor, mix(meshColor, meshColor * 0.85, colorNoise * 0.2), 1.0 - leafMask);
 
     // Triplanar dirt texture for bark (R > G = brown = bark)
     // Always sample outside control flow for WebGPU/WGSL compatibility
@@ -405,7 +399,8 @@ void main() {
     float ndv = clamp(dot(normal, vViewDirection), 0.0, 1.0);
     float fresnel = pow(1.0 - ndv, uFresnelPower) * uFresnelStrength;
 
-    // Subsurface scattering approximation
+    // Subsurface scattering approximation (tipFactor for leaves only)
+    float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y) * leafMask;
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
 
     // Final lighting
@@ -1123,8 +1118,8 @@ export class PropManager {
         maxWindHeight = 0.3;
       } else if (assetType === "tree") {
         windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength;
-        minWindHeight = 0.5;
-        maxWindHeight = 2.0;
+        minWindHeight = 1.2;  // Only upper part moves (trunk stays still)
+        maxWindHeight = 2.5;
       }
 
       material.setFloat("uWindStrength", windStrength);
@@ -2046,11 +2041,18 @@ export class PropManager {
     // Register to spatial hash for fast picking
     this.registerPropToSpatialHash(id, x, z);
 
+    // IMPORTANT: Dispose preview BEFORE rebuilding instance group
+    // Preview and instance group mesh may share geometry when cloned from same source.
+    // Disposing preview after rebuild can interfere with the thin instance buffer.
+    this.disposePreviewResources();
+
     // Mark group dirty and rebuild
     this.markGroupDirty(groupKey);
     this.rebuildDirtyGroups();
 
     // Create new preview with different seed for next placement
+    // Note: randomizePreview->createPreview calls disposePreviewResources internally,
+    // but it's a no-op since we already disposed above
     const newSeed = this.randomizePreview();
 
     return { id, newSeed };

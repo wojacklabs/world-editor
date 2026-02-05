@@ -223,7 +223,7 @@ export class TerrainRenderer {
 
   private lodEnabled: boolean = true;
   private currentLOD: number = 0;
-  private lodDistances: number[] = [50, 100, 200];
+  private lodDistances: number[] = []; // Set dynamically based on terrain size
 
   private wireframe: boolean = false;
   private debugMode: number = 0;
@@ -658,6 +658,11 @@ export class TerrainRenderer {
 
     const res = this.data.resolution;
     const size = this.data.size;
+
+    // Set LOD distances based on terrain size (matching editor behavior)
+    // LOD 0 -> LOD 1 at 1x terrain size
+    // LOD 1 -> LOD 2 at 2x terrain size
+    this.lodDistances = [size * 1.0, size * 2.0];
 
     // Create 3 LOD levels: full, half, quarter resolution
     const lodResolutions = [res, Math.floor(res / 2), Math.floor(res / 4)];

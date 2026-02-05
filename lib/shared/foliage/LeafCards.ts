@@ -115,12 +115,13 @@ export function createLeafCardMesh(
   vertexData.applyToMesh(mesh);
 
   // Ensure cards always have explicit color data for shader code paths.
+  // Default color = grass base rgb(57,108,24)/255 (overwritten by setLeafVertexColors)
   const vertexCount = positions.length / 3;
   const colors = new Float32Array(vertexCount * 4);
   for (let i = 0; i < vertexCount; i++) {
-    colors[i * 4] = 0.35;
-    colors[i * 4 + 1] = 0.55;
-    colors[i * 4 + 2] = 0.2;
+    colors[i * 4] = 0.224;
+    colors[i * 4 + 1] = 0.424;
+    colors[i * 4 + 2] = 0.094;
     colors[i * 4 + 3] = 1.0;
   }
   mesh.setVerticesData(VertexBuffer.ColorKind, colors);

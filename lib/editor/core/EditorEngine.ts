@@ -156,11 +156,10 @@ export class EditorEngine {
       }
 
 
-      // Update foliage shader uniforms in editor mode
-      // Note: updateVisibility is NOT called in editor mode - all chunks stay visible
-      // Visibility/LOD culling is only applied in game mode (GamePreview.ts)
+      // Update foliage in editor mode (visibility culling + LOD + wind animation)
       if (this.foliageSystem && !this.isGameMode) {
         const cameraPos = this.camera.position;
+        this.foliageSystem.updateVisibility(cameraPos);
         this.foliageSystem.updateCameraPosition(cameraPos);
         this.foliageSystem.updateTime(performance.now() / 1000);
       }

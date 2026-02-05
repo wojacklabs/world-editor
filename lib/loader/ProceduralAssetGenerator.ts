@@ -44,7 +44,7 @@ attribute vec3 normal;
 attribute vec2 uv;
 attribute vec4 color;
 
-uniform mat4 worldViewProjection;
+uniform mat4 viewProjection;
 uniform mat4 world;
 uniform vec3 cameraPosition;
 uniform float uTime;
@@ -81,12 +81,12 @@ float noise2D(vec2 p) {
 
 void main() {
     vec4 worldPos = world * vec4(position, 1.0);
-    vec3 localPos = position;
 
-    float heightAboveMin = max(0.0, localPos.y - uMinWindHeight);
+    // Height factor (use local Y) - cubic for natural tree sway
+    float heightAboveMin = max(0.0, position.y - uMinWindHeight);
     float heightRange = max(0.01, uMaxWindHeight - uMinWindHeight);
     float heightFactor = clamp(heightAboveMin / heightRange, 0.0, 1.0);
-    heightFactor = heightFactor * heightFactor;
+    heightFactor = heightFactor * heightFactor * heightFactor;  // Cubic: trunk stays still
 
     vec2 worldPosXZ = worldPos.xz;
     float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
@@ -96,19 +96,19 @@ void main() {
     float noiseVal = noise2D(worldPosXZ * 0.3 + uTime * uPropsNoiseSpeed);
     float windAmount = (primaryWave * 0.7 + secondaryWave * 0.3 + noiseVal * 0.2) * heightFactor * uWindStrength;
 
-    localPos.x += uWindDirection.x * windAmount * 0.15;
-    localPos.z += uWindDirection.y * windAmount * 0.15;
-    localPos.y -= windAmount * 0.03;
+    // Apply wind in world space (not local!)
+    worldPos.x += uWindDirection.x * windAmount * 0.2;
+    worldPos.z += uWindDirection.y * windAmount * 0.2;
+    worldPos.y -= windAmount * 0.04;
 
-    vec4 finalWorldPos = world * vec4(localPos, 1.0);
-    gl_Position = worldViewProjection * vec4(localPos, 1.0);
+    gl_Position = viewProjection * worldPos;
 
     vNormal = normalize(mat3(world) * normal);
-    vPosition = finalWorldPos.xyz;
-    vLocalPosition = localPos;
+    vPosition = worldPos.xyz;
+    vLocalPosition = position;
     vUV = uv;
-    vCameraDistance = length(cameraPosition - finalWorldPos.xyz);
-    vViewDirection = normalize(cameraPosition - finalWorldPos.xyz);
+    vCameraDistance = length(cameraPosition - worldPos.xyz);
+    vViewDirection = normalize(cameraPosition - worldPos.xyz);
     vColor = color;
 }
 `;
@@ -198,8 +198,11 @@ void main() {
     }
 
     vec3 meshColor = vColor.a > 0.5 ? vColor.rgb : baseColor;
+
+    // For leaves: use vertex color directly (like grass shader)
+    // For bark: apply subtle noise variation
     float colorNoise = fbm(vPosition * 2.0);
-    vec3 color = mix(meshColor, meshColor * 0.8, colorNoise * 0.3);
+    vec3 color = mix(meshColor, mix(meshColor, meshColor * 0.85, colorNoise * 0.2), 1.0 - leafMask);
 
     // Triplanar bark texture sampling (for tree trunks/branches)
     vec3 barkBlend = abs(normal);
@@ -213,10 +216,6 @@ void main() {
     float isBark = step(vColor.g, vColor.r);
     color = mix(color, mix(color, dirtSample, 0.4), isBark);
 
-    float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y);
-    float isLeaf = mix(0.3, 1.0, leafMask);
-    color = mix(color * 0.85, color * 1.1, tipFactor * isLeaf);
-
     float NdotL = dot(normal, sunDirection);
     float halfLambert = NdotL * 0.5 + 0.5;
     halfLambert = halfLambert * halfLambert;
@@ -228,6 +227,8 @@ void main() {
     float ndv = clamp(dot(normal, vViewDirection), 0.0, 1.0);
     float fresnel = pow(1.0 - ndv, uFresnelPower) * uFresnelStrength;
 
+    // Subsurface scattering approximation (tipFactor for leaves only)
+    float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y) * leafMask;
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
 
     float diffuse = halfLambert * 0.6 + 0.4;
@@ -241,6 +242,10 @@ void main() {
 
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+    // Tone mapping and gamma (matching editor/terrain shaders)
+    color = color / (color + vec3(1.0)) * 1.1;
+    color = pow(color, vec3(0.95));
 
     gl_FragColor = vec4(color, 1.0);
 }
@@ -666,10 +671,11 @@ function setLeafVertexColors(mesh: Mesh, seed: number, isTop: boolean = false): 
   const vertexCount = positions.length / 3;
   const colors = new Float32Array(vertexCount * 4);
 
-  const sunLeaf = { r: 0.40, g: 0.52, b: 0.24 };
-  const shadeLeaf = { r: 0.18, g: 0.30, b: 0.12 };
-  const yellowLeaf = { r: 0.45, g: 0.50, b: 0.20 };
-  const freshLeaf = { r: 0.32, g: 0.45, b: 0.20 };
+  // 잔디와 동일 톤 팔레트
+  const sunLeaf = { r: 0.467, g: 0.667, b: 0.102 };    // 잔디 top
+  const shadeLeaf = { r: 0.15, g: 0.28, b: 0.06 };     // 그늘
+  const yellowLeaf = { r: 0.50, g: 0.70, b: 0.12 };    // 밝은 변형
+  const freshLeaf = { r: 0.224, g: 0.424, b: 0.094 };  // 잔디 base
 
   let minY = Infinity, maxY = -Infinity;
   for (let i = 0; i < positions.length; i += 3) {
@@ -1202,7 +1208,7 @@ export class ProceduralAssetGenerator {
         {
           attributes: ["position", "normal", "uv", "color"],
           uniforms: [
-            "worldViewProjection", "world", "cameraPosition",
+            "viewProjection", "world", "cameraPosition",
             "uTime", "uWindDirection", "uWindStrength",
             "uMinWindHeight", "uMaxWindHeight",
             "uPropsPrimarySpeed", "uPropsSecondarySpeed", "uPropsNoiseSpeed",
@@ -1235,8 +1241,8 @@ export class ProceduralAssetGenerator {
         maxHeight = 0.4;
       } else if (params.type === "tree") {
         windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength;
-        minHeight = 0.4;
-        maxHeight = 2.0;
+        minHeight = 1.2;  // Only upper part moves (trunk stays still)
+        maxHeight = 2.5;
       }
 
       material.setFloat("uWindStrength", windStr * this.windStrength);
@@ -1590,10 +1596,39 @@ export class ProceduralAssetGenerator {
           diameterTop: branchThick * 0.5,
           diameterBottom: branchThick,
           tessellation: 6,
+          subdivisions: 4,
           updatable: true,
         },
         this.scene
       );
+
+      // Apply curvature deformation to branch (droop + slight S-curve)
+      const branchPositions = branch.getVerticesData(VertexBuffer.PositionKind);
+      if (branchPositions) {
+        const newBranchPositions = new Float32Array(branchPositions.length);
+        const halfLen = branchLength / 2;
+        // Curve parameters: droop and sideways bend
+        const droopAmount = 0.08 + Math.abs(noise3D(bSeed * 7.3, 0, 0)) * 0.12;
+        const sideBend = (noise3D(0, bSeed * 8.1, 0) - 0.5) * 0.06;
+
+        for (let vi = 0; vi < branchPositions.length; vi += 3) {
+          let bx = branchPositions[vi];
+          const by = branchPositions[vi + 1];
+          let bz = branchPositions[vi + 2];
+
+          // t: 0 at base, 1 at tip
+          const bt = (by + halfLen) / branchLength;
+          // Quadratic droop (stronger toward tip)
+          bz += droopAmount * bt * bt * branchLength;
+          // Slight S-curve sideways
+          bx += sideBend * Math.sin(bt * Math.PI) * branchLength;
+
+          newBranchPositions[vi] = bx;
+          newBranchPositions[vi + 1] = by;
+          newBranchPositions[vi + 2] = bz;
+        }
+        branch.updateVerticesData(VertexBuffer.PositionKind, newBranchPositions);
+      }
 
       // Rotate branch
       const branchDirVec = new Vector3(branchDirX, branchDirY, branchDirZ).normalize();

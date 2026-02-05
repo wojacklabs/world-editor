@@ -104,7 +104,7 @@ export class GamePreview {
 
     // Get sky/fog values from weather system, or use defaults
     const skyColor = this.skyWeatherSystem?.getSkyHorizonColor() || new Color3(0.55, 0.7, 0.9);
-    const fogDensity = this.skyWeatherSystem?.getFogDensity() || 0.015;
+    const fogDensity = this.skyWeatherSystem?.getFogDensity() || 0.008;
 
     // Change scene background for game feel - sky/horizon color
     this.scene.clearColor = new Color4(skyColor.r, skyColor.g, skyColor.b, 1);

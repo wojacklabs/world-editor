@@ -360,10 +360,10 @@ export const DEFAULT_WATER_CONFIG: WaterConfig = {
   fresnelColor: new Color3(0.45, 0.65, 0.75),  // More vibrant reflection color
 
   waves: [
-    { direction: new Vector2(1.0, 0.3), steepness: 0.25, wavelength: 8.0 },
-    { direction: new Vector2(0.3, 1.0), steepness: 0.18, wavelength: 5.0 },
-    { direction: new Vector2(-0.5, 0.7), steepness: 0.12, wavelength: 3.0 },
-    { direction: new Vector2(0.7, -0.4), steepness: 0.06, wavelength: 1.5 },
+    { direction: new Vector2(1.0, 0.3), steepness: 0.375, wavelength: 8.0 },   // 0.25 × 1.5
+    { direction: new Vector2(0.3, 1.0), steepness: 0.27, wavelength: 5.0 },    // 0.18 × 1.5
+    { direction: new Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 3.0 },   // 0.12 × 1.5
+    { direction: new Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.5 },   // 0.06 × 1.5
   ],
 
   fresnelPower: 2.0,
@@ -391,10 +391,10 @@ export const RIVER_WATER_CONFIG = DEFAULT_WATER_CONFIG;
 export const LAKE_WATER_CONFIG: WaterConfig = {
   ...DEFAULT_WATER_CONFIG,
   waves: [
-    { direction: new Vector2(1.0, 0.3), steepness: 0.015, wavelength: 2.5 },
-    { direction: new Vector2(-0.4, 1.0), steepness: 0.012, wavelength: 1.8 },
-    { direction: new Vector2(0.7, -0.5), steepness: 0.008, wavelength: 1.2 },
-    { direction: new Vector2(-0.3, -0.8), steepness: 0.005, wavelength: 0.8 },
+    { direction: new Vector2(1.0, 0.3), steepness: 0.0225, wavelength: 2.5 },  // 0.015 × 1.5
+    { direction: new Vector2(-0.4, 1.0), steepness: 0.018, wavelength: 1.8 },  // 0.012 × 1.5
+    { direction: new Vector2(0.7, -0.5), steepness: 0.012, wavelength: 1.2 },  // 0.008 × 1.5
+    { direction: new Vector2(-0.3, -0.8), steepness: 0.0075, wavelength: 0.8 },// 0.005 × 1.5
   ],
 };
 

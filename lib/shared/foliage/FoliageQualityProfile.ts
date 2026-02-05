@@ -47,20 +47,6 @@ export interface GrassQualityProfile {
   stoneSuppressionStartWeight: number;
 }
 
-export interface FlowerProfile {
-  enabled: boolean;
-  density: number;
-  noiseScale: number;
-  heightBoost: number;
-  tipStart: number;
-  baseScale: number;
-  expand: number;
-  colorA: { r: number; g: number; b: number };
-  colorB: { r: number; g: number; b: number };
-  colorC: { r: number; g: number; b: number };
-  colorD: { r: number; g: number; b: number };
-}
-
 export interface FoliageQualityProfile {
   version: string;
   foliageProfileVersion: string;
@@ -70,7 +56,6 @@ export interface FoliageQualityProfile {
   wind: WindQualityProfile;
   fade: FadeQualityProfile;
   grass: GrassQualityProfile;
-  flower: FlowerProfile;
 }
 
 export interface WorldRenderingConfig {
@@ -93,30 +78,30 @@ export const DEFAULT_FOLIAGE_QUALITY_PROFILE: FoliageQualityProfile = {
   },
   leafAtlas: {
     path: "/assets/references/infinite-terrain/alpha_leaves",
-    frameColumns: 1,
-    frameRows: 1,
+    frameColumns: 2,
+    frameRows: 2,
     alphaCutoff: 0.88,
   },
   wind: {
     directionRadians: Math.PI * 0.25,
-    baseStrength: 0.5,
-    grassClumpStrength: 0.8,
-    bushStrength: 0.4,
-    treeStrength: 0.35,
-    biomeGrassStrength: 0.7,
-    // Grass wind timing (matching infinite-terrain)
-    grassMacroSpeed: 0.1,
-    grassMicroSpeed: 0.02,
+    baseStrength: 0.75,         // 0.5 × 1.5
+    grassClumpStrength: 1.2,    // 0.8 × 1.5
+    bushStrength: 0.6,          // 0.4 × 1.5
+    treeStrength: 1.2,          // 0.8 × 1.5
+    biomeGrassStrength: 1.05,   // 0.7 × 1.5
+    // Grass wind timing (texture scroll - slower than direct noise)
+    grassMacroSpeed: 0.4,
+    grassMicroSpeed: 0.6,
     // Props wind timing
     propsPrimarySpeed: 0.5,
     propsSecondarySpeed: 1.5,
     propsNoiseSpeed: 0.2,
   },
   fade: {
-    leafFadeStart: 45,
-    leafFadeEnd: 115,
-    biomeGrassFadeStart: 170,
-    biomeGrassFadeEnd: 270,
+    leafFadeStart: 200,      // Start fading later (was 45)
+    leafFadeEnd: 9999,       // Never fully disappear (was 115)
+    biomeGrassFadeStart: 300, // Start fading later (was 170)
+    biomeGrassFadeEnd: 9999,  // Never fully disappear (was 270)
     biomeVariationStrength: 0.22,
   },
   grass: {
@@ -127,19 +112,6 @@ export const DEFAULT_FOLIAGE_QUALITY_PROFILE: FoliageQualityProfile = {
     ditherPixelSize: 1.0,
     stoneSuppression: 0.65,
     stoneSuppressionStartWeight: 0.22,
-  },
-  flower: {
-    enabled: true,
-    density: 0.15,
-    noiseScale: 0.03,
-    heightBoost: 0.35,
-    tipStart: 0.7,
-    baseScale: 0.6,
-    expand: 0.45,
-    colorA: { r: 0.9, g: 0.2, b: 0.3 },
-    colorB: { r: 1.0, g: 0.85, b: 0.2 },
-    colorC: { r: 0.6, g: 0.3, b: 0.8 },
-    colorD: { r: 1.0, g: 0.5, b: 0.2 },
   },
 };
 
