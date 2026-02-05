@@ -1,15 +1,6 @@
-import {
-  Scene,
-  Vector3,
-  Mesh,
-  MeshBuilder,
-  StandardMaterial,
-  ShaderMaterial,
-  Color3,
-  Color4,
-  FreeCamera,
-  KeyboardEventTypes,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { PointerLockControls } from "three/addons/controls/PointerLockControls.js";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
 import { FoliageSystem } from "../foliage/FoliageSystem";
@@ -17,15 +8,16 @@ import { BiomeDecorator } from "../terrain/BiomeDecorator";
 import type { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
 
 export class GamePreview {
-  private scene: Scene;
+  private scene: any;
   private heightmap: Heightmap;
   private terrainMeshRef: TerrainMesh | null = null;
   private foliageSystem: FoliageSystem | null = null;
   private biomeDecorator: BiomeDecorator | null = null;
   private skyWeatherSystem: SkyWeatherSystem | null = null;
-  private camera: FreeCamera | null = null;
-  private originalMesh: Mesh | null = null;
-  private unifiedWater: Mesh | null = null;
+  private camera: THREE.PerspectiveCamera | null = null;
+  private controls: PointerLockControls | null = null;
+  private originalMesh: THREE.Mesh | null = null;
+  private unifiedWater: THREE.Mesh | null = null;
   private originalWaterVisible: boolean = true;
 
   // Free camera state
@@ -33,26 +25,23 @@ export class GamePreview {
   private fastMoveSpeed = 11.25;  // 3x speed (was 3.75)
 
   // Input state
-  private inputMap: { [key: string]: boolean } = {};
-  private isPointerLocked = false;
+  private moveForward = false;
+  private moveBackward = false;
+  private moveLeft = false;
+  private moveRight = false;
+  private moveUp = false;
+  private moveDown = false;
+  private isSprinting = false;
 
   // Event handler references for cleanup
   private canvas: HTMLCanvasElement | null = null;
   private onCanvasClick: (() => void) | null = null;
-  private onPointerLockChange: (() => void) | null = null;
-  private onMouseMove: ((e: MouseEvent) => void) | null = null;
+  private onKeyDown: ((e: KeyboardEvent) => void) | null = null;
+  private onKeyUp: ((e: KeyboardEvent) => void) | null = null;
   private onWheel: ((e: WheelEvent) => void) | null = null;
-  private keyboardObserver: any = null;
-  private updateBound: (() => void) | null = null;
-
-  // Reusable vectors for update loop (avoid GC pressure)
-  private readonly _forward = new Vector3();
-  private readonly _right = new Vector3();
-  private readonly _up = new Vector3(0, 1, 0);
-  private readonly _moveDir = new Vector3();
 
   constructor(
-    scene: Scene,
+    scene: any,
     heightmap: Heightmap,
     terrainMesh?: TerrainMesh | null,
     foliageSystem?: FoliageSystem | null,
@@ -71,7 +60,7 @@ export class GamePreview {
     this.skyWeatherSystem = system;
   }
 
-  enable(terrainMesh: Mesh): void {
+  enable(terrainMesh: THREE.Mesh): void {
     this.originalMesh = terrainMesh;
 
     // Adjust foliage LOD distances for game mode
@@ -84,7 +73,7 @@ export class GamePreview {
         size * 0.5    // far: 50% of terrain size (culled)
       );
       // Force initial visibility update
-      const startPos = new Vector3(size / 2, 0, size / 2);
+      const startPos = new THREE.Vector3(size / 2, 0, size / 2);
       this.foliageSystem.updateVisibility(startPos);
     }
 
@@ -103,16 +92,14 @@ export class GamePreview {
     this.setupInput();
 
     // Get sky/fog values from weather system, or use defaults
-    const skyColor = this.skyWeatherSystem?.getSkyHorizonColor() || new Color3(0.55, 0.7, 0.9);
+    const skyColor = this.skyWeatherSystem?.getSkyHorizonColor() || new THREE.Color(0.55, 0.7, 0.9);
     const fogDensity = this.skyWeatherSystem?.getFogDensity() || 0.008;
 
     // Change scene background for game feel - sky/horizon color
-    this.scene.clearColor = new Color4(skyColor.r, skyColor.g, skyColor.b, 1);
+    this.scene.background = new THREE.Color(skyColor.r, skyColor.g, skyColor.b);
 
     // Atmospheric fog - blends objects into the sky at distance
-    this.scene.fogMode = Scene.FOGMODE_EXP2;
-    this.scene.fogDensity = fogDensity;
-    this.scene.fogColor = skyColor;
+    this.scene.fog = new THREE.FogExp2(new THREE.Color(skyColor.r, skyColor.g, skyColor.b), fogDensity);
 
     // Notify weather system of game mode (it will handle shader sync)
     if (this.skyWeatherSystem) {
@@ -121,31 +108,27 @@ export class GamePreview {
       // Fallback: manual sync if no weather system
       // Sync terrain shader fog with scene fog (same color = seamless blend)
       if (this.originalMesh && this.originalMesh.material) {
-        const material = this.originalMesh.material as ShaderMaterial;
-        if (material.setFloat && material.setColor3) {
-          material.setFloat("uFogDensity", fogDensity);
-          material.setColor3("uFogColor", skyColor);
+        const material = this.originalMesh.material as any;
+        if (material.uniforms) {
+          if (material.uniforms.uFogDensity) material.uniforms.uFogDensity.value = fogDensity;
+          if (material.uniforms.uFogColor) material.uniforms.uFogColor.value.set(skyColor.r, skyColor.g, skyColor.b);
         }
       }
 
       // Also apply to terrainMeshRef if available
       if (this.terrainMeshRef) {
-        const material = this.terrainMeshRef.getMaterial() as ShaderMaterial | null;
-        if (material && material.setFloat && material.setColor3) {
-          material.setFloat("uFogDensity", fogDensity);
-          material.setColor3("uFogColor", skyColor);
+        const material = this.terrainMeshRef.getMaterial() as any;
+        if (material?.uniforms) {
+          if (material.uniforms.uFogDensity) material.uniforms.uFogDensity.value = fogDensity;
+          if (material.uniforms.uFogColor) material.uniforms.uFogColor.value.set(skyColor.r, skyColor.g, skyColor.b);
         }
       }
 
       // Sync foliage system fog with scene fog for consistent blending
       if (this.foliageSystem) {
-        this.foliageSystem.syncFogSettings(skyColor, fogDensity);
+        this.foliageSystem.syncFogSettings(new THREE.Color(skyColor.r, skyColor.g, skyColor.b), fogDensity);
       }
     }
-
-    // Register update loop
-    this.updateBound = this.update.bind(this);
-    this.scene.registerBeforeRender(this.updateBound);
   }
 
   disable(): void {
@@ -155,30 +138,19 @@ export class GamePreview {
       this.onCanvasClick = null;
     }
 
-    if (this.onPointerLockChange) {
-      document.removeEventListener("pointerlockchange", this.onPointerLockChange);
-      this.onPointerLockChange = null;
+    if (this.onKeyDown) {
+      document.removeEventListener("keydown", this.onKeyDown);
+      this.onKeyDown = null;
     }
 
-    if (this.onMouseMove) {
-      document.removeEventListener("mousemove", this.onMouseMove);
-      this.onMouseMove = null;
+    if (this.onKeyUp) {
+      document.removeEventListener("keyup", this.onKeyUp);
+      this.onKeyUp = null;
     }
 
     if (this.canvas && this.onWheel) {
       this.canvas.removeEventListener("wheel", this.onWheel);
       this.onWheel = null;
-    }
-
-    if (this.keyboardObserver) {
-      this.scene.onKeyboardObservable.remove(this.keyboardObserver);
-      this.keyboardObserver = null;
-    }
-
-    // Unregister update
-    if (this.updateBound) {
-      this.scene.unregisterBeforeRender(this.updateBound);
-      this.updateBound = null;
     }
 
     // Notify weather system of editor mode
@@ -191,48 +163,58 @@ export class GamePreview {
       this.foliageSystem.setLODDistances(30, 60, 100);
 
       // Reset fog to editor defaults (minimal fog in editor mode)
-      this.foliageSystem.syncFogSettings(new Color3(0.6, 0.75, 0.9), 0.008);
+      this.foliageSystem.syncFogSettings(new THREE.Color(0.6, 0.75, 0.9), 0.008);
     }
 
     // Re-enable terrain LOD and restore shader fog settings
     if (this.terrainMeshRef) {
       this.terrainMeshRef.setLODEnabled(true);
-      const material = this.terrainMeshRef.getMaterial() as ShaderMaterial | null;
-      if (material && material.setFloat && material.setColor3) {
+      const material = this.terrainMeshRef.getMaterial() as any;
+      if (material?.uniforms) {
         // Restore original fog values from TerrainShader.ts
-        material.setFloat("uFogDensity", 0.008);
-        material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
+        if (material.uniforms.uFogDensity) material.uniforms.uFogDensity.value = 0.008;
+        if (material.uniforms.uFogColor) material.uniforms.uFogColor.value.set(0.6, 0.75, 0.9);
       }
     }
 
     // Remove unified water and restore original
     if (this.unifiedWater) {
-      this.unifiedWater.dispose();
+      disposeMesh(this.scene, this.unifiedWater);
       this.unifiedWater = null;
     }
-    const originalWater = this.scene.getMeshByName("water_plane");
+    const originalWater = this.scene.getObjectByName("water_plane");
     if (originalWater) {
-      originalWater.isVisible = this.originalWaterVisible;
-      originalWater.alwaysSelectAsActiveMesh = false;
+      originalWater.visible = this.originalWaterVisible;
     }
 
-    // Dispose camera
-    if (this.camera) {
-      this.camera.dispose();
-      this.camera = null;
+    // Unlock pointer before disposing controls
+    if (this.controls?.isLocked) {
+      this.controls.unlock();
     }
+
+    // Dispose controls and camera
+    if (this.controls) {
+      this.controls.dispose();
+      this.controls = null;
+    }
+    this.camera = null;
 
     // Reset fog
-    this.scene.fogMode = Scene.FOGMODE_NONE;
+    this.scene.fog = null;
 
-    // Unlock pointer
-    if (this.isPointerLocked) {
+    // Fallback: ensure pointer is unlocked even after controls disposal
+    if (document.pointerLockElement) {
       document.exitPointerLock();
-      this.isPointerLocked = false;
     }
 
     // Reset input state
-    this.inputMap = {};
+    this.moveForward = false;
+    this.moveBackward = false;
+    this.moveLeft = false;
+    this.moveRight = false;
+    this.moveUp = false;
+    this.moveDown = false;
+    this.isSprinting = false;
     this.canvas = null;
   }
 
@@ -241,35 +223,35 @@ export class GamePreview {
    * Create a unified water plane covering the single terrain
    */
   private createUnifiedWater(): void {
-    const originalWater = this.scene.getMeshByName("water_plane") as Mesh;
+    const originalWater = this.scene.getObjectByName("water_plane") as THREE.Mesh;
     if (!originalWater) {
       return;
     }
 
     // Store original visibility
-    this.originalWaterVisible = originalWater.isVisible;
+    this.originalWaterVisible = originalWater.visible;
 
     // Hide original water
-    originalWater.isVisible = false;
+    originalWater.visible = false;
 
     const tileSize = this.heightmap.getScale();
     const totalSize = tileSize;
 
     // Create unified water plane covering single terrain
-    this.unifiedWater = MeshBuilder.CreateGround(
-      "unified_water",
-      { width: totalSize, height: totalSize, subdivisions: 64 },
-      this.scene
-    );
+    const geometry = new THREE.PlaneGeometry(totalSize, totalSize, 64, 64);
+    geometry.rotateX(-Math.PI / 2); // PlaneGeometry faces +Y by default, rotate to XZ
+
+    this.unifiedWater = new THREE.Mesh(geometry, originalWater.material);
 
     // Position at center of terrain
-    this.unifiedWater.position.x = tileSize / 2;
-    this.unifiedWater.position.y = originalWater.position.y;
-    this.unifiedWater.position.z = tileSize / 2;
+    this.unifiedWater.position.set(
+      tileSize / 2,
+      originalWater.position.y,
+      tileSize / 2
+    );
 
-    // Use same material as original water
-    this.unifiedWater.material = originalWater.material;
-    this.unifiedWater.alwaysSelectAsActiveMesh = true;
+    this.unifiedWater.frustumCulled = false;
+    this.scene.add(this.unifiedWater);
   }
 
   private setupCamera(): void {
@@ -281,124 +263,101 @@ export class GamePreview {
     const groundHeight = this.heightmap.getInterpolatedHeight(centerX, centerZ);
     const startY = groundHeight + 15; // Higher starting position for overview
 
-    this.camera = new FreeCamera(
-      "gameCamera",
-      new Vector3(centerX, startY, centerZ),
-      this.scene
-    );
-
-    this.camera.minZ = 0.1;
-    this.camera.maxZ = 1000;
-    this.camera.fov = 1.0; // ~57 degrees, slightly narrower for exploration
-    this.camera.inertia = 0;
-    this.camera.angularSensibility = 500;
+    // fov ~57 degrees (1.0 rad), aspect will be set by renderer
+    this.camera = new THREE.PerspectiveCamera(57, 1, 0.1, 1000);
+    this.camera.position.set(centerX, startY, centerZ);
 
     // Look slightly downward initially
-    this.camera.rotation.x = 0.3;
-
-    // Detach default controls - we'll handle manually
-    this.camera.inputs.clear();
-
-    this.scene.activeCamera = this.camera;
+    this.camera.rotation.order = "YXZ";
+    this.camera.rotation.x = -0.3;
   }
 
   private setupInput(): void {
-    this.canvas = this.scene.getEngine().getRenderingCanvas();
+    this.canvas = this.scene.getEngine?.()?.getRenderingCanvas?.() ?? document.querySelector("canvas");
     if (!this.canvas) return;
 
     const canvas = this.canvas;
 
+    // Setup PointerLockControls
+    this.controls = new PointerLockControls(this.camera!, canvas);
+
     // Pointer lock on click
     this.onCanvasClick = () => {
-      if (!this.isPointerLocked) {
-        canvas.requestPointerLock();
+      if (this.controls && !this.controls.isLocked) {
+        this.controls.lock();
       }
     };
     canvas.addEventListener("click", this.onCanvasClick);
 
-    this.onPointerLockChange = () => {
-      this.isPointerLocked = document.pointerLockElement === canvas;
-    };
-    document.addEventListener("pointerlockchange", this.onPointerLockChange);
-
-    // Mouse movement for camera rotation
-    this.onMouseMove = (e: MouseEvent) => {
-      if (!this.isPointerLocked || !this.camera) return;
-
-      const sensitivity = 0.002;
-      this.camera.rotation.y += e.movementX * sensitivity;
-      this.camera.rotation.x += e.movementY * sensitivity;
-
-      // Clamp vertical rotation
-      this.camera.rotation.x = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, this.camera.rotation.x));
-    };
-    document.addEventListener("mousemove", this.onMouseMove);
-
     // Block mouse wheel events in game mode (prevents unwanted camera manipulation)
     this.onWheel = (e: WheelEvent) => {
-      // Prevent default scroll behavior and stop propagation to Babylon.js
       e.preventDefault();
       e.stopPropagation();
     };
     canvas.addEventListener("wheel", this.onWheel, { passive: false });
 
     // Keyboard input
-    this.keyboardObserver = this.scene.onKeyboardObservable.add((kbInfo) => {
-      const key = kbInfo.event.key.toLowerCase();
-
-      if (kbInfo.type === KeyboardEventTypes.KEYDOWN) {
-        this.inputMap[key] = true;
-
-        // Exit pointer lock with Escape
-        if (key === "escape" && this.isPointerLocked) {
-          document.exitPointerLock();
-        }
-      } else if (kbInfo.type === KeyboardEventTypes.KEYUP) {
-        this.inputMap[key] = false;
+    this.onKeyDown = (e: KeyboardEvent) => {
+      switch (e.code) {
+        case "KeyW": this.moveForward = true; break;
+        case "KeyS": this.moveBackward = true; break;
+        case "KeyA": this.moveLeft = true; break;
+        case "KeyD": this.moveRight = true; break;
+        case "KeyE":
+        case "Space": this.moveUp = true; break;
+        case "KeyQ": this.moveDown = true; break;
+        case "ShiftLeft":
+        case "ShiftRight": this.isSprinting = true; break;
+        case "Escape":
+          if (this.controls?.isLocked) {
+            this.controls.unlock();
+          }
+          break;
       }
-    });
+    };
+    document.addEventListener("keydown", this.onKeyDown);
+
+    this.onKeyUp = (e: KeyboardEvent) => {
+      switch (e.code) {
+        case "KeyW": this.moveForward = false; break;
+        case "KeyS": this.moveBackward = false; break;
+        case "KeyA": this.moveLeft = false; break;
+        case "KeyD": this.moveRight = false; break;
+        case "KeyE":
+        case "Space": this.moveUp = false; break;
+        case "KeyQ": this.moveDown = false; break;
+        case "ShiftLeft":
+        case "ShiftRight": this.isSprinting = false; break;
+      }
+    };
+    document.addEventListener("keyup", this.onKeyUp);
   }
 
-  private update = (): void => {
-    if (!this.camera) return;
+  update(deltaTime: number): void {
+    if (!this.camera || !this.controls) return;
 
-    const deltaTime = this.scene.getEngine().getDeltaTime() / 1000;
     const size = this.heightmap.getScale();
 
-    // Movement input
-    let moveX = 0;
-    let moveY = 0;
-    let moveZ = 0;
-
-    if (this.inputMap["w"]) moveZ += 1;
-    if (this.inputMap["s"]) moveZ -= 1;
-    if (this.inputMap["a"]) moveX -= 1;
-    if (this.inputMap["d"]) moveX += 1;
-    if (this.inputMap["e"] || this.inputMap[" "]) moveY += 1;  // Up
-    if (this.inputMap["q"]) moveY -= 1;  // Down
-
     // Fast movement with Shift
-    const speed = this.inputMap["shift"] ? this.fastMoveSpeed : this.moveSpeed;
+    const speed = this.isSprinting ? this.fastMoveSpeed : this.moveSpeed;
 
-    // Calculate movement direction - FPS style (horizontal movement only for WASD)
-    // Forward/back moves along the direction camera is facing, but always horizontal
-    // Reuse vectors to avoid GC pressure
-    const rotY = this.camera.rotation.y;
-    this._forward.set(Math.sin(rotY), 0, Math.cos(rotY));
-    this._right.set(Math.sin(rotY + Math.PI / 2), 0, Math.cos(rotY + Math.PI / 2));
-    // this._up is already (0, 1, 0)
+    // Calculate movement direction using PointerLockControls helpers
+    const forwardAmount = Number(this.moveForward) - Number(this.moveBackward);
+    const rightAmount = Number(this.moveRight) - Number(this.moveLeft);
+    const upAmount = Number(this.moveUp) - Number(this.moveDown);
 
-    // Apply movement: WASD for horizontal, Q/E/Space for vertical
-    // Manual calculation to avoid creating intermediate vectors
-    this._moveDir.set(
-      this._forward.x * moveZ + this._right.x * moveX,
-      moveY,  // up component
-      this._forward.z * moveZ + this._right.z * moveX
-    );
+    // PointerLockControls.moveForward/moveRight move on the XZ plane (horizontal)
+    if (forwardAmount !== 0) {
+      this.controls.moveForward(forwardAmount * speed * deltaTime);
+    }
+    if (rightAmount !== 0) {
+      this.controls.moveRight(rightAmount * speed * deltaTime);
+    }
 
-    this.camera.position.x += this._moveDir.x * speed * deltaTime;
-    this.camera.position.y += this._moveDir.y * speed * deltaTime;
-    this.camera.position.z += this._moveDir.z * speed * deltaTime;
+    // Vertical movement (Q/E/Space) - directly adjust Y
+    if (upAmount !== 0) {
+      this.camera.position.y += upAmount * speed * deltaTime;
+    }
 
     // Keep camera within single terrain bounds (0 to size)
     const minBound = 0;
@@ -428,9 +387,9 @@ export class GamePreview {
       const time = performance.now() / 1000;
       this.foliageSystem.updateTime(time);
     }
-  };
+  }
 
-  getCamera(): FreeCamera | null {
+  getCamera(): any {
     return this.camera;
   }
 }

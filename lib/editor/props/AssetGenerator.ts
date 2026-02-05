@@ -1,12 +1,5 @@
-import {
-  Scene,
-  Mesh,
-  ArcRotateCamera,
-  Vector3,
-  HemisphericLight,
-  Color3,
-  Color4,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from "./ProceduralAsset";
 
 /**
@@ -14,19 +7,19 @@ import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from ".
  * Used in the editor UI for asset creation and customization
  */
 export class AssetGenerator {
-  private scene: Scene;
+  private scene: any;
   private currentAsset: ProceduralAsset | null = null;
-  private currentMesh: Mesh | null = null;
+  private currentMesh: THREE.Mesh | null = null;
   private params: AssetParams;
   private onUpdate: ((params: AssetParams) => void) | null = null;
 
-  constructor(scene: Scene, type: AssetType = "rock") {
+  constructor(scene: any, type: AssetType = "rock") {
     this.scene = scene;
     this.params = { ...DEFAULT_ASSET_PARAMS[type] };
   }
 
   // Generate/regenerate the asset
-  generate(): Mesh | null {
+  generate(): any {
     if (this.currentAsset) {
       this.currentAsset.dispose();
     }
@@ -40,13 +33,13 @@ export class AssetGenerator {
   }
 
   // Randomize seed (dice button)
-  randomize(): Mesh | null {
+  randomize(): any {
     this.params.seed = Math.random() * 10000;
     return this.generate();
   }
 
   // Set asset type
-  setType(type: AssetType): Mesh | null {
+  setType(type: AssetType): any {
     // Keep some params, reset type-specific ones
     const currentSize = this.params.size;
     this.params = { ...DEFAULT_ASSET_PARAMS[type] };
@@ -56,37 +49,37 @@ export class AssetGenerator {
   }
 
   // Set size
-  setSize(size: number): Mesh | null {
+  setSize(size: number): any {
     this.params.size = Math.max(0.1, Math.min(10, size));
     return this.generate();
   }
 
   // Set size variation
-  setSizeVariation(variation: number): Mesh | null {
+  setSizeVariation(variation: number): any {
     this.params.sizeVariation = Math.max(0, Math.min(1, variation));
     return this.generate();
   }
 
   // Set noise scale
-  setNoiseScale(scale: number): Mesh | null {
+  setNoiseScale(scale: number): any {
     this.params.noiseScale = Math.max(0.5, Math.min(10, scale));
     return this.generate();
   }
 
   // Set noise amplitude
-  setNoiseAmplitude(amplitude: number): Mesh | null {
+  setNoiseAmplitude(amplitude: number): any {
     this.params.noiseAmplitude = Math.max(0, Math.min(0.5, amplitude));
     return this.generate();
   }
 
   // Set base color
-  setColorBase(color: Color3): Mesh | null {
+  setColorBase(color: THREE.Color): any {
     this.params.colorBase = color;
     return this.generate();
   }
 
   // Set detail color
-  setColorDetail(color: Color3): Mesh | null {
+  setColorDetail(color: THREE.Color): any {
     this.params.colorDetail = color;
     return this.generate();
   }
@@ -97,7 +90,7 @@ export class AssetGenerator {
   }
 
   // Set all params at once
-  setParams(params: Partial<AssetParams>): Mesh | null {
+  setParams(params: Partial<AssetParams>): any {
     this.params = { ...this.params, ...params };
     return this.generate();
   }
@@ -108,7 +101,7 @@ export class AssetGenerator {
   }
 
   // Get current mesh
-  getMesh(): Mesh | null {
+  getMesh(): any {
     return this.currentMesh;
   }
 
@@ -126,50 +119,62 @@ export class AssetGenerator {
  */
 export function createPreviewScene(
   canvas: HTMLCanvasElement
-): { scene: Scene; camera: ArcRotateCamera; dispose: () => void } {
-  const engine = new (BABYLON as any).Engine(canvas, true, {
+): { scene: THREE.Scene; camera: THREE.PerspectiveCamera; dispose: () => void } {
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
     preserveDrawingBuffer: true,
-    stencil: true,
   });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(canvas.clientWidth, canvas.clientHeight);
 
-  const scene = new Scene(engine);
-  scene.clearColor = new Color4(0.15, 0.15, 0.18, 1);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0.15, 0.15, 0.18);
 
   // Camera
-  const camera = new ArcRotateCamera(
-    "previewCamera",
-    -Math.PI / 4,
-    Math.PI / 3,
-    5,
-    Vector3.Zero(),
-    scene
+  const camera = new THREE.PerspectiveCamera(
+    50,
+    canvas.clientWidth / canvas.clientHeight,
+    0.1,
+    100
   );
-  camera.attachControl(canvas, true);
-  camera.lowerRadiusLimit = 1;
-  camera.upperRadiusLimit = 15;
-  camera.wheelPrecision = 50;
+  camera.position.set(3, 3, 3);
+  camera.lookAt(0, 0, 0);
+
+  // OrbitControls
+  const controls = new OrbitControls(camera, canvas);
+  controls.minDistance = 1;
+  controls.maxDistance = 15;
 
   // Lighting
-  const hemiLight = new HemisphericLight("hemiLight", new Vector3(0, 1, 0), scene);
-  hemiLight.intensity = 0.6;
-  hemiLight.groundColor = new Color3(0.3, 0.3, 0.35);
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4d4d59, 0.6);
+  scene.add(hemiLight);
 
   // Render loop
-  engine.runRenderLoop(() => {
-    scene.render();
-  });
+  let animFrameId = 0;
+  const animate = () => {
+    animFrameId = requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+  };
+  animate();
 
   // Resize handler
-  const handleResize = () => engine.resize();
+  const handleResize = () => {
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  };
   window.addEventListener("resize", handleResize);
 
   const dispose = () => {
     window.removeEventListener("resize", handleResize);
-    scene.dispose();
-    engine.dispose();
+    cancelAnimationFrame(animFrameId);
+    controls.dispose();
+    renderer.dispose();
   };
 
   return { scene, camera, dispose };
 }
-
-import * as BABYLON from "@babylonjs/core";

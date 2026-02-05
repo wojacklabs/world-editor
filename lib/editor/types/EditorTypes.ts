@@ -1,5 +1,3 @@
-import type { Vector3 } from "@babylonjs/core";
-
 // Tool types
 export type ToolType = "select" | "heightmap" | "biome" | "props" | "environment";
 export type HeightmapTool = "raise" | "lower" | "flatten" | "smooth";

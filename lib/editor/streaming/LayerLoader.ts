@@ -1,5 +1,3 @@
-import { Scene } from "@babylonjs/core";
-
 /**
  * Loading layer types with priority order
  * Lower number = higher priority (loads first)
@@ -54,7 +52,7 @@ export interface LayerStats {
 
 /**
  * LayerLoader - Manages prioritized loading of world layers
- * 
+ *
  * Features:
  * - Priority-based loading queue
  * - Concurrent loading limits
@@ -63,27 +61,27 @@ export interface LayerStats {
  * - Error handling with retry
  */
 export class LayerLoader {
-  private scene: Scene;
-  
+  private scene: any;
+
   // Loading queue
   private queue: LayerRequest[] = [];
   private activeLoads: Map<string, LayerRequest> = new Map();
-  
+
   // Configuration
   private maxConcurrentLoads = 4;
   private retryAttempts = 2;
   private retryDelay = 1000;
-  
+
   // State tracking
   private loadedLayers: Map<string, LayerRequest> = new Map();
   private isProcessing = false;
-  
+
   // Callbacks
   private onLayerLoaded?: (layer: LoadingLayer, cellX: number, cellZ: number) => void;
   private onLayerError?: (layer: LoadingLayer, cellX: number, cellZ: number, error: string) => void;
   private onProgress?: (loaded: number, total: number) => void;
 
-  constructor(scene: Scene) {
+  constructor(scene: any) {
     this.scene = scene;
   }
 
@@ -128,7 +126,7 @@ export class LayerLoader {
     loadFn: () => Promise<void>
   ): void {
     const id = this.getLayerId(layer, cellX, cellZ);
-    
+
     // Skip if already loaded or in queue
     if (this.loadedLayers.has(id) || this.queue.some(r => r.id === id) || this.activeLoads.has(id)) {
       return;
@@ -242,7 +240,7 @@ export class LayerLoader {
   private async loadLayer(request: LayerRequest, attempt: number = 0): Promise<void> {
     try {
       await request.loadFn();
-      
+
       request.state = LayerState.LOADED;
       this.loadedLayers.set(request.id, request);
       this.activeLoads.delete(request.id);
@@ -257,7 +255,7 @@ export class LayerLoader {
 
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      
+
       if (attempt < this.retryAttempts) {
         // Retry after delay
         console.warn(`[LayerLoader] Retrying ${request.id} (attempt ${attempt + 1}/${this.retryAttempts})`);
@@ -271,7 +269,7 @@ export class LayerLoader {
       this.activeLoads.delete(request.id);
 
       console.error(`[LayerLoader] Failed to load ${request.id}:`, errorMsg);
-      
+
       if (this.onLayerError) {
         this.onLayerError(request.layer, request.cellX, request.cellZ, errorMsg);
       }
@@ -289,7 +287,7 @@ export class LayerLoader {
 
     const total = this.loadedLayers.size + this.queue.length + this.activeLoads.size;
     const loaded = this.loadedLayers.size;
-    
+
     this.onProgress(loaded, total);
   }
 

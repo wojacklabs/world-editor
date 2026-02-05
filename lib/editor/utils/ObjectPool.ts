@@ -1,4 +1,4 @@
-import { Matrix, Vector3, Quaternion } from "@babylonjs/core";
+import * as THREE from "three";
 
 /**
  * Generic object pool for reusable objects
@@ -41,35 +41,35 @@ class GenericPool<T> {
 }
 
 /**
- * Singleton object pools for Babylon.js math objects
+ * Singleton object pools for Three.js math objects
  * Usage:
  *   const mat = MathPools.matrix.acquire();
  *   // use mat...
  *   MathPools.matrix.release(mat);
  */
 export const MathPools = {
-  matrix: new GenericPool<Matrix>(
-    () => new Matrix(),
-    (m) => m.reset(),
+  matrix: new GenericPool<THREE.Matrix4>(
+    () => new THREE.Matrix4(),
+    (m) => m.identity(),
     32  // Pre-allocate 32 matrices
   ),
 
-  vector3: new GenericPool<Vector3>(
-    () => new Vector3(),
+  vector3: new GenericPool<THREE.Vector3>(
+    () => new THREE.Vector3(),
     (v) => v.set(0, 0, 0),
     64  // Pre-allocate 64 vectors
   ),
 
-  quaternion: new GenericPool<Quaternion>(
-    () => new Quaternion(),
+  quaternion: new GenericPool<THREE.Quaternion>(
+    () => new THREE.Quaternion(),
     (q) => q.set(0, 0, 0, 1),
     16  // Pre-allocate 16 quaternions
   ),
 
   /**
-   * Helper: Execute function with pooled Matrix, auto-release
+   * Helper: Execute function with pooled Matrix4, auto-release
    */
-  withMatrix<R>(fn: (mat: Matrix) => R): R {
+  withMatrix<R>(fn: (mat: THREE.Matrix4) => R): R {
     const mat = MathPools.matrix.acquire();
     try {
       return fn(mat);
@@ -81,7 +81,7 @@ export const MathPools = {
   /**
    * Helper: Execute function with pooled Vector3, auto-release
    */
-  withVector3<R>(fn: (vec: Vector3) => R): R {
+  withVector3<R>(fn: (vec: THREE.Vector3) => R): R {
     const vec = MathPools.vector3.acquire();
     try {
       return fn(vec);
@@ -93,7 +93,7 @@ export const MathPools = {
   /**
    * Helper: Execute function with pooled Quaternion, auto-release
    */
-  withQuaternion<R>(fn: (quat: Quaternion) => R): R {
+  withQuaternion<R>(fn: (quat: THREE.Quaternion) => R): R {
     const quat = MathPools.quaternion.acquire();
     try {
       return fn(quat);

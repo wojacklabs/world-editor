@@ -1,8 +1,4 @@
-import {
-  Scene,
-  Vector3,
-  Observer,
-} from "@babylonjs/core";
+import * as THREE from "three";
 
 /**
  * Cell state for streaming
@@ -61,7 +57,7 @@ const DEFAULT_CONFIG: StreamingConfig = {
 
 /**
  * StreamingManager handles loading/unloading of world cells based on camera position
- * 
+ *
  * Architecture:
  * - World is divided into cells (e.g., 64x64 units each)
  * - Near ring: Full detail terrain + foliage + props
@@ -70,13 +66,14 @@ const DEFAULT_CONFIG: StreamingConfig = {
  * - Beyond far ring: Unloaded
  */
 export class StreamingManager {
-  private scene: Scene;
+  // TODO: Change back to THREE.Scene after EditorEngine migration
+  private scene: any;
+  private camera: THREE.Camera | null = null;
   private config: StreamingConfig;
   private cells: Map<string, StreamingCell> = new Map();
   private currentCellX: number = 0;
   private currentCellZ: number = 0;
   private enabled: boolean = false;  // Disabled by default
-  private updateObserver: Observer<Scene> | null = null;
   private loadQueue: Array<{ x: number; z: number; lod: StreamingLOD }> = [];
   private loadQueueSet: Set<string> = new Set();  // O(1) lookup for queue
   private activeLoads: number = 0;
@@ -94,9 +91,16 @@ export class StreamingManager {
   private onUnloadCell: ((x: number, z: number) => void) | null = null;
   private onUpdateCellLOD: ((x: number, z: number, lod: StreamingLOD) => void) | null = null;
 
-  constructor(scene: Scene, config: Partial<StreamingConfig> = {}) {
+  constructor(scene: any, config: Partial<StreamingConfig> = {}) {
     this.scene = scene;
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /**
+   * Set the camera to track for streaming updates
+   */
+  setCamera(camera: THREE.Camera): void {
+    this.camera = camera;
   }
 
   /**
@@ -111,20 +115,15 @@ export class StreamingManager {
     this.onUnloadCell = callbacks.onUnloadCell;
     this.onUpdateCellLOD = callbacks.onUpdateCellLOD;
 
-    // Setup update loop
-    this.updateObserver = this.scene.onBeforeRenderObservable.add(() => {
-      if (this.enabled) {
-        this.update();
-      }
-    });
-
     console.log("[StreamingManager] Initialized with config:", this.config);
   }
 
   /**
-   * Main update loop - called every frame (with frame skipping for performance)
+   * Call from the render loop to process streaming updates.
    */
-  private update(): void {
+  update(): void {
+    if (!this.enabled) return;
+
     // Frame skipping: only run full update every N frames
     this.frameCounter++;
     const isFullUpdate = this.frameCounter >= this.UPDATE_INTERVAL;
@@ -132,10 +131,9 @@ export class StreamingManager {
       this.frameCounter = 0;
     }
 
-    const camera = this.scene.activeCamera;
-    if (!camera) return;
+    if (!this.camera) return;
 
-    const cameraPos = camera.position;
+    const cameraPos = this.camera.position;
     const cellX = Math.floor(cameraPos.x / this.config.cellSize);
     const cellZ = Math.floor(cameraPos.z / this.config.cellSize);
 
@@ -383,7 +381,7 @@ export class StreamingManager {
       for (let dz = -this.config.nearRadius; dz <= this.config.nearRadius; dz++) {
         const x = cellX + dx;
         const z = cellZ + dz;
-        
+
         if (this.onLoadCell) {
           await this.onLoadCell(x, z, StreamingLOD.Near);
         }
@@ -487,11 +485,6 @@ export class StreamingManager {
    * Dispose
    */
   dispose(): void {
-    if (this.updateObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.updateObserver);
-      this.updateObserver = null;
-    }
-
     // Unload all cells
     for (const cell of this.cells.values()) {
       if (cell.state === CellState.Loaded && this.onUnloadCell) {

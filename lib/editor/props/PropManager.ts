@@ -1,25 +1,10 @@
-import {
-  Scene,
-  Mesh,
-  Vector3,
-  Matrix,
-  Color3,
-  ShaderMaterial,
-  Effect,
-  VertexBuffer,
-  VertexData,
-  Frustum,
-  BoundingInfo,
-  BoundingSphere,
-} from "@babylonjs/core";
-import * as BABYLON from "@babylonjs/core";
-import { SceneLoader } from "@babylonjs/core/Loading/sceneLoader";
-import "@babylonjs/loaders/glTF";
+import * as THREE from "three";
+import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { Heightmap } from "../terrain/Heightmap";
 import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from "./ProceduralAsset";
-import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
+import { loadTextureWithFallbackSync } from "../../shared/rendering/TextureLoader.three";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
-
 // ============================================
 // LOD Configuration
 // ============================================
@@ -30,7 +15,7 @@ export enum MeshLOD {
 }
 
 // Subdivision levels for each LOD tier
-// IcoSphere triangles: 20 × 4^subdivisions (1=80, 2=320, 3=1280, 4=5120)
+// IcoSphere triangles: 20 * 4^subdivisions (1=80, 2=320, 3=1280, 4=5120)
 const LOD_SUBDIVISIONS: Record<AssetType, Record<MeshLOD, number>> = {
   rock: { [MeshLOD.High]: 3, [MeshLOD.Medium]: 2, [MeshLOD.Low]: 2 },   // 1280/320/320 tri
   tree: { [MeshLOD.High]: 3, [MeshLOD.Medium]: 2, [MeshLOD.Low]: 2 },   // 1280/320/320 tri
@@ -44,26 +29,15 @@ const LOD_DISTANCES = {
   mediumToLow: 80,    // Switch from Medium to Low at 80 units
 };
 
-const REFERENCE_TREE_ROOT_URL = "/assets/references/infinite-terrain/";
-const REFERENCE_TREE_FILE_NAME = "tree.glb";
+const REFERENCE_TREE_URL = "/assets/references/infinite-terrain/tree.glb";
 
 // ============================================
-// Thin instance shaders for props (supports world0-world3 attributes)
+// Instanced mesh shaders for props
+// Uses Three.js built-in instanceMatrix (no manual world0-world3)
 // ============================================
-Effect.ShadersStore["propThinVertexShader"] = `
+const propThinVertexShader = `
 precision highp float;
 
-attribute vec3 position;
-attribute vec3 normal;
-attribute vec2 uv;
-
-// Thin instance world matrix (4 columns as vec4 attributes)
-attribute vec4 world0;
-attribute vec4 world1;
-attribute vec4 world2;
-attribute vec4 world3;
-
-uniform mat4 viewProjection;
 uniform vec3 cameraPosition;
 
 varying vec3 vNormal;
@@ -74,13 +48,12 @@ varying float vCameraDistance;
 varying vec3 vViewDirection;
 
 void main() {
-    // Reconstruct world matrix from thin instance attributes
-    mat4 worldMatrix = mat4(world0, world1, world2, world3);
-    vec4 worldPos = worldMatrix * vec4(position, 1.0);
+    vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
 
-    gl_Position = viewProjection * worldPos;
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
 
-    vNormal = normalize(mat3(worldMatrix) * normal);
+    mat3 normalMat = mat3(modelMatrix) * mat3(instanceMatrix);
+    vNormal = normalize(normalMat * normal);
     vPosition = worldPos.xyz;
     vLocalPosition = position;
     vUV = uv;
@@ -89,7 +62,7 @@ void main() {
 }
 `;
 
-Effect.ShadersStore["propThinFragmentShader"] = `
+const propThinFragmentShader = `
 precision highp float;
 
 uniform vec3 baseColor;
@@ -193,22 +166,12 @@ void main() {
 }
 `;
 
-// Wind-enabled thin instance shader for foliage props
-Effect.ShadersStore["propThinWindVertexShader"] = `
+// Wind-enabled instanced mesh shader for foliage props
+const propThinWindVertexShader = `
 precision highp float;
 
-attribute vec3 position;
-attribute vec3 normal;
-attribute vec2 uv;
 attribute vec4 color;
 
-// Thin instance world matrix (4 columns as vec4 attributes)
-attribute vec4 world0;
-attribute vec4 world1;
-attribute vec4 world2;
-attribute vec4 world3;
-
-uniform mat4 viewProjection;
 uniform vec3 cameraPosition;
 uniform float uTime;
 uniform vec2 uWindDirection;
@@ -245,9 +208,7 @@ float noise2D(vec2 p) {
 }
 
 void main() {
-    // Reconstruct world matrix from thin instance attributes
-    mat4 worldMatrix = mat4(world0, world1, world2, world3);
-    vec4 worldPos = worldMatrix * vec4(position, 1.0);
+    vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
 
     // Height factor for wind (use local Y) - cubic for natural tree sway
     float heightAboveMin = max(0.0, position.y - uMinWindHeight);
@@ -269,9 +230,10 @@ void main() {
     worldPos.z += uWindDirection.y * windAmount * 0.2;
     worldPos.y -= windAmount * 0.04;
 
-    gl_Position = viewProjection * worldPos;
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
 
-    vNormal = normalize(mat3(worldMatrix) * normal);
+    mat3 normalMat = mat3(modelMatrix) * mat3(instanceMatrix);
+    vNormal = normalize(normalMat * normal);
     vPosition = worldPos.xyz;
     vLocalPosition = position;
     vUV = uv;
@@ -281,7 +243,7 @@ void main() {
 }
 `;
 
-Effect.ShadersStore["propThinWindFragmentShader"] = `
+const propThinWindFragmentShader = `
 precision highp float;
 
 uniform vec3 baseColor;
@@ -435,7 +397,7 @@ export enum PropLOD {
 // Number of variations per asset type for thin instancing
 const VARIATIONS_PER_TYPE = 8;
 
-// Thin instancing group key: "assetType_variationIndex"
+// Instance group key: "assetType_variationIndex"
 type InstanceGroupKey = string;
 
 export interface PropInstance {
@@ -443,36 +405,55 @@ export interface PropInstance {
   assetType: AssetType;
   variationIndex: number;  // Which variation mesh to use
   params: AssetParams;
-  position: Vector3;
-  rotation: Vector3;
-  scale: Vector3;
+  position: THREE.Vector3;
+  rotation: THREE.Vector3;
+  scale: THREE.Vector3;
   visible: boolean;  // For LOD-based visibility
 }
 
+/**
+ * Ensure a geometry has all required attributes for instanced rendering.
+ * Adds missing color attribute if absent.
+ */
+function ensureAttributes(geometry: THREE.BufferGeometry): void {
+  if (!geometry.getAttribute("uv")) {
+    const posCount = geometry.getAttribute("position")?.count ?? 0;
+    geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(posCount * 2), 2));
+  }
+  if (!geometry.getAttribute("color")) {
+    const posCount = geometry.getAttribute("position")?.count ?? 0;
+    const colors = new Float32Array(posCount * 4);
+    for (let i = 0; i < posCount; i++) {
+      colors[i * 4 + 3] = 1.0;
+    }
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
+  }
+}
+
 export class PropManager {
-  private scene: Scene;
+  private scene: any;
   private heightmap: Heightmap;
   private instances: Map<string, PropInstance> = new Map();
 
-  // Thin instancing: base variation meshes per type, per LOD level
-  // Key: AssetType -> LOD level -> Mesh[]
-  private variationMeshes: Map<AssetType, Map<MeshLOD, Mesh[]>> = new Map();
-  // Thin instancing: shared materials per type
-  private sharedMaterials: Map<AssetType, ShaderMaterial> = new Map();
-  // Thin instancing: group meshes for thin instances (per LOD)
-  // Key format: "assetType_variationIndex_lodLevel"
-  private instanceGroups: Map<InstanceGroupKey, Mesh> = new Map();
+  // Instancing: base variation geometries per type, per LOD level
+  // Key: AssetType -> LOD level -> THREE.BufferGeometry[]
+  private variationGeometries: Map<AssetType, Map<MeshLOD, THREE.BufferGeometry[]>> = new Map();
+  // Instancing: shared materials per type
+  private sharedMaterials: Map<AssetType, THREE.ShaderMaterial> = new Map();
+  // Instancing: group meshes for InstancedMesh (per LOD)
+  // Key format: "assetType|variationIndex|lodLevel"
+  private instanceGroups: Map<InstanceGroupKey, THREE.InstancedMesh> = new Map();
   // Track which props belong to which group (base group without LOD suffix)
   private propsByGroup: Map<InstanceGroupKey, Set<string>> = new Map();
   // Dirty flag to rebuild instance buffers
   private dirtyGroups: Set<InstanceGroupKey> = new Set();
 
-  // Buffer cache for partial updates (avoid reallocating Float32Array)
-  private bufferCache: Map<InstanceGroupKey, Float32Array> = new Map();
   // Reusable objects to avoid GC pressure
-  private readonly _tempQuaternion = new BABYLON.Quaternion();
-  private readonly _tempMatrix = new Matrix();
-  private readonly _tempVector3 = new Vector3();
+  private readonly _tempQuaternion = new THREE.Quaternion();
+  private readonly _tempMatrix = new THREE.Matrix4();
+  private readonly _tempVector3 = new THREE.Vector3();
+  private readonly _tempScale = new THREE.Vector3();
+  private readonly _tempEuler = new THREE.Euler();
 
   // Tile-based grouping for streaming
   private propsByTile: Map<string, Set<string>> = new Map();  // tileKey -> Set<propId>
@@ -484,12 +465,12 @@ export class PropManager {
 
   // Preview system
   private previewAsset: ProceduralAsset | null = null;
-  private previewMesh: Mesh | null = null;
+  private previewMesh: THREE.Mesh | null = null;
+  private previewInstancedMesh: THREE.InstancedMesh | null = null;
   private previewParams: AssetParams | null = null;
   private previewVisible = false;
-  private previewMatrixBuffer: Float32Array | null = null;
-  private previewPosition = new Vector3(0, 0, 0);
-  private previewRotation = new Vector3(0, 0, 0);
+  private previewPosition = new THREE.Vector3(0, 0, 0);
+  private previewRotation = new THREE.Vector3(0, 0, 0);
   private previewScale = 1.0;
 
   // Async initialization state
@@ -498,13 +479,19 @@ export class PropManager {
   private isDisposed = false;
 
   // Frustum culling
-  private frustumPlanesCache: BABYLON.Plane[] = [];
+  private frustum = new THREE.Frustum();
+  private frustumMatrix = new THREE.Matrix4();
   private lastFrustumUpdateFrame = -1;
-  private referenceTemplates: Partial<Record<"tree" | "bush", Mesh>> = {};
+  private frameCounter = 0;
+  private referenceTemplates: Partial<Record<"tree" | "bush", THREE.BufferGeometry>> = {};
 
-  constructor(scene: Scene, heightmap: Heightmap) {
+  // Material start time for wind animation
+  private materialStartTime = 0;
+
+  constructor(scene: any, heightmap: Heightmap) {
     this.scene = scene;
     this.heightmap = heightmap;
+    this.materialStartTime = performance.now();
     // Start async initialization
     this.initializationPromise = this.initializeVariationsAsync();
   }
@@ -530,11 +517,11 @@ export class PropManager {
     return n - Math.floor(n);
   }
 
-  private setMeshVertexColor(mesh: Mesh, r: number, g: number, b: number): void {
-    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-    if (!positions) return;
+  private setGeometryVertexColor(geometry: THREE.BufferGeometry, r: number, g: number, b: number): void {
+    const posAttr = geometry.getAttribute("position");
+    if (!posAttr) return;
 
-    const vertexCount = positions.length / 3;
+    const vertexCount = posAttr.count;
     const colors = new Float32Array(vertexCount * 4);
     for (let i = 0; i < vertexCount; i++) {
       colors[i * 4] = r;
@@ -542,78 +529,33 @@ export class PropManager {
       colors[i * 4 + 2] = b;
       colors[i * 4 + 3] = 1.0;
     }
-    mesh.setVerticesData(VertexBuffer.ColorKind, colors);
+    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
   }
 
-  private bakeMeshToWorld(source: Mesh, name: string): Mesh | null {
-    const positions = source.getVerticesData(VertexBuffer.PositionKind);
-    const normals = source.getVerticesData(VertexBuffer.NormalKind);
-    const uvs = source.getVerticesData(VertexBuffer.UVKind);
-    const indices = source.getIndices();
+  private bakeGeometryToWorld(source: THREE.Mesh, _name: string): THREE.BufferGeometry | null {
+    const geometry = source.geometry;
+    if (!geometry) return null;
 
-    if (!positions || !indices) {
-      return null;
-    }
+    const posAttr = geometry.getAttribute("position");
+    const indices = geometry.getIndex();
+    if (!posAttr || !indices) return null;
 
-    source.computeWorldMatrix(true);
-    const world = source.getWorldMatrix();
+    // Clone geometry and apply world matrix
+    source.updateMatrixWorld(true);
+    const cloned = geometry.clone();
+    cloned.applyMatrix4(source.matrixWorld);
 
-    const outPositions = new Float32Array(positions.length);
-    for (let i = 0; i < positions.length; i += 3) {
-      BABYLON.Vector3.TransformCoordinatesFromFloatsToRef(
-        positions[i],
-        positions[i + 1],
-        positions[i + 2],
-        world,
-        this._tempVector3
-      );
-      outPositions[i] = this._tempVector3.x;
-      outPositions[i + 1] = this._tempVector3.y;
-      outPositions[i + 2] = this._tempVector3.z;
-    }
+    // Recompute normals after transform
+    cloned.computeVertexNormals();
 
-    let outNormals: Float32Array | null = null;
-    if (normals) {
-      outNormals = new Float32Array(normals.length);
-      for (let i = 0; i < normals.length; i += 3) {
-        BABYLON.Vector3.TransformNormalFromFloatsToRef(
-          normals[i],
-          normals[i + 1],
-          normals[i + 2],
-          world,
-          this._tempVector3
-        );
-        this._tempVector3.normalize();
-        outNormals[i] = this._tempVector3.x;
-        outNormals[i + 1] = this._tempVector3.y;
-        outNormals[i + 2] = this._tempVector3.z;
-      }
-    }
-
-    const baked = new Mesh(name, this.scene);
-    const vertexData = new VertexData();
-    vertexData.positions = outPositions;
-    vertexData.indices = Array.from(indices);
-    vertexData.uvs = uvs ? Array.from(uvs) : null;
-    vertexData.normals = outNormals ? Array.from(outNormals) : null;
-    if (!vertexData.normals) {
-      const computedNormals: number[] = [];
-      VertexData.ComputeNormals(
-        Array.from(outPositions),
-        Array.from(indices),
-        computedNormals
-      );
-      vertexData.normals = computedNormals;
-    }
-    vertexData.applyToMesh(baked);
-
-    return baked;
+    return cloned;
   }
 
-  private recenterMeshToGround(mesh: Mesh): void {
-    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-    if (!positions || positions.length < 3) return;
+  private recenterGeometryToGround(geometry: THREE.BufferGeometry): void {
+    const posAttr = geometry.getAttribute("position");
+    if (!posAttr || posAttr.count < 1) return;
 
+    const positions = posAttr.array as Float32Array;
     let minX = Infinity;
     let maxX = -Infinity;
     let minY = Infinity;
@@ -634,27 +576,26 @@ export class PropManager {
     const centerX = (minX + maxX) * 0.5;
     const centerZ = (minZ + maxZ) * 0.5;
 
-    const shifted = new Float32Array(positions.length);
     for (let i = 0; i < positions.length; i += 3) {
-      shifted[i] = positions[i] - centerX;
-      shifted[i + 1] = positions[i + 1] - minY;
-      shifted[i + 2] = positions[i + 2] - centerZ;
+      positions[i] -= centerX;
+      positions[i + 1] -= minY;
+      positions[i + 2] -= centerZ;
     }
 
-    mesh.setVerticesData(VertexBuffer.PositionKind, shifted, true);
-    mesh.refreshBoundingInfo();
+    posAttr.needsUpdate = true;
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
   }
 
   private applyReferenceVariationDeformation(
-    mesh: Mesh,
+    geometry: THREE.BufferGeometry,
     seedBase: number,
     assetType: "tree" | "bush"
   ): void {
-    const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
-    const indices = mesh.getIndices();
-    if (!positions || !indices || positions.length < 3) {
-      return;
-    }
+    const posAttr = geometry.getAttribute("position");
+    if (!posAttr || posAttr.count < 1) return;
+
+    const positions = posAttr.array as Float32Array;
 
     let minY = Infinity;
     let maxY = -Infinity;
@@ -675,7 +616,6 @@ export class PropManager {
     const twistAmount = (this.seeded01(seedBase + 9.7) - 0.5) * twistScale;
     const stretch = 0.9 + this.seeded01(seedBase + 10.9) * 0.35;
 
-    const deformed = new Float32Array(positions.length);
     for (let i = 0; i < positions.length; i += 3) {
       const x = positions[i];
       const y = positions[i + 1];
@@ -706,30 +646,26 @@ export class PropManager {
       pz += (this.seeded01(jitterSeed + 17.0) - 0.5) * jitterScale * smoothT;
       py += (this.seeded01(jitterSeed + 29.0) - 0.5) * jitterScale * 0.6 * smoothT;
 
-      deformed[i] = px;
-      deformed[i + 1] = py;
-      deformed[i + 2] = pz;
+      positions[i] = px;
+      positions[i + 1] = py;
+      positions[i + 2] = pz;
     }
 
-    mesh.setVerticesData(VertexBuffer.PositionKind, deformed, true);
-    const normals: number[] = [];
-    VertexData.ComputeNormals(Array.from(deformed), Array.from(indices), normals);
-    mesh.setVerticesData(VertexBuffer.NormalKind, normals, true);
-    mesh.refreshBoundingInfo();
+    posAttr.needsUpdate = true;
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
   }
 
-  private createReferenceVariationMesh(
+  private createReferenceVariationGeometry(
     assetType: "tree" | "bush",
-    lod: MeshLOD,
+    _lod: MeshLOD,
     variationIdx: number
-  ): Mesh | null {
+  ): THREE.BufferGeometry | null {
     const template = this.referenceTemplates[assetType];
     if (!template) return null;
 
-    const mesh = template.clone(`${assetType}_ref_var${variationIdx}_lod${lod}`);
-    if (!mesh) return null;
-
-    mesh.makeGeometryUnique();
+    const geometry = template.clone();
 
     const seedBase =
       variationIdx * 37.17 +
@@ -739,13 +675,15 @@ export class PropManager {
     const sy = 0.9 + this.seeded01(seedBase + 2.5) * 0.34;
     const sz = 0.88 + this.seeded01(seedBase + 3.3) * 0.26;
 
-    const variationTransform = Matrix.Scaling(sx, sy, sz).multiply(
-      Matrix.RotationY(yaw)
-    );
-    mesh.bakeTransformIntoVertices(variationTransform);
-    this.applyReferenceVariationDeformation(mesh, seedBase, assetType);
+    const variationTransform = new THREE.Matrix4();
+    const scaleMatrix = new THREE.Matrix4().makeScale(sx, sy, sz);
+    const rotMatrix = new THREE.Matrix4().makeRotationY(yaw);
+    variationTransform.multiplyMatrices(rotMatrix, scaleMatrix);
+    geometry.applyMatrix4(variationTransform);
 
-    return mesh;
+    this.applyReferenceVariationDeformation(geometry, seedBase, assetType);
+
+    return geometry;
   }
 
   private async loadReferenceTemplatesIfAvailable(): Promise<void> {
@@ -754,30 +692,36 @@ export class PropManager {
     }
 
     try {
-      const result = await SceneLoader.ImportMeshAsync(
-        "",
-        REFERENCE_TREE_ROOT_URL,
-        REFERENCE_TREE_FILE_NAME,
-        this.scene
-      );
+      const loader = new GLTFLoader();
+      const gltf = await loader.loadAsync(REFERENCE_TREE_URL);
 
       if (this.isDisposed) {
-        for (const mesh of result.meshes) {
-          mesh.dispose(false, true);
-        }
-        result.skeletons?.forEach((skeleton) => skeleton.dispose());
-        result.animationGroups?.forEach((group) => group.dispose());
-        result.particleSystems?.forEach((ps) => ps.dispose());
-        result.transformNodes?.forEach((node) => node.dispose());
+        gltf.scene.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry?.dispose();
+            if (child.material) {
+              if (Array.isArray(child.material)) {
+                child.material.forEach((m) => m.dispose());
+              } else {
+                child.material.dispose();
+              }
+            }
+          }
+        });
         return;
       }
 
-      const importedMeshes = result.meshes.filter(
-        (mesh): mesh is Mesh =>
-          mesh instanceof Mesh &&
-          !!mesh.getVerticesData(VertexBuffer.PositionKind) &&
-          !!mesh.getIndices()
-      );
+      const importedMeshes: THREE.Mesh[] = [];
+      gltf.scene.traverse((child) => {
+        if (
+          child instanceof THREE.Mesh &&
+          child.geometry &&
+          child.geometry.getAttribute("position") &&
+          child.geometry.getIndex()
+        ) {
+          importedMeshes.push(child);
+        }
+      });
 
       if (importedMeshes.length === 0) {
         return;
@@ -792,23 +736,25 @@ export class PropManager {
 
       const buildMergedTemplate = (
         includeTrunk: boolean,
-        mergedName: string
-      ): Mesh | null => {
-        const bakedParts: Mesh[] = [];
+        _mergedName: string
+      ): THREE.BufferGeometry | null => {
+        const bakedParts: THREE.BufferGeometry[] = [];
 
         if (includeTrunk) {
           for (let i = 0; i < trunkSources.length; i++) {
-            const baked = this.bakeMeshToWorld(trunkSources[i], `ref_trunk_${i}`);
+            const baked = this.bakeGeometryToWorld(trunkSources[i], `ref_trunk_${i}`);
             if (!baked) continue;
-            this.setMeshVertexColor(baked, 0.44, 0.32, 0.18);
+            this.setGeometryVertexColor(baked, 0.44, 0.32, 0.18);
+            ensureAttributes(baked);
             bakedParts.push(baked);
           }
         }
 
         for (let i = 0; i < bushSources.length; i++) {
-          const baked = this.bakeMeshToWorld(bushSources[i], `ref_bush_${i}`);
+          const baked = this.bakeGeometryToWorld(bushSources[i], `ref_bush_${i}`);
           if (!baked) continue;
-          this.setMeshVertexColor(baked, 0.23, 0.48, 0.2);
+          this.setGeometryVertexColor(baked, 0.23, 0.48, 0.2);
+          ensureAttributes(baked);
           bakedParts.push(baked);
         }
 
@@ -816,23 +762,12 @@ export class PropManager {
           return null;
         }
 
-        const merged = Mesh.MergeMeshes(
-          bakedParts,
-          true,
-          true,
-          undefined,
-          false,
-          true
-        );
+        const merged = BufferGeometryUtils.mergeGeometries(bakedParts, false);
         if (!merged) {
           return null;
         }
 
-        merged.name = mergedName;
-        this.recenterMeshToGround(merged);
-        merged.isVisible = false;
-        merged.isPickable = false;
-        merged.material = null;
+        this.recenterGeometryToGround(merged);
         return merged;
       };
 
@@ -846,13 +781,19 @@ export class PropManager {
         this.referenceTemplates.tree = treeTemplate;
       }
 
-      for (const mesh of result.meshes) {
-        mesh.dispose(false, true);
-      }
-      result.skeletons?.forEach((skeleton) => skeleton.dispose());
-      result.animationGroups?.forEach((group) => group.dispose());
-      result.particleSystems?.forEach((ps) => ps.dispose());
-      result.transformNodes?.forEach((node) => node.dispose());
+      // Dispose original imported meshes
+      gltf.scene.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry?.dispose();
+          if (child.material) {
+            if (Array.isArray(child.material)) {
+              child.material.forEach((m) => m.dispose());
+            } else {
+              child.material.dispose();
+            }
+          }
+        }
+      });
 
       if (this.referenceTemplates.tree || this.referenceTemplates.bush) {
         console.log("[PropManager] Loaded reference tree/bush templates from GLB");
@@ -866,8 +807,8 @@ export class PropManager {
   }
 
   /**
-   * Initialize base variation meshes for each asset type (async version)
-   * Creates meshes for all LOD levels progressively to avoid blocking
+   * Initialize base variation geometries for each asset type (async version)
+   * Creates geometries for all LOD levels progressively to avoid blocking
    */
   private async initializeVariationsAsync(): Promise<void> {
     const assetTypes: AssetType[] = ["rock", "tree", "bush", "grass_clump"];
@@ -883,15 +824,14 @@ export class PropManager {
 
     // Initialize empty maps for all asset types
     for (const assetType of assetTypes) {
-      this.variationMeshes.set(assetType, new Map());
+      this.variationGeometries.set(assetType, new Map());
     }
 
     await this.loadReferenceTemplatesIfAvailable();
 
-    // Create meshes progressively using requestAnimationFrame batching
-    // Process one (assetType, LOD, variation) combination per frame to avoid blocking
+    // Create geometries progressively using requestAnimationFrame batching
     const batchSize = 4;  // Process 4 meshes per frame
-    let currentBatch: Array<{ assetType: AssetType; lod: MeshLOD; variationIdx: number }> = [];
+    const currentBatch: Array<{ assetType: AssetType; lod: MeshLOD; variationIdx: number }> = [];
 
     // Build the full work queue
     for (const assetType of assetTypes) {
@@ -916,7 +856,7 @@ export class PropManager {
 
           for (let i = startIdx; i < endIdx; i++) {
             const { assetType, lod, variationIdx } = currentBatch[i];
-            const lodMap = this.variationMeshes.get(assetType);
+            const lodMap = this.variationGeometries.get(assetType);
 
             // Safety check - skip if map was cleared
             if (!lodMap) {
@@ -933,16 +873,16 @@ export class PropManager {
             const useReference =
               assetType === "tree" || assetType === "bush";
 
-            let mesh: Mesh | null = null;
+            let geometry: THREE.BufferGeometry | null = null;
             if (useReference) {
-              mesh = this.createReferenceVariationMesh(
+              geometry = this.createReferenceVariationGeometry(
                 assetType as "tree" | "bush",
                 lod,
                 variationIdx
               );
             }
 
-            if (!mesh) {
+            if (!geometry) {
               const params: AssetParams = {
                 ...DEFAULT_ASSET_PARAMS[assetType],
                 seed,
@@ -950,16 +890,18 @@ export class PropManager {
                 subdivisionOverride: subdivision > 0 ? subdivision : undefined,
               };
 
-              const asset = new ProceduralAsset(this.scene, params);
-              mesh = asset.generate();
+              const asset = new ProceduralAsset(null, params);
+              const mesh = asset.generate() as THREE.Mesh | null;
+              if (mesh) {
+                geometry = mesh.geometry.clone();
+                // Remove from scene since ProceduralAsset with null scene won't add
+                asset.dispose();
+              }
             }
 
-            if (mesh) {
-              mesh.name = `${assetType}_var${variationIdx}_lod${lod}`;
-              mesh.isVisible = false;
-              mesh.isPickable = false;
-              mesh.material = null;
-              lodMap.get(lod)!.push(mesh);
+            if (geometry) {
+              ensureAttributes(geometry);
+              lodMap.get(lod)!.push(geometry);
               meshCount++;
             }
           }
@@ -977,7 +919,7 @@ export class PropManager {
 
     const elapsed = performance.now() - startTime;
     this.initializationComplete = true;
-    console.log(`[PropManager] Async init complete: ${meshCount} meshes (${assetTypes.length} types × ${lodLevels.length} LODs × ${VARIATIONS_PER_TYPE} variations) in ${elapsed.toFixed(0)}ms`);
+    console.log(`[PropManager] Async init complete: ${meshCount} meshes (${assetTypes.length} types * ${lodLevels.length} LODs * ${VARIATIONS_PER_TYPE} variations) in ${elapsed.toFixed(0)}ms`);
   }
 
   /**
@@ -989,10 +931,10 @@ export class PropManager {
     const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
 
     for (const assetType of assetTypes) {
-      const lodMap = new Map<MeshLOD, Mesh[]>();
+      const lodMap = new Map<MeshLOD, THREE.BufferGeometry[]>();
 
       for (const lod of lodLevels) {
-        const variations: Mesh[] = [];
+        const variations: THREE.BufferGeometry[] = [];
 
         for (let i = 0; i < VARIATIONS_PER_TYPE; i++) {
           const seed = i * 1001 + 8;
@@ -1000,16 +942,16 @@ export class PropManager {
           const useReference =
             assetType === "tree" || assetType === "bush";
 
-          let mesh: Mesh | null = null;
+          let geometry: THREE.BufferGeometry | null = null;
           if (useReference) {
-            mesh = this.createReferenceVariationMesh(
+            geometry = this.createReferenceVariationGeometry(
               assetType as "tree" | "bush",
               lod,
               i
             );
           }
 
-          if (!mesh) {
+          if (!geometry) {
             const params: AssetParams = {
               ...DEFAULT_ASSET_PARAMS[assetType],
               seed,
@@ -1017,93 +959,45 @@ export class PropManager {
               subdivisionOverride: subdivision > 0 ? subdivision : undefined,
             };
 
-            const asset = new ProceduralAsset(this.scene, params);
-            mesh = asset.generate();
+            const asset = new ProceduralAsset(null, params);
+            const mesh = asset.generate() as THREE.Mesh | null;
+            if (mesh) {
+              geometry = mesh.geometry.clone();
+              asset.dispose();
+            }
           }
 
-          if (mesh) {
-            mesh.name = `${assetType}_var${i}_lod${lod}`;
-            mesh.isVisible = false;
-            mesh.isPickable = false;
-            mesh.material = null;
-            variations.push(mesh);
+          if (geometry) {
+            ensureAttributes(geometry);
+            variations.push(geometry);
           }
         }
 
         lodMap.set(lod, variations);
       }
 
-      this.variationMeshes.set(assetType, lodMap);
+      this.variationGeometries.set(assetType, lodMap);
       const material = this.createSharedMaterial(assetType);
       this.sharedMaterials.set(assetType, material);
     }
 
     this.initializationComplete = true;
-    console.log(`[PropManager] Initialized ${assetTypes.length} asset types with ${VARIATIONS_PER_TYPE} variations × 3 LOD levels each`);
+    console.log(`[PropManager] Initialized ${assetTypes.length} asset types with ${VARIATIONS_PER_TYPE} variations * 3 LOD levels each`);
   }
 
   /**
-   * Create shared material for thin instanced props
+   * Create shared material for instanced props
    */
-  private createSharedMaterial(assetType: AssetType): ShaderMaterial {
+  private createSharedMaterial(assetType: AssetType): THREE.ShaderMaterial {
     const needsWind = assetType !== "rock";
     const defaultParams = DEFAULT_ASSET_PARAMS[assetType];
 
-    let material: ShaderMaterial;
+    let material: THREE.ShaderMaterial;
 
     if (needsWind) {
-      // Use thin instance wind shader for foliage
-      // NOTE: Do NOT include world0-world3 in attributes - Babylon.js adds them
-      // automatically when using thinInstanceSetBuffer("matrix", ...)
-      // Including them manually causes WebGPU validation errors (duplicate locations)
-      material = new ShaderMaterial(
-        `prop_thin_wind_${assetType}`,
-        this.scene,
-        {
-          vertex: "propThinWind",
-          fragment: "propThinWind",
-        },
-        {
-          attributes: ["position", "normal", "uv", "color"],
-          uniforms: [
-            "viewProjection",
-            "cameraPosition",
-            "uTime",
-            "uWindDirection",
-            "uWindStrength",
-            "uMinWindHeight",
-            "uMaxWindHeight",
-            "uPropsPrimarySpeed",
-            "uPropsSecondarySpeed",
-            "uPropsNoiseSpeed",
-            "baseColor",
-            "detailColor",
-            "sunDirection",
-            "ambientIntensity",
-            "fogColor",
-            "fogDensity",
-            "dirtTextureScale",
-            "uLeafAlphaCutoff",
-            "uLeafFadeStart",
-            "uLeafFadeEnd",
-            "uUseLeafAtlas",
-            "uLeafMaskFromLuma",
-            "uFresnelPower",
-            "uFresnelStrength",
-            "uFresnelColor",
-          ],
-          samplers: ["dirtTexture", "leafAtlas"],
-        }
-      );
-
       // Wind settings
       const windAngle = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians;
-      material.setVector2("uWindDirection", new BABYLON.Vector2(
-        Math.cos(windAngle),
-        Math.sin(windAngle)
-      ));
 
-      // Wind settings by type
       let windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength;
       let minWindHeight = 0.0;
       let maxWindHeight = 0.8;
@@ -1122,127 +1016,107 @@ export class PropManager {
         maxWindHeight = 2.5;
       }
 
-      material.setFloat("uWindStrength", windStrength);
-      material.setFloat("uMinWindHeight", minWindHeight);
-      material.setFloat("uMaxWindHeight", maxWindHeight);
-      material.setFloat("uPropsPrimarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed);
-      material.setFloat("uPropsSecondarySpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed);
-      material.setFloat("uPropsNoiseSpeed", DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed);
-      material.setFloat("uTime", 0);
-
-      // Load dirt texture for bark triplanar mapping
-      const dirtTex = loadTextureWithFallback(
-        this.scene,
+      // Load textures
+      const dirtTex = loadTextureWithFallbackSync(
         DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.dirt,
         {
           preferredExtensions: ["ktx2", "jpg", "png"],
-          wrapU: BABYLON.Texture.WRAP_ADDRESSMODE,
-          wrapV: BABYLON.Texture.WRAP_ADDRESSMODE,
-          anisotropicFilteringLevel: 8,
+          wrapS: THREE.RepeatWrapping,
+          wrapT: THREE.RepeatWrapping,
         }
       );
-      material.setTexture("dirtTexture", dirtTex);
-      material.setFloat("dirtTextureScale", 0.5);
 
-      const leafAtlas = loadTextureWithFallback(
-        this.scene,
+      const leafAtlas = loadTextureWithFallbackSync(
         DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.leafAtlas,
         {
           preferredExtensions: ["png", "ktx2", "jpg"],
-          wrapU: BABYLON.Texture.CLAMP_ADDRESSMODE,
-          wrapV: BABYLON.Texture.CLAMP_ADDRESSMODE,
-          anisotropicFilteringLevel: 4,
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping,
         }
       );
-      material.setTexture("leafAtlas", leafAtlas);
-      material.setFloat(
-        "uLeafAlphaCutoff",
-        DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff
-      );
-      material.setFloat(
-        "uLeafFadeStart",
-        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart
-      );
-      material.setFloat(
-        "uLeafFadeEnd",
-        DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd
-      );
-      material.setFloat(
-        "uUseLeafAtlas",
-        assetType === "tree" || assetType === "bush" ? 1.0 : 0.0
-      );
-      material.setFloat("uLeafMaskFromLuma", 1.0);
 
-      // Fresnel rim light settings
-      material.setFloat("uFresnelPower", 3.0);
-      material.setFloat("uFresnelStrength", 0.4);
-      material.setColor3("uFresnelColor", new Color3(0.8, 0.95, 0.7));
-    } else {
-      // Rock uses thin instance static shader with triplanar texture
-      // NOTE: Do NOT include world0-world3 in attributes - Babylon.js adds them
-      // automatically when using thinInstanceSetBuffer("matrix", ...)
-      material = new ShaderMaterial(
-        `prop_thin_${assetType}`,
-        this.scene,
-        {
-          vertex: "propThin",
-          fragment: "propThin",
+      material = new THREE.ShaderMaterial({
+        vertexShader: propThinWindVertexShader,
+        fragmentShader: propThinWindFragmentShader,
+        uniforms: {
+          cameraPosition: { value: new THREE.Vector3() },
+          uTime: { value: 0 },
+          uWindDirection: { value: new THREE.Vector2(Math.cos(windAngle), Math.sin(windAngle)) },
+          uWindStrength: { value: windStrength },
+          uMinWindHeight: { value: minWindHeight },
+          uMaxWindHeight: { value: maxWindHeight },
+          uPropsPrimarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed },
+          uPropsSecondarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed },
+          uPropsNoiseSpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed },
+          baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
+          detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
+          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+          ambientIntensity: { value: 0.4 },
+          fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+          fogDensity: { value: 0.008 },
+          dirtTexture: { value: dirtTex },
+          dirtTextureScale: { value: 0.5 },
+          leafAtlas: { value: leafAtlas },
+          uLeafAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
+          uLeafFadeStart: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart },
+          uLeafFadeEnd: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd },
+          uUseLeafAtlas: { value: assetType === "tree" || assetType === "bush" ? 1.0 : 0.0 },
+          uLeafMaskFromLuma: { value: 1.0 },
+          uFresnelPower: { value: 3.0 },
+          uFresnelStrength: { value: 0.4 },
+          uFresnelColor: { value: new THREE.Color(0.8, 0.95, 0.7) },
         },
-        {
-          attributes: ["position", "normal", "uv"],
-          uniforms: [
-            "viewProjection",
-            "cameraPosition",
-            "baseColor",
-            "detailColor",
-            "sunDirection",
-            "ambientIntensity",
-            "fogColor",
-            "fogDensity",
-            "textureScale",
-          ],
-          samplers: ["rockTexture"],
-        }
-      );
-
-      // Load rock diffuse texture for triplanar mapping
-      const rockTex = loadTextureWithFallback(
-        this.scene,
+        side: THREE.DoubleSide,
+      });
+    } else {
+      // Rock uses instanced static shader with triplanar texture
+      const rockTex = loadTextureWithFallbackSync(
         DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
         {
           preferredExtensions: ["ktx2", "jpg", "png"],
-          wrapU: BABYLON.Texture.WRAP_ADDRESSMODE,
-          wrapV: BABYLON.Texture.WRAP_ADDRESSMODE,
-          anisotropicFilteringLevel: 8,
+          wrapS: THREE.RepeatWrapping,
+          wrapT: THREE.RepeatWrapping,
         }
       );
-      material.setTexture("rockTexture", rockTex);
-      material.setFloat("textureScale", 1.0);
+
+      material = new THREE.ShaderMaterial({
+        vertexShader: propThinVertexShader,
+        fragmentShader: propThinFragmentShader,
+        uniforms: {
+          cameraPosition: { value: new THREE.Vector3() },
+          baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
+          detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
+          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+          ambientIntensity: { value: 0.4 },
+          fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+          fogDensity: { value: 0.008 },
+          rockTexture: { value: rockTex },
+          textureScale: { value: 1.0 },
+        },
+        side: THREE.DoubleSide,
+      });
     }
 
-    // Common uniforms
-    material.setColor3("baseColor", defaultParams.colorBase);
-    material.setColor3("detailColor", defaultParams.colorDetail);
-    material.setVector3("sunDirection", new Vector3(0.5, 0.8, 0.3).normalize());
-    material.setFloat("ambientIntensity", 0.4);
-    material.setColor3("fogColor", new Color3(0.6, 0.75, 0.9));
-    material.setFloat("fogDensity", 0.008);
-    material.backFaceCulling = false;
-
-    // Update camera position and time on each render
-    const startTime = performance.now();
-    material.onBindObservable.add(() => {
-      const camera = this.scene.activeCamera;
-      if (camera) {
-        material.setVector3("cameraPosition", camera.position);
-        if (needsWind) {
-          const elapsed = (performance.now() - startTime) / 1000;
-          material.setFloat("uTime", elapsed);
-        }
-      }
-    });
-
     return material;
+  }
+
+  /**
+   * Update per-frame uniforms (camera position, time).
+   * Call this once per frame from the editor engine.
+   */
+  update(camera?: { position: THREE.Vector3 }): void {
+    if (!camera) return;
+
+    for (const [assetType, material] of this.sharedMaterials) {
+      material.uniforms.cameraPosition.value.copy(camera.position);
+      const needsWind = assetType !== "rock";
+      if (needsWind) {
+        const elapsed = (performance.now() - this.materialStartTime) / 1000;
+        material.uniforms.uTime.value = elapsed;
+      }
+    }
+
+    this.frameCounter++;
   }
 
   /**
@@ -1296,36 +1170,29 @@ export class PropManager {
    * Update frustum planes cache (call once per frame before rebuilding)
    */
   private updateFrustumPlanes(): void {
-    const frameNumber = this.scene.getFrameId();
-    if (this.lastFrustumUpdateFrame === frameNumber) return;
+    if (this.lastFrustumUpdateFrame === this.frameCounter) return;
 
-    const camera = this.scene.activeCamera;
+    const camera = this.scene.activeCamera ?? this.scene.camera;
     if (!camera) return;
 
-    // Get view-projection matrix
-    const viewMatrix = camera.getViewMatrix();
-    const projMatrix = camera.getProjectionMatrix();
-    const vpMatrix = viewMatrix.multiply(projMatrix);
-
-    // Extract frustum planes
-    this.frustumPlanesCache = Frustum.GetPlanes(vpMatrix);
-    this.lastFrustumUpdateFrame = frameNumber;
+    // For Three.js cameras with projectionMatrix and matrixWorldInverse
+    if (camera.projectionMatrix && camera.matrixWorldInverse) {
+      this.frustumMatrix.multiplyMatrices(
+        camera.projectionMatrix,
+        camera.matrixWorldInverse
+      );
+      this.frustum.setFromProjectionMatrix(this.frustumMatrix);
+      this.lastFrustumUpdateFrame = this.frameCounter;
+    }
   }
 
   /**
    * Check if a point is inside the camera frustum
    */
-  private isInFrustum(position: Vector3, radius: number = 1): boolean {
-    if (this.frustumPlanesCache.length === 0) return true;
-
-    // Simple sphere-frustum test
-    for (const plane of this.frustumPlanesCache) {
-      const distance = plane.dotCoordinate(position);
-      if (distance < -radius) {
-        return false;  // Outside this plane
-      }
-    }
-    return true;
+  private isInFrustum(position: THREE.Vector3, radius: number = 1): boolean {
+    // Simple sphere-frustum test using Three.js Frustum
+    const sphere = new THREE.Sphere(position, radius);
+    return this.frustum.intersectsSphere(sphere);
   }
 
   /**
@@ -1576,22 +1443,21 @@ export class PropManager {
     const [assetType, variationIndexStr] = baseGroupKey.split("|") as [AssetType, string];
     const variationIndex = parseInt(variationIndexStr, 10);
 
-    // Get variation meshes for all LOD levels
-    const lodMeshMap = this.variationMeshes.get(assetType);
-    if (!lodMeshMap) return;
+    // Get variation geometries for all LOD levels
+    const lodGeoMap = this.variationGeometries.get(assetType);
+    if (!lodGeoMap) return;
 
     // Get camera position for LOD calculation
-    const camera = this.scene.activeCamera;
-    const cameraPos = camera ? camera.position : Vector3.Zero();
+    const camera = this.scene.activeCamera ?? this.scene.camera;
+    const cameraPos = camera ? camera.position : new THREE.Vector3();
 
     // Categorize instances by LOD level
-    const lodMatrices: Map<MeshLOD, Float32Array> = new Map();
-    const lodCounts: Map<MeshLOD, number> = new Map();
+    const lodInstanceLists: Map<MeshLOD, { position: THREE.Vector3; rotation: THREE.Vector3; scale: THREE.Vector3 }[]> = new Map();
 
-    // Initialize LOD buffers
+    // Initialize LOD lists
     const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
     for (const lod of lodLevels) {
-      lodCounts.set(lod, 0);
+      lodInstanceLists.set(lod, []);
     }
 
     if (!propIds || propIds.size === 0) {
@@ -1600,14 +1466,14 @@ export class PropManager {
         const lodGroupKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
         const groupMesh = this.instanceGroups.get(lodGroupKey);
         if (groupMesh) {
-          groupMesh.isVisible = false;
-          groupMesh.thinInstanceCount = 0;
+          groupMesh.visible = false;
+          groupMesh.count = 0;
         }
       }
       return;
     }
 
-    // First pass: count instances per LOD (with frustum culling)
+    // First pass: categorize instances by LOD (with frustum culling)
     for (const propId of propIds) {
       const instance = this.instances.get(propId);
       if (!instance || !instance.visible) continue;
@@ -1626,113 +1492,69 @@ export class PropManager {
 
       // Determine LOD
       const lod = this.getLODForDistance(distance);
-      lodCounts.set(lod, (lodCounts.get(lod) || 0) + 1);
+      lodInstanceLists.get(lod)!.push({
+        position: instance.position,
+        rotation: instance.rotation,
+        scale: instance.scale,
+      });
     }
 
-    // Allocate buffers for each LOD
-    for (const lod of lodLevels) {
-      const count = lodCounts.get(lod) || 0;
-      if (count > 0) {
-        const bufferKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
-        let buffer = this.bufferCache.get(bufferKey);
-        const requiredSize = count * 16;
-        if (!buffer || buffer.length < requiredSize) {
-          buffer = new Float32Array(Math.ceil(requiredSize * 1.5));
-          this.bufferCache.set(bufferKey, buffer);
-        }
-        lodMatrices.set(lod, buffer);
-      }
-    }
-
-    // Second pass: fill matrices
-    const lodIndices = new Map<MeshLOD, number>();
-    for (const lod of lodLevels) {
-      lodIndices.set(lod, 0);
-    }
-
-    for (const propId of propIds) {
-      const instance = this.instances.get(propId);
-      if (!instance || !instance.visible) continue;
-
-      // Frustum culling check (same as first pass)
-      const radius = Math.max(instance.scale.x, instance.scale.y, instance.scale.z) * 2;
-      if (!this.isInFrustum(instance.position, radius)) {
-        continue;
-      }
-
-      // Calculate distance and LOD
-      const dx = instance.position.x - cameraPos.x;
-      const dy = instance.position.y - cameraPos.y;
-      const dz = instance.position.z - cameraPos.z;
-      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      const lod = this.getLODForDistance(distance);
-
-      const matrices = lodMatrices.get(lod);
-      if (!matrices) continue;
-
-      // Build transform matrix
-      BABYLON.Quaternion.FromEulerAnglesToRef(
-        instance.rotation.x,
-        instance.rotation.y,
-        instance.rotation.z,
-        this._tempQuaternion
-      );
-      Matrix.ComposeToRef(
-        instance.scale,
-        this._tempQuaternion,
-        instance.position,
-        this._tempMatrix
-      );
-
-      const index = lodIndices.get(lod) || 0;
-      this._tempMatrix.copyToArray(matrices, index * 16);
-      lodIndices.set(lod, index + 1);
-    }
-
-    // Apply matrices to each LOD mesh
+    // Apply to each LOD mesh
     for (const lod of lodLevels) {
       const lodGroupKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
-      const count = lodIndices.get(lod) || 0;
+      const instanceList = lodInstanceLists.get(lod)!;
+      const count = instanceList.length;
 
       if (count === 0) {
         // Hide this LOD mesh
         const groupMesh = this.instanceGroups.get(lodGroupKey);
         if (groupMesh) {
-          groupMesh.isVisible = false;
-          groupMesh.thinInstanceCount = 0;
+          groupMesh.visible = false;
+          groupMesh.count = 0;
         }
         continue;
       }
 
       // Get or create LOD group mesh
       let groupMesh = this.instanceGroups.get(lodGroupKey);
+
+      // If the existing mesh doesn't have enough capacity, recreate it
+      if (groupMesh && groupMesh.instanceMatrix.count < count) {
+        this.scene.remove(groupMesh);
+        groupMesh.dispose();
+        this.instanceGroups.delete(lodGroupKey);
+        groupMesh = undefined;
+      }
+
       if (!groupMesh) {
-        const lodMeshes = lodMeshMap.get(lod);
-        if (!lodMeshes || !lodMeshes[variationIndex]) continue;
+        const lodGeometries = lodGeoMap.get(lod);
+        if (!lodGeometries || !lodGeometries[variationIndex]) continue;
 
-        const baseMesh = lodMeshes[variationIndex];
-        groupMesh = baseMesh.clone(`inst_${lodGroupKey}`, null);
-        if (!groupMesh) continue;
-
-        // Keep shared geometry for instance-group meshes.
-        // Some imported GLB geometries use accessor layouts that can throw in makeGeometryUnique()
-        // ("Last accessed byte is out of bounds"), and we do not mutate vertex data here anyway.
-        groupMesh.isPickable = true;
-
+        const baseGeometry = lodGeometries[variationIndex];
+        // Allocate with extra capacity to avoid frequent re-creation
+        const capacity = Math.max(count, 16) * 2;
         const material = this.sharedMaterials.get(assetType);
-        if (material) {
-          groupMesh.material = material;
-        }
+        if (!material) continue;
 
+        groupMesh = new THREE.InstancedMesh(baseGeometry, material, capacity);
+        groupMesh.name = `inst_${lodGroupKey}`;
+        groupMesh.frustumCulled = false;  // We handle frustum culling manually
+        this.scene.add(groupMesh);
         this.instanceGroups.set(lodGroupKey, groupMesh);
       }
 
-      // Apply thin instances
-      const matrices = lodMatrices.get(lod)!;
-      groupMesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
-      groupMesh.thinInstanceCount = count;
-      groupMesh.thinInstanceRefreshBoundingInfo();
-      groupMesh.isVisible = true;
+      // Fill instance matrices
+      for (let i = 0; i < count; i++) {
+        const inst = instanceList[i];
+        this._tempEuler.set(inst.rotation.x, inst.rotation.y, inst.rotation.z);
+        this._tempQuaternion.setFromEuler(this._tempEuler);
+        this._tempMatrix.compose(inst.position, this._tempQuaternion, inst.scale);
+        groupMesh.setMatrixAt(i, this._tempMatrix);
+      }
+
+      groupMesh.count = count;
+      groupMesh.instanceMatrix.needsUpdate = true;
+      groupMesh.visible = true;
     }
   }
 
@@ -1799,53 +1621,65 @@ export class PropManager {
       this.previewAsset = null;
       this.previewMesh = null;
     } else if (this.previewMesh) {
-      this.previewMesh.dispose();
+      if (this.scene && typeof this.scene.remove === "function") {
+        this.scene.remove(this.previewMesh);
+      }
+      this.previewMesh.geometry?.dispose();
+      if (this.previewMesh.material) {
+        if (Array.isArray(this.previewMesh.material)) {
+          this.previewMesh.material.forEach((m: THREE.Material) => m.dispose());
+        } else {
+          (this.previewMesh.material as THREE.Material).dispose();
+        }
+      }
       this.previewMesh = null;
     }
-    this.previewMatrixBuffer = null;
+    if (this.previewInstancedMesh) {
+      if (this.scene && typeof this.scene.remove === "function") {
+        this.scene.remove(this.previewInstancedMesh);
+      }
+      // Don't dispose geometry/material - they're shared from variationGeometries/sharedMaterials
+      this.previewInstancedMesh = null;
+    }
   }
 
-  private updateThinPreviewTransform(): void {
-    if (!this.previewMesh || !this.previewMatrixBuffer) return;
+  private updateInstancedPreviewTransform(): void {
+    if (!this.previewInstancedMesh) return;
 
-    this._tempVector3.set(this.previewScale, this.previewScale, this.previewScale);
-    BABYLON.Quaternion.FromEulerAnglesToRef(
+    this._tempScale.set(this.previewScale, this.previewScale, this.previewScale);
+    this._tempEuler.set(
       this.previewRotation.x,
       this.previewRotation.y,
-      this.previewRotation.z,
-      this._tempQuaternion
+      this.previewRotation.z
     );
-    Matrix.ComposeToRef(
-      this._tempVector3,
-      this._tempQuaternion,
-      this.previewPosition,
-      this._tempMatrix
-    );
-    this._tempMatrix.copyToArray(this.previewMatrixBuffer, 0);
-    this.previewMesh.thinInstanceSetBuffer("matrix", this.previewMatrixBuffer, 16, false);
-    this.previewMesh.thinInstanceCount = 1;
-    this.previewMesh.thinInstanceRefreshBoundingInfo();
+    this._tempQuaternion.setFromEuler(this._tempEuler);
+    this._tempMatrix.compose(this.previewPosition, this._tempQuaternion, this._tempScale);
+    this.previewInstancedMesh.setMatrixAt(0, this._tempMatrix);
+    this.previewInstancedMesh.count = 1;
+    this.previewInstancedMesh.instanceMatrix.needsUpdate = true;
   }
 
-  private createThinPreviewFromVariation(type: AssetType, variationIndex: number): boolean {
-    const lodMap = this.variationMeshes.get(type);
-    const sourceMesh = lodMap?.get(MeshLOD.High)?.[variationIndex];
-    if (!sourceMesh) {
+  private createInstancedPreviewFromVariation(type: AssetType, variationIndex: number): boolean {
+    const lodMap = this.variationGeometries.get(type);
+    const sourceGeometry = lodMap?.get(MeshLOD.High)?.[variationIndex];
+    if (!sourceGeometry) {
       return false;
     }
 
-    const previewMesh = sourceMesh.clone("preview_asset", null);
-    if (!previewMesh) {
-      return false;
+    const material = this.sharedMaterials.get(type);
+    if (!material) return false;
+
+    const previewMesh = new THREE.InstancedMesh(sourceGeometry, material, 1);
+    previewMesh.name = "preview_asset";
+    previewMesh.frustumCulled = false;
+    previewMesh.visible = this.previewVisible;
+
+    if (this.scene && typeof this.scene.add === "function") {
+      this.scene.add(previewMesh);
     }
 
-    previewMesh.isPickable = false;
-    previewMesh.material = this.sharedMaterials.get(type) ?? null;
-    previewMesh.isVisible = this.previewVisible;
-
-    this.previewMesh = previewMesh;
-    this.previewMatrixBuffer = new Float32Array(16);
-    this.updateThinPreviewTransform();
+    this.previewInstancedMesh = previewMesh;
+    this.updateInstancedPreviewTransform();
     return true;
   }
 
@@ -1869,20 +1703,22 @@ export class PropManager {
     this.previewScale = size;
     this.previewRotation.set(0, 0, 0);
 
-    const createdThinPreview = this.createThinPreviewFromVariation(type, variationIndex);
-    if (!createdThinPreview) {
-      // Fallback path when async variation meshes are not ready yet.
+    const createdInstancedPreview = this.createInstancedPreviewFromVariation(type, variationIndex);
+    if (!createdInstancedPreview) {
+      // Fallback path when async variation geometries are not ready yet.
       this.previewAsset = new ProceduralAsset(this.scene, this.previewParams);
       this.previewMesh = this.previewAsset.generate();
       if (this.previewMesh) {
-        this.previewMesh.position.copyFrom(this.previewPosition);
+        this.previewMesh.position.copy(this.previewPosition);
       }
     }
 
-    if (this.previewMesh) {
+    if (this.previewInstancedMesh) {
+      this.previewInstancedMesh.name = "preview_asset";
+      this.previewInstancedMesh.visible = this.previewVisible;
+    } else if (this.previewMesh) {
       this.previewMesh.name = "preview_asset";
-      this.previewMesh.isPickable = false;
-      this.previewMesh.isVisible = this.previewVisible;
+      this.previewMesh.visible = this.previewVisible;
     }
   }
 
@@ -1899,19 +1735,22 @@ export class PropManager {
 
   // Update preview size (preserves position)
   updatePreviewSize(size: number): void {
-    if (!this.previewParams || !this.previewMesh) return;
+    if (!this.previewParams) return;
 
     const previousSize = this.previewParams.size;
     this.previewScale = size;
     this.previewParams.size = size;
-    if (this.previewMatrixBuffer) {
-      this.updateThinPreviewTransform();
+
+    if (this.previewInstancedMesh) {
+      this.updateInstancedPreviewTransform();
       return;
     }
 
     // Fallback procedural preview path
-    const scaleFactor = size / Math.max(0.0001, previousSize);
-    this.previewMesh.scaling.scaleInPlace(scaleFactor);
+    if (this.previewMesh) {
+      const scaleFactor = size / Math.max(0.0001, previousSize);
+      this.previewMesh.scale.multiplyScalar(scaleFactor);
+    }
   }
 
   // Update preview with full asset params (from AI chat panel)
@@ -1922,8 +1761,8 @@ export class PropManager {
     sizeVariation: number;
     noiseScale: number;
     noiseAmplitude: number;
-    colorBase: Color3;
-    colorDetail: Color3;
+    colorBase: THREE.Color;
+    colorDetail: THREE.Color;
   }): void {
     this.disposePreviewResources();
 
@@ -1947,12 +1786,11 @@ export class PropManager {
 
     if (this.previewMesh) {
       this.previewMesh.name = "preview_asset";
-      this.previewMesh.isPickable = false;
 
       // Make semi-transparent
-      if (this.previewMesh.material) {
-        const mat = this.previewMesh.material as BABYLON.ShaderMaterial;
-        mat.alpha = 0.8;
+      if (this.previewMesh.material && this.previewMesh.material instanceof THREE.ShaderMaterial) {
+        this.previewMesh.material.transparent = true;
+        this.previewMesh.material.opacity = 0.8;
       }
 
       // Position at center of terrain initially
@@ -1963,29 +1801,33 @@ export class PropManager {
       this.previewPosition.set(centerX, centerY, centerZ);
       this.previewMesh.position.set(centerX, centerY, centerZ);
 
-      this.previewMesh.isVisible = true;
+      this.previewMesh.visible = true;
       this.previewVisible = true;
     }
   }
 
   // Update preview position (called on mouse move)
   updatePreviewPosition(x: number, z: number): void {
-    if (!this.previewMesh) return;
-
     const y = this.heightmap.getInterpolatedHeight(x, z);
     this.previewPosition.set(x, y, z);
-    if (this.previewMatrixBuffer) {
-      this.updateThinPreviewTransform();
+
+    if (this.previewInstancedMesh) {
+      this.updateInstancedPreviewTransform();
       return;
     }
-    this.previewMesh.position.set(x, y, z);
+
+    if (this.previewMesh) {
+      this.previewMesh.position.set(x, y, z);
+    }
   }
 
   // Show/hide preview
   setPreviewVisible(visible: boolean): void {
     this.previewVisible = visible;
-    if (this.previewMesh) {
-      this.previewMesh.isVisible = visible;
+    if (this.previewInstancedMesh) {
+      this.previewInstancedMesh.visible = visible;
+    } else if (this.previewMesh) {
+      this.previewMesh.visible = visible;
     }
   }
 
@@ -1997,12 +1839,12 @@ export class PropManager {
   // Place the current preview as a permanent prop
   // Returns { id, newSeed } so caller can update store
   placeCurrentPreview(): { id: string; newSeed: number } | null {
-    if (!this.previewMesh || !this.previewParams) {
+    if ((!this.previewMesh && !this.previewInstancedMesh) || !this.previewParams) {
       return null;
     }
 
-    const x = this.previewMatrixBuffer ? this.previewPosition.x : this.previewMesh.position.x;
-    const z = this.previewMatrixBuffer ? this.previewPosition.z : this.previewMesh.position.z;
+    const x = this.previewPosition.x;
+    const z = this.previewPosition.z;
     const y = this.heightmap.getInterpolatedHeight(x, z);
 
     const id = `prop_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -2012,23 +1854,25 @@ export class PropManager {
     const variationIndex = this.getVariationIndex(params.seed);
     const groupKey = this.getGroupKey(params.type, variationIndex);
 
-    // Store instance (no mesh - managed by thin instancing)
+    // Store instance (no mesh - managed by instancing)
+    const rotation = this.previewInstancedMesh
+      ? this.previewRotation.clone()
+      : (this.previewMesh ? new THREE.Vector3(this.previewMesh.rotation.x, this.previewMesh.rotation.y, this.previewMesh.rotation.z) : new THREE.Vector3());
+
     const instance: PropInstance = {
       id,
       assetType: params.type,
       variationIndex,
       params,
-      position: new Vector3(x, y, z),
-      rotation: this.previewMatrixBuffer
-        ? this.previewRotation.clone()
-        : this.previewMesh.rotation.clone(),
-      scale: new Vector3(this.previewScale, this.previewScale, this.previewScale),
+      position: new THREE.Vector3(x, y, z),
+      rotation,
+      scale: new THREE.Vector3(this.previewScale, this.previewScale, this.previewScale),
       visible: true,
     };
 
     this.instances.set(id, instance);
 
-    // Register to group for thin instancing
+    // Register to group for instancing
     let groupProps = this.propsByGroup.get(groupKey);
     if (!groupProps) {
       groupProps = new Set();
@@ -2042,8 +1886,6 @@ export class PropManager {
     this.registerPropToSpatialHash(id, x, z);
 
     // IMPORTANT: Dispose preview BEFORE rebuilding instance group
-    // Preview and instance group mesh may share geometry when cloned from same source.
-    // Disposing preview after rebuild can interfere with the thin instance buffer.
     this.disposePreviewResources();
 
     // Mark group dirty and rebuild
@@ -2051,8 +1893,6 @@ export class PropManager {
     this.rebuildDirtyGroups();
 
     // Create new preview with different seed for next placement
-    // Note: randomizePreview->createPreview calls disposePreviewResources internally,
-    // but it's a no-op since we already disposed above
     const newSeed = this.randomizePreview();
 
     return { id, newSeed };
@@ -2098,15 +1938,15 @@ export class PropManager {
       assetType: type,
       variationIndex,
       params,
-      position: new Vector3(x, y, z),
-      rotation: new Vector3(0, rotationY, 0),
-      scale: new Vector3(size, size, size),
+      position: new THREE.Vector3(x, y, z),
+      rotation: new THREE.Vector3(0, rotationY, 0),
+      scale: new THREE.Vector3(size, size, size),
       visible: true,
     };
 
     this.instances.set(id, instance);
 
-    // Register to group for thin instancing
+    // Register to group for instancing
     let groupProps = this.propsByGroup.get(groupKey);
     if (!groupProps) {
       groupProps = new Set();
@@ -2168,13 +2008,12 @@ export class PropManager {
     this.propsByTile.clear();
     this.propsByGroup.clear();
     this.dirtyGroups.clear();
-    this.bufferCache.clear();  // Clear buffer cache
-    this.spatialHash.clear();  // Clear spatial hash
+    this.spatialHash.clear();
 
     // Hide all instance group meshes
     for (const groupMesh of this.instanceGroups.values()) {
-      groupMesh.isVisible = false;
-      groupMesh.thinInstanceCount = 0;
+      groupMesh.visible = false;
+      groupMesh.count = 0;
     }
   }
 
@@ -2222,12 +2061,12 @@ export class PropManager {
         sizeVariation: item.params.sizeVariation,
         noiseScale: item.params.noiseScale,
         noiseAmplitude: item.params.noiseAmplitude,
-        colorBase: new Color3(
+        colorBase: new THREE.Color(
           item.params.colorBase.r,
           item.params.colorBase.g,
           item.params.colorBase.b
         ),
-        colorDetail: new Color3(
+        colorDetail: new THREE.Color(
           item.params.colorDetail.r,
           item.params.colorDetail.g,
           item.params.colorDetail.b
@@ -2242,9 +2081,9 @@ export class PropManager {
         assetType: item.assetType,
         variationIndex,
         params,
-        position: new Vector3(item.position.x, item.position.y, item.position.z),
-        rotation: new Vector3(item.rotation.x, item.rotation.y, item.rotation.z),
-        scale: new Vector3(item.scale.x, item.scale.y, item.scale.z),
+        position: new THREE.Vector3(item.position.x, item.position.y, item.position.z),
+        rotation: new THREE.Vector3(item.rotation.x, item.rotation.y, item.rotation.z),
+        scale: new THREE.Vector3(item.scale.x, item.scale.y, item.scale.z),
         visible: true,
       };
 
@@ -2271,7 +2110,7 @@ export class PropManager {
     }
     this.rebuildDirtyGroups();
 
-    console.log(`[PropManager] Imported ${data.length} props using thin instancing`);
+    console.log(`[PropManager] Imported ${data.length} props using instanced meshes`);
   }
 
   dispose(): void {
@@ -2283,19 +2122,22 @@ export class PropManager {
 
     // Dispose instance group meshes
     for (const groupMesh of this.instanceGroups.values()) {
+      if (this.scene && typeof this.scene.remove === "function") {
+        this.scene.remove(groupMesh);
+      }
       groupMesh.dispose();
     }
     this.instanceGroups.clear();
 
-    // Dispose variation meshes (now Map<AssetType, Map<MeshLOD, Mesh[]>>)
-    for (const lodMap of this.variationMeshes.values()) {
-      for (const meshes of lodMap.values()) {
-        for (const mesh of meshes) {
-          mesh.dispose();
+    // Dispose variation geometries
+    for (const lodMap of this.variationGeometries.values()) {
+      for (const geometries of lodMap.values()) {
+        for (const geometry of geometries) {
+          geometry.dispose();
         }
       }
     }
-    this.variationMeshes.clear();
+    this.variationGeometries.clear();
 
     // Dispose shared materials
     for (const material of this.sharedMaterials.values()) {

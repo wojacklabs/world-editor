@@ -1,4 +1,3 @@
-import { Scene } from "@babylonjs/core";
 import { TerrainTile, TileType, TileConfig, TILE_COLORS } from "./TerrainTile";
 
 export interface TileGridConfig {
@@ -19,12 +18,12 @@ export interface TileData {
  * Manages a grid of terrain tiles with automatic edge blending
  */
 export class TerrainTileManager {
-  private scene: Scene;
+  private scene: any;
   private config: TileGridConfig;
   private tiles: Map<string, TerrainTile> = new Map();
   private tileTypes: TileType[][] = [];
 
-  constructor(scene: Scene, config: TileGridConfig) {
+  constructor(scene: any, config: TileGridConfig) {
     this.scene = scene;
     this.config = config;
 

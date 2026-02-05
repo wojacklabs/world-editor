@@ -1,18 +1,10 @@
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  Vector2,
-  Vector3,
-  Color3,
-  Texture,
-} from "@babylonjs/core";
 import { Heightmap } from "./Heightmap";
 import { TerrainMesh } from "./TerrainMesh";
-import { WaterSystem, WaterConfig, DEFAULT_WATER_CONFIG } from "./WaterShader";
+import { WaterSystem } from "./WaterShader";
 
 export class BiomeDecorator {
-  private scene: Scene;
+  // TODO: Change back to THREE.Scene after EditorEngine migration
+  private scene: any;
   private heightmap: Heightmap;
   private terrainMesh: TerrainMesh;
 
@@ -21,7 +13,7 @@ export class BiomeDecorator {
   private waterLevel: number = -100;  // Default below terrain, synced with EditorEngine.seaLevel
   private useFixedSeaLevel: boolean = false;  // If true, use waterLevel directly instead of calculating
 
-  constructor(scene: Scene, heightmap: Heightmap, terrainMesh: TerrainMesh) {
+  constructor(scene: any, heightmap: Heightmap, terrainMesh: TerrainMesh) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.terrainMesh = terrainMesh;
@@ -205,10 +197,7 @@ export class BiomeDecorator {
 
     console.log(`[BiomeDecorator] Water created at level ${this.waterLevel}, size: ${waterWidth}x${waterDepth}`);
 
-    // Refresh reflection render list after scene meshes settle
-    setTimeout(() => {
-      this.waterSystem?.updateReflectionRenderList();
-    }, 100);
+    // Three.js reflection uses render-time camera mirroring, no render list needed
   }
 
   /**
@@ -251,12 +240,10 @@ export class BiomeDecorator {
   }
 
   /**
-   * Notify water system to update reflection render list
+   * Refresh water reflections (no-op in Three.js - reflections are rendered each frame)
    */
   refreshWaterReflections(): void {
-    if (this.waterSystem) {
-      this.waterSystem.updateReflectionRenderList();
-    }
+    // Three.js reflection uses render-time camera mirroring, no explicit refresh needed
   }
 
   /**

@@ -1,12 +1,5 @@
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  StandardMaterial,
-  Color3,
-  Observer,
-  HemisphericLight,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 
 interface LightningConfig {
   flashIntensity: number;
@@ -25,13 +18,12 @@ const DEFAULT_CONFIG: LightningConfig = {
 };
 
 export class LightningSystem {
-  private scene: Scene;
+  private scene: any;
   private config: LightningConfig;
-  private renderObserver: Observer<Scene> | null = null;
 
   // Flash overlay
-  private flashPlane: Mesh | null = null;
-  private flashMaterial: StandardMaterial | null = null;
+  private flashPlane: THREE.Mesh | null = null;
+  private flashMaterial: THREE.MeshBasicMaterial | null = null;
 
   // State
   private enabled: boolean = false;
@@ -39,10 +31,13 @@ export class LightningSystem {
   private nextStrikeTime: number = 0;
   private baseAmbientIntensity: number = 0.4;
 
-  // Reference to scene light for ambient boost
-  private hemisphericLight: HemisphericLight | null = null;
+  // Stored camera reference for positioning
+  private camera: THREE.Camera | null = null;
 
-  constructor(scene: Scene, config: Partial<LightningConfig> = {}) {
+  // Reference to scene light for ambient boost
+  private hemisphericLight: THREE.HemisphereLight | null = null;
+
+  constructor(scene: any, config: Partial<LightningConfig> = {}) {
     this.scene = scene;
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
@@ -50,58 +45,54 @@ export class LightningSystem {
   init(): void {
     this.findHemisphericLight();
     this.createFlashOverlay();
-
-    // Register update loop
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      this.update();
-    });
   }
 
   private findHemisphericLight(): void {
-    for (const light of this.scene.lights) {
-      if (light instanceof HemisphericLight) {
-        this.hemisphericLight = light;
-        this.baseAmbientIntensity = light.intensity;
-        break;
+    this.scene.traverse((child: THREE.Object3D) => {
+      if (child instanceof THREE.HemisphereLight && !this.hemisphericLight) {
+        this.hemisphericLight = child;
+        this.baseAmbientIntensity = child.intensity;
       }
-    }
+    });
   }
 
   private createFlashOverlay(): void {
     // Create full-screen quad for flash effect
-    // Position it close to camera and make it always face camera
-    this.flashPlane = MeshBuilder.CreatePlane(
-      "lightningFlash",
-      { size: 100 },
-      this.scene
-    );
+    const geo = new THREE.PlaneGeometry(100, 100);
 
-    this.flashMaterial = new StandardMaterial("lightningFlashMat", this.scene);
-    this.flashMaterial.emissiveColor = new Color3(0.9, 0.92, 1.0);
-    this.flashMaterial.disableLighting = true;
-    this.flashMaterial.alpha = 0;
-    this.flashMaterial.backFaceCulling = false;
-
-    this.flashPlane.material = this.flashMaterial;
-    this.flashPlane.isPickable = false;
-    this.flashPlane.renderingGroupId = 3; // Render on top
-
-    // Follow camera
-    this.scene.onBeforeRenderObservable.add(() => {
-      if (this.flashPlane && this.scene.activeCamera) {
-        const camera = this.scene.activeCamera;
-        // Position plane in front of camera
-        const forward = camera.getForwardRay().direction;
-        this.flashPlane.position = camera.position.add(forward.scale(5));
-        this.flashPlane.lookAt(camera.position);
-      }
+    this.flashMaterial = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(0.9, 0.92, 1.0),
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
     });
 
-    this.flashPlane.setEnabled(false);
+    this.flashPlane = new THREE.Mesh(geo, this.flashMaterial);
+    this.flashPlane.raycast = () => {};
+    this.flashPlane.renderOrder = 9999; // Render on top
+    this.flashPlane.visible = false;
+
+    this.scene.add(this.flashPlane);
   }
 
-  private update(): void {
+  /** Set camera reference for flash positioning */
+  setCamera(camera: THREE.Camera | null): void {
+    this.camera = camera;
+  }
+
+  /** Call each frame */
+  update(): void {
     if (!this.enabled) return;
+
+    // Position flash plane in front of camera
+    if (this.flashPlane && this.camera) {
+      const forward = new THREE.Vector3(0, 0, -1);
+      forward.applyQuaternion(this.camera.quaternion);
+      this.flashPlane.position.copy(this.camera.position).addScaledVector(forward, 5);
+      this.flashPlane.lookAt(this.camera.position);
+    }
 
     const now = performance.now();
 
@@ -123,7 +114,7 @@ export class LightningSystem {
       { delay: 180, intensity: 0.2 },
     ];
 
-    flashSequence.forEach((flash, index) => {
+    flashSequence.forEach((flash) => {
       setTimeout(() => {
         this.doFlash(flash.intensity);
       }, flash.delay);
@@ -143,8 +134,8 @@ export class LightningSystem {
 
     // Flash overlay
     if (this.flashPlane && this.flashMaterial) {
-      this.flashPlane.setEnabled(true);
-      this.flashMaterial.alpha = intensity * 0.4;
+      this.flashPlane.visible = true;
+      this.flashMaterial.opacity = intensity * 0.4;
     }
 
     // Boost ambient light
@@ -156,8 +147,8 @@ export class LightningSystem {
   private endFlash(): void {
     // Fade out flash overlay
     if (this.flashPlane && this.flashMaterial) {
-      this.flashMaterial.alpha = 0;
-      this.flashPlane.setEnabled(false);
+      this.flashMaterial.opacity = 0;
+      this.flashPlane.visible = false;
     }
 
     // Reset ambient light
@@ -205,19 +196,11 @@ export class LightningSystem {
   }
 
   dispose(): void {
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
-    }
-
     if (this.flashPlane) {
-      this.flashPlane.dispose();
+      disposeMesh(this.scene, this.flashPlane);
       this.flashPlane = null;
     }
 
-    if (this.flashMaterial) {
-      this.flashMaterial.dispose();
-      this.flashMaterial = null;
-    }
+    this.flashMaterial = null;
   }
 }

@@ -1,5 +1,5 @@
 import { init, NavMesh, NavMeshQuery, RecastConfig } from "recast-navigation";
-import { Vector3, Mesh, VertexBuffer, Scene } from "@babylonjs/core";
+import * as THREE from "three";
 import { Heightmap } from "../terrain/Heightmap";
 
 /**
@@ -37,13 +37,13 @@ interface NavMeshChunk {
  */
 export interface PathResult {
   success: boolean;
-  path: Vector3[];
+  path: THREE.Vector3[];
   pathLength: number;
 }
 
 /**
  * NavMeshBuilder - Generates and manages navigation meshes for terrain
- * 
+ *
  * Features:
  * - Builds NavMesh from heightmap terrain
  * - Tile-based chunking for large terrains
@@ -51,24 +51,27 @@ export interface PathResult {
  * - Supports slope and obstacle filtering
  */
 export class NavMeshBuilder {
-  private scene: Scene;
+  private scene: any;
   private heightmap: Heightmap | null = null;
   private terrainSize: number = 0;
-  
+
   // NavMesh data
   private navMesh: NavMesh | null = null;
   private navMeshQuery: NavMeshQuery | null = null;
   private chunks: Map<string, NavMeshChunk> = new Map();
-  
+
   // Configuration
   private config: NavMeshConfig;
   private chunkSize: number = 32;  // NavMesh chunk size in world units
-  
+
   // Initialization state
   private initialized: boolean = false;
   private initializing: boolean = false;
 
-  constructor(scene: Scene, config?: Partial<NavMeshConfig>) {
+  // Debug mesh
+  private debugMesh: THREE.Mesh | null = null;
+
+  constructor(scene: any, config?: Partial<NavMeshConfig>) {
     this.scene = scene;
     this.config = {
       cellSize: 0.3,
@@ -131,7 +134,7 @@ export class NavMeshBuilder {
     }
 
     console.log("[NavMeshBuilder] Building NavMesh from heightmap...");
-    
+
     try {
       // Generate terrain mesh data
       const meshData = this.generateTerrainMeshData();
@@ -159,7 +162,7 @@ export class NavMeshBuilder {
       // This is a simplified implementation
       console.log("[NavMeshBuilder] NavMesh generation config:", recastConfig);
       console.log(`[NavMeshBuilder] Mesh data: ${meshData.vertices.length / 3} vertices, ${meshData.indices.length / 3} triangles`);
-      
+
       // Store mesh data for debugging/visualization
       this.chunks.set("main", {
         x: 0,
@@ -234,7 +237,7 @@ export class NavMeshBuilder {
   /**
    * Find path between two points
    */
-  findPath(start: Vector3, end: Vector3): PathResult {
+  findPath(start: THREE.Vector3, end: THREE.Vector3): PathResult {
     // Basic implementation - actual pathfinding would use NavMeshQuery
     const result: PathResult = {
       success: false,
@@ -249,13 +252,13 @@ export class NavMeshBuilder {
     // Simple straight-line path with terrain following (placeholder)
     // Real implementation would use navMeshQuery.findPath()
     const steps = 20;
-    const path: Vector3[] = [];
-    
+    const path: THREE.Vector3[] = [];
+
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;
       const x = start.x + (end.x - start.x) * t;
       const z = start.z + (end.z - start.z) * t;
-      
+
       // Get terrain height at this position
       const terrainX = Math.floor(((x + this.terrainSize / 2) / this.terrainSize) * (this.heightmap.getResolution() - 1));
       const terrainZ = Math.floor(((z + this.terrainSize / 2) / this.terrainSize) * (this.heightmap.getResolution() - 1));
@@ -264,12 +267,12 @@ export class NavMeshBuilder {
         Math.max(0, Math.min(this.heightmap.getResolution() - 1, terrainZ))
       );
 
-      path.push(new Vector3(x, y + 0.1, z));
+      path.push(new THREE.Vector3(x, y + 0.1, z));
     }
 
     result.success = true;
     result.path = path;
-    result.pathLength = Vector3.Distance(start, end);
+    result.pathLength = start.distanceTo(end);
 
     return result;
   }
@@ -277,7 +280,7 @@ export class NavMeshBuilder {
   /**
    * Check if a point is walkable
    */
-  isWalkable(point: Vector3): boolean {
+  isWalkable(point: THREE.Vector3): boolean {
     if (!this.heightmap) return false;
 
     // Convert world position to heightmap coordinates
@@ -291,27 +294,27 @@ export class NavMeshBuilder {
 
     // Calculate slope at this point using height differences
     const step = this.terrainSize / (resolution - 1);
-    
+
     // Get neighboring heights
     const h = this.heightmap.getHeight(hx, hz);
     const hRight = hx < resolution - 1 ? this.heightmap.getHeight(hx + 1, hz) : h;
     const hDown = hz < resolution - 1 ? this.heightmap.getHeight(hx, hz + 1) : h;
-    
+
     // Calculate slope as max height difference / horizontal distance
     const dxSlope = Math.abs(hRight - h) / step;
     const dzSlope = Math.abs(hDown - h) / step;
     const slope = Math.max(dxSlope, dzSlope);
-    
+
     // Convert max slope angle to slope ratio
     const maxSlopeRatio = Math.tan((this.config.agentMaxSlope * Math.PI) / 180);
-    
+
     return slope <= maxSlopeRatio;
   }
 
   /**
    * Get nearest walkable point
    */
-  getNearestWalkablePoint(point: Vector3, searchRadius: number = 5): Vector3 | null {
+  getNearestWalkablePoint(point: THREE.Vector3, searchRadius: number = 5): THREE.Vector3 | null {
     if (this.isWalkable(point)) {
       return point.clone();
     }
@@ -321,7 +324,7 @@ export class NavMeshBuilder {
     for (let radius = 1; radius <= searchRadius; radius++) {
       for (let i = 0; i < steps; i++) {
         const angle = (i / steps) * Math.PI * 2;
-        const testPoint = new Vector3(
+        const testPoint = new THREE.Vector3(
           point.x + Math.cos(angle) * radius,
           point.y,
           point.z + Math.sin(angle) * radius
@@ -344,19 +347,40 @@ export class NavMeshBuilder {
   /**
    * Get debug visualization mesh
    */
-  createDebugMesh(): Mesh | null {
+  createDebugMesh(): THREE.Mesh | null {
     const mainChunk = this.chunks.get("main");
     if (!mainChunk || !mainChunk.vertices || !mainChunk.indices) {
       return null;
     }
 
+    // Dispose previous debug mesh
+    if (this.debugMesh) {
+      this.scene.remove(this.debugMesh);
+      this.debugMesh.geometry.dispose();
+      if (this.debugMesh.material instanceof THREE.Material) {
+        this.debugMesh.material.dispose();
+      }
+      this.debugMesh = null;
+    }
+
     // Create debug mesh showing NavMesh area
-    const debugMesh = new Mesh("navmesh_debug", this.scene);
-    
-    // Note: Would need to create VertexData and apply
-    // This is a placeholder for visualization
-    
-    return debugMesh;
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(mainChunk.vertices), 3));
+    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(mainChunk.indices), 1));
+    geometry.computeVertexNormals();
+
+    const material = new THREE.MeshBasicMaterial({
+      color: 0x00aaff,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.4,
+    });
+
+    this.debugMesh = new THREE.Mesh(geometry, material);
+    this.debugMesh.name = "navmesh_debug";
+    this.scene.add(this.debugMesh);
+
+    return this.debugMesh;
   }
 
   /**
@@ -374,6 +398,14 @@ export class NavMeshBuilder {
    * Dispose all resources
    */
   dispose(): void {
+    if (this.debugMesh) {
+      this.scene.remove(this.debugMesh);
+      this.debugMesh.geometry.dispose();
+      if (this.debugMesh.material instanceof THREE.Material) {
+        this.debugMesh.material.dispose();
+      }
+      this.debugMesh = null;
+    }
     this.chunks.clear();
     this.navMesh = null;
     this.navMeshQuery = null;

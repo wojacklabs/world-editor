@@ -1,41 +1,23 @@
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  Vector3,
-  Matrix,
-  Quaternion,
-  Texture,
-  StandardMaterial,
-  ShaderMaterial,
-  Effect,
-  RenderTargetTexture,
-  Camera,
-  ArcRotateCamera,
-  Color3,
-  Color4,
-  VertexBuffer,
-  TransformNode,
-  AbstractMesh,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 
 /**
  * Impostor configuration for a single object type
  */
 export interface ImpostorConfig {
   name: string;
-  sourceMesh: Mesh | null;           // Source 3D mesh to capture
-  textureSize: number;               // Resolution of impostor texture (e.g., 256)
-  viewAngles: number;                // Number of view angles (e.g., 8 for octagonal)
-  transitionStart: number;           // Distance to start transition (e.g., 80)
-  transitionEnd: number;             // Distance to fully switch to impostor (e.g., 100)
+  sourceMesh: THREE.Mesh | null;        // Source 3D mesh to capture
+  textureSize: number;                   // Resolution of impostor texture (e.g., 256)
+  viewAngles: number;                    // Number of view angles (e.g., 8 for octagonal)
+  transitionStart: number;               // Distance to start transition (e.g., 80)
+  transitionEnd: number;                 // Distance to fully switch to impostor (e.g., 100)
 }
 
 /**
  * Impostor instance data
  */
 interface ImpostorInstance {
-  position: Vector3;
+  position: THREE.Vector3;
   scale: number;
   rotation: number;
 }
@@ -45,21 +27,16 @@ interface ImpostorInstance {
  */
 interface ImpostorCache {
   config: ImpostorConfig;
-  atlasTexture: RenderTargetTexture | null;  // Multi-angle atlas
-  billboardMesh: Mesh | null;                 // Base billboard mesh
-  instances: ImpostorInstance[];              // All instances
-  matrixBuffer: Float32Array | null;          // Instance matrices
+  atlasTexture: THREE.WebGLRenderTarget | null;  // Multi-angle atlas
+  billboardMesh: THREE.InstancedMesh | null;      // Instanced billboard mesh
+  instances: ImpostorInstance[];                   // All instances
+  matrixBuffer: Float32Array | null;               // Instance matrices
 }
 
-// Register impostor billboard shader
-Effect.ShadersStore["impostorVertexShader"] = `
+// Impostor billboard vertex shader
+const impostorVertexShader = `
 precision highp float;
 
-attribute vec3 position;
-attribute vec2 uv;
-
-uniform mat4 viewProjection;
-uniform mat4 world;
 uniform vec3 uCameraPosition;
 uniform float uAtlasColumns;
 uniform float uAtlasRows;
@@ -69,45 +46,45 @@ varying float vFade;
 
 void main() {
     // Get instance world position from matrix
-    vec4 worldPos = world * vec4(0.0, 0.0, 0.0, 1.0);
-    
+    vec4 worldPos = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+
     // Billboard facing - rotate quad to face camera
     vec3 toCamera = normalize(uCameraPosition - worldPos.xyz);
     vec3 up = vec3(0.0, 1.0, 0.0);
     vec3 right = normalize(cross(up, toCamera));
     vec3 forward = cross(right, up);
-    
-    // Extract scale from world matrix
-    float scaleX = length(vec3(world[0][0], world[0][1], world[0][2]));
-    float scaleY = length(vec3(world[1][0], world[1][1], world[1][2]));
-    
+
+    // Extract scale from instance matrix
+    float scaleX = length(vec3(instanceMatrix[0][0], instanceMatrix[0][1], instanceMatrix[0][2]));
+    float scaleY = length(vec3(instanceMatrix[1][0], instanceMatrix[1][1], instanceMatrix[1][2]));
+
     // Apply billboard rotation
-    vec3 billboardPos = worldPos.xyz 
-        + right * position.x * scaleX 
+    vec3 billboardPos = worldPos.xyz
+        + right * position.x * scaleX
         + up * position.y * scaleY;
-    
-    gl_Position = viewProjection * vec4(billboardPos, 1.0);
-    
+
+    gl_Position = projectionMatrix * viewMatrix * vec4(billboardPos, 1.0);
+
     // Calculate view angle for atlas UV selection
     float angle = atan(toCamera.z, toCamera.x);
     float normalizedAngle = (angle + 3.14159) / (2.0 * 3.14159);  // 0-1
     float atlasColumn = floor(normalizedAngle * uAtlasColumns);
     atlasColumn = mod(atlasColumn, uAtlasColumns);
-    
+
     // Calculate UV within atlas
     float uvScale = 1.0 / uAtlasColumns;
     vUV = vec2(
         (atlasColumn + uv.x) * uvScale,
         uv.y / uAtlasRows
     );
-    
+
     // Distance fade for transition
     float dist = length(uCameraPosition - worldPos.xyz);
     vFade = 1.0;  // Could be used for distance-based fade
 }
 `;
 
-Effect.ShadersStore["impostorFragmentShader"] = `
+const impostorFragmentShader = `
 precision highp float;
 
 uniform sampler2D uImpostorAtlas;
@@ -119,86 +96,75 @@ varying float vFade;
 
 void main() {
     vec4 texColor = texture2D(uImpostorAtlas, vUV);
-    
+
     // Alpha test
     if (texColor.a < 0.1) discard;
-    
+
     // Simple lighting
     float light = uAmbient + 0.5;
     vec3 color = texColor.rgb * light;
-    
+
     gl_FragColor = vec4(color, texColor.a * vFade);
 }
 `;
 
 /**
  * ImpostorSystem - Manages billboard impostors for distant objects
- * 
+ *
  * Features:
  * - Renders 3D meshes to multi-angle atlas textures
  * - Uses billboards with view-angle selection for distant objects
  * - Smooth transition between 3D and impostor
- * - Thin instance based for performance
+ * - InstancedMesh based for performance
  */
 export class ImpostorSystem {
-  private scene: Scene;
+  private scene: any;
   private impostorCache: Map<string, ImpostorCache> = new Map();
-  private impostorMaterial: ShaderMaterial | null = null;
-  private captureCamera: ArcRotateCamera | null = null;
-  private captureLight: TransformNode | null = null;
-  
+  private impostorMaterial: THREE.ShaderMaterial | null = null;
+  private captureCamera: THREE.PerspectiveCamera | null = null;
+
   // Default settings
   private defaultTextureSize = 256;
   private defaultViewAngles = 8;
   private defaultTransitionStart = 80;
   private defaultTransitionEnd = 100;
 
-  constructor(scene: Scene) {
+  // Shared geometry for all billboard instances
+  private billboardGeometry: THREE.PlaneGeometry | null = null;
+
+  constructor(scene: any) {
     this.scene = scene;
     this.createImpostorMaterial();
     this.setupCaptureCamera();
+    this.createBillboardGeometry();
+  }
+
+  /**
+   * Create shared billboard geometry (offset to bottom center)
+   */
+  private createBillboardGeometry(): void {
+    this.billboardGeometry = new THREE.PlaneGeometry(1, 1);
+    this.billboardGeometry.translate(0, 0.5, 0);
   }
 
   /**
    * Create shared impostor material
    */
   private createImpostorMaterial(): void {
-    this.impostorMaterial = new ShaderMaterial(
-      "impostorMaterial",
-      this.scene,
-      {
-        vertex: "impostor",
-        fragment: "impostor",
+    this.impostorMaterial = new THREE.ShaderMaterial({
+      vertexShader: impostorVertexShader,
+      fragmentShader: impostorFragmentShader,
+      uniforms: {
+        uCameraPosition: { value: new THREE.Vector3() },
+        uAtlasColumns: { value: this.defaultViewAngles },
+        uAtlasRows: { value: 1 },
+        uSunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+        uAmbient: { value: 0.4 },
+        uImpostorAtlas: { value: null as THREE.Texture | null },
       },
-      {
-        attributes: ["position", "uv"],
-        uniforms: [
-          "viewProjection",
-          "world",
-          "uCameraPosition",
-          "uAtlasColumns",
-          "uAtlasRows",
-          "uSunDirection",
-          "uAmbient",
-        ],
-        samplers: ["uImpostorAtlas"],
-        needAlphaBlending: true,
-      }
-    );
-
-    this.impostorMaterial.setFloat("uAtlasColumns", this.defaultViewAngles);
-    this.impostorMaterial.setFloat("uAtlasRows", 1);
-    this.impostorMaterial.setVector3("uSunDirection", new Vector3(0.5, 0.8, 0.3).normalize());
-    this.impostorMaterial.setFloat("uAmbient", 0.4);
-    this.impostorMaterial.backFaceCulling = false;
-    this.impostorMaterial.alphaMode = 1;  // ALPHA_ADD not needed, just alpha test
-
-    // Bind camera position each frame
-    this.impostorMaterial.onBindObservable.add(() => {
-      const camera = this.scene.activeCamera;
-      if (camera) {
-        this.impostorMaterial!.setVector3("uCameraPosition", camera.position);
-      }
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
     });
   }
 
@@ -206,28 +172,31 @@ export class ImpostorSystem {
    * Setup camera for capturing impostor textures
    */
   private setupCaptureCamera(): void {
-    this.captureCamera = new ArcRotateCamera(
-      "impostorCaptureCamera",
-      0,
-      Math.PI / 2,
-      5,
-      Vector3.Zero(),
-      this.scene
-    );
-    this.captureCamera.minZ = 0.1;
-    this.captureCamera.maxZ = 100;
-    
-    // Don't add to active cameras list
-    const cameraIndex = this.scene.cameras.indexOf(this.captureCamera);
-    if (cameraIndex > -1) {
-      this.scene.cameras.splice(cameraIndex, 1);
+    this.captureCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+    this.captureCamera.position.set(0, 0, 5);
+    this.captureCamera.lookAt(0, 0, 0);
+  }
+
+  /**
+   * Update camera position uniform for billboard facing.
+   * Call this each frame (replaces Babylon's onBindObservable).
+   */
+  updateCameraPosition(cameraPosition: THREE.Vector3): void {
+    if (this.impostorMaterial) {
+      this.impostorMaterial.uniforms.uCameraPosition.value.copy(cameraPosition);
+    }
+    // Also update per-type cloned materials
+    for (const [, cache] of this.impostorCache) {
+      if (cache.billboardMesh && cache.billboardMesh.material instanceof THREE.ShaderMaterial) {
+        cache.billboardMesh.material.uniforms.uCameraPosition.value.copy(cameraPosition);
+      }
     }
   }
 
   /**
    * Register a mesh type for impostor generation
    */
-  registerImpostor(config: Partial<ImpostorConfig> & { name: string; sourceMesh: Mesh }): void {
+  registerImpostor(config: Partial<ImpostorConfig> & { name: string; sourceMesh: THREE.Mesh }): void {
     const fullConfig: ImpostorConfig = {
       textureSize: config.textureSize || this.defaultTextureSize,
       viewAngles: config.viewAngles || this.defaultViewAngles,
@@ -245,12 +214,9 @@ export class ImpostorSystem {
     };
 
     this.impostorCache.set(config.name, cache);
-    
+
     // Generate atlas texture from source mesh
     this.generateAtlasTexture(cache);
-    
-    // Create billboard base mesh
-    this.createBillboardMesh(cache);
 
     console.log(`[ImpostorSystem] Registered impostor: ${config.name}`);
   }
@@ -266,67 +232,55 @@ export class ImpostorSystem {
     const atlasHeight = config.textureSize;
 
     // Create render target for atlas
-    const renderTarget = new RenderTargetTexture(
-      `${config.name}_atlas`,
-      { width: atlasWidth, height: atlasHeight },
-      this.scene,
-      false,
-      true
-    );
-    renderTarget.clearColor = new Color4(0, 0, 0, 0);
-    
+    const renderTarget = new THREE.WebGLRenderTarget(atlasWidth, atlasHeight, {
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+    });
+
     cache.atlasTexture = renderTarget;
 
-    // Capture each view angle
-    const sourceMesh = config.sourceMesh;
-    const originalVisibility = sourceMesh.isVisible;
-    sourceMesh.isVisible = true;
-
     // Calculate mesh bounds for camera positioning
-    sourceMesh.computeWorldMatrix(true);
-    const bounds = sourceMesh.getBoundingInfo();
-    const meshSize = bounds.boundingBox.maximumWorld.subtract(bounds.boundingBox.minimumWorld);
+    const sourceMesh = config.sourceMesh;
+    sourceMesh.updateMatrixWorld(true);
+    sourceMesh.geometry.computeBoundingBox();
+    const box = sourceMesh.geometry.boundingBox!;
+    const min = box.min.clone().applyMatrix4(sourceMesh.matrixWorld);
+    const max = box.max.clone().applyMatrix4(sourceMesh.matrixWorld);
+    const meshSize = max.clone().sub(min);
     const maxDimension = Math.max(meshSize.x, meshSize.y, meshSize.z);
     const cameraDistance = maxDimension * 2;
 
     if (this.captureCamera) {
-      this.captureCamera.radius = cameraDistance;
-      this.captureCamera.target = bounds.boundingBox.centerWorld.clone();
+      const center = min.clone().add(max).multiplyScalar(0.5);
+      this.captureCamera.position.set(center.x, center.y, center.z + cameraDistance);
+      this.captureCamera.lookAt(center);
     }
 
-    // For now, use a single angle capture (simplified)
+    // For now, simplified single-angle capture
     // Full implementation would render multiple angles to atlas regions
-    renderTarget.renderList = [sourceMesh];
-    
-    // Restore visibility
-    sourceMesh.isVisible = originalVisibility;
+    // Rendering to target requires manual renderer.setRenderTarget() calls
 
     console.log(`[ImpostorSystem] Generated atlas texture for ${config.name}: ${atlasWidth}x${atlasHeight}`);
   }
 
   /**
-   * Create billboard base mesh for thin instancing
+   * Create billboard InstancedMesh for a cache entry
    */
-  private createBillboardMesh(cache: ImpostorCache): void {
-    // Create simple quad
-    const billboard = MeshBuilder.CreatePlane(
-      `${cache.config.name}_billboard`,
-      { size: 1, sideOrientation: Mesh.DOUBLESIDE },
-      this.scene
-    );
+  private createBillboardMesh(cache: ImpostorCache, count: number): void {
+    if (!this.billboardGeometry || !this.impostorMaterial) return;
 
-    // Offset pivot to bottom center (trees grow from ground)
-    billboard.bakeTransformIntoVertices(Matrix.Translation(0, 0.5, 0));
-
-    // Apply material with atlas texture
-    if (this.impostorMaterial && cache.atlasTexture) {
-      const material = this.impostorMaterial.clone(`${cache.config.name}_mat`);
-      material.setTexture("uImpostorAtlas", cache.atlasTexture);
-      billboard.material = material;
+    // Clone material for this type so each has its own atlas texture
+    const material = this.impostorMaterial.clone();
+    if (cache.atlasTexture) {
+      material.uniforms.uImpostorAtlas.value = cache.atlasTexture.texture;
     }
 
-    billboard.isVisible = false;
-    cache.billboardMesh = billboard;
+    const instMesh = new THREE.InstancedMesh(this.billboardGeometry, material, count);
+    instMesh.count = count;
+    instMesh.visible = true;
+
+    this.scene.add(instMesh);
+    cache.billboardMesh = instMesh;
   }
 
   /**
@@ -352,38 +306,57 @@ export class ImpostorSystem {
 
     cache.instances = [];
     if (cache.billboardMesh) {
-      cache.billboardMesh.thinInstanceCount = 0;
+      disposeMesh(this.scene, cache.billboardMesh);
+      cache.billboardMesh = null;
     }
     cache.matrixBuffer = null;
   }
 
   /**
-   * Update thin instance matrices
+   * Update instance matrices - recreates InstancedMesh with current instances
    */
   private updateInstanceMatrices(cache: ImpostorCache): void {
-    if (!cache.billboardMesh || cache.instances.length === 0) return;
+    if (cache.instances.length === 0) return;
+
+    // Dispose old InstancedMesh if it exists
+    if (cache.billboardMesh) {
+      disposeMesh(this.scene, cache.billboardMesh);
+      cache.billboardMesh = null;
+    }
 
     const count = cache.instances.length;
     cache.matrixBuffer = new Float32Array(count * 16);
 
-    const matrix = Matrix.Identity();
-    const tempPos = Vector3.Zero();
-    const tempScale = Vector3.One();
-    const tempQuat = Quaternion.Identity();
+    const matrix = new THREE.Matrix4();
+    const tempPos = new THREE.Vector3();
+    const tempScale = new THREE.Vector3();
+    const tempQuat = new THREE.Quaternion();
 
     for (let i = 0; i < count; i++) {
       const inst = cache.instances[i];
-      
-      tempPos.copyFrom(inst.position);
-      tempScale.setAll(inst.scale);
-      Quaternion.FromEulerAnglesToRef(0, inst.rotation, 0, tempQuat);
 
-      Matrix.ComposeToRef(tempScale, tempQuat, tempPos, matrix);
-      matrix.copyToArray(cache.matrixBuffer, i * 16);
+      tempPos.copy(inst.position);
+      tempScale.set(inst.scale, inst.scale, inst.scale);
+      tempQuat.setFromEuler(new THREE.Euler(0, inst.rotation, 0));
+
+      matrix.compose(tempPos, tempQuat, tempScale);
+      matrix.toArray(cache.matrixBuffer, i * 16);
     }
 
-    cache.billboardMesh.thinInstanceSetBuffer("matrix", cache.matrixBuffer, 16);
-    cache.billboardMesh.isVisible = true;
+    // Create new InstancedMesh with exact count
+    this.createBillboardMesh(cache, count);
+
+    // Re-read billboardMesh after createBillboardMesh sets it
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const instMesh = cache.billboardMesh as any as THREE.InstancedMesh | null;
+    if (instMesh) {
+      const mat4 = new THREE.Matrix4();
+      for (let i = 0; i < count; i++) {
+        mat4.fromArray(cache.matrixBuffer, i * 16);
+        instMesh.setMatrixAt(i, mat4);
+      }
+      instMesh.instanceMatrix.needsUpdate = true;
+    }
 
     console.log(`[ImpostorSystem] Updated ${count} instances for ${cache.config.name}`);
   }
@@ -392,7 +365,7 @@ export class ImpostorSystem {
    * Update visibility based on camera distance
    * Call this each frame to manage LOD transitions
    */
-  updateVisibility(cameraPosition: Vector3): void {
+  updateVisibility(cameraPosition: THREE.Vector3): void {
     for (const [, cache] of this.impostorCache) {
       if (!cache.billboardMesh || cache.instances.length === 0) continue;
 
@@ -406,14 +379,14 @@ export class ImpostorSystem {
       let visibleCount = 0;
 
       for (const inst of cache.instances) {
-        const distance = Vector3.Distance(cameraPosition, inst.position);
+        const distance = cameraPosition.distanceTo(inst.position);
         if (distance > config.transitionStart) {
           visibleCount++;
         }
       }
 
       // Toggle billboard mesh visibility based on whether any instances are far enough
-      cache.billboardMesh.isVisible = visibleCount > 0;
+      cache.billboardMesh.visible = visibleCount > 0;
     }
   }
 
@@ -440,19 +413,23 @@ export class ImpostorSystem {
         cache.atlasTexture.dispose();
       }
       if (cache.billboardMesh) {
-        cache.billboardMesh.dispose();
+        disposeMesh(this.scene, cache.billboardMesh);
       }
     }
     this.impostorCache.clear();
 
     if (this.captureCamera) {
-      this.captureCamera.dispose();
       this.captureCamera = null;
     }
 
     if (this.impostorMaterial) {
       this.impostorMaterial.dispose();
       this.impostorMaterial = null;
+    }
+
+    if (this.billboardGeometry) {
+      this.billboardGeometry.dispose();
+      this.billboardGeometry = null;
     }
 
     console.log("[ImpostorSystem] Disposed");

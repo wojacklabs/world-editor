@@ -1,15 +1,5 @@
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  Vector3,
-  VertexData,
-  PhysicsAggregate,
-  PhysicsShapeType,
-  AbstractMesh,
-  BoundingInfo,
-  Matrix,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 import { Heightmap } from "../terrain/Heightmap";
 
 /**
@@ -40,15 +30,15 @@ export interface CollisionProxyConfig {
  */
 interface PropCollisionData {
   id: string;
-  originalMesh: AbstractMesh;
-  proxyMesh: Mesh | null;
-  boundingBox: Mesh | null;
+  originalMesh: THREE.Object3D;
+  proxyMesh: THREE.Mesh | null;
+  boundingBox: THREE.Mesh | null;
   layer: CollisionLayer;
 }
 
 /**
  * CollisionProxy - Manages optimized collision meshes for physics
- * 
+ *
  * Features:
  * - Simplified terrain collision mesh
  * - Low-poly proxy meshes for props
@@ -56,21 +46,24 @@ interface PropCollisionData {
  * - Bounding box fallbacks
  */
 export class CollisionProxy {
-  private scene: Scene;
+  private scene: any;
   private config: CollisionProxyConfig;
-  
+
   // Terrain collision
-  private terrainProxy: Mesh | null = null;
+  private terrainProxy: THREE.Mesh | null = null;
   private heightmap: Heightmap | null = null;
   private terrainSize: number = 0;
-  
+
   // Prop collision proxies
   private propProxies: Map<string, PropCollisionData> = new Map();
-  
-  // Debug meshes
-  private debugMeshes: Mesh[] = [];
 
-  constructor(scene: Scene, config?: Partial<CollisionProxyConfig>) {
+  // Debug meshes
+  private debugMeshes: THREE.Mesh[] = [];
+
+  // Raycaster for picking
+  private raycaster: THREE.Raycaster = new THREE.Raycaster();
+
+  constructor(scene: any, config?: Partial<CollisionProxyConfig>) {
     this.scene = scene;
     this.config = {
       terrainSimplification: 4,      // Use 1/4 resolution for terrain collision
@@ -93,27 +86,26 @@ export class CollisionProxy {
   /**
    * Build terrain collision proxy mesh
    */
-  buildTerrainProxy(): Mesh | null {
+  buildTerrainProxy(): THREE.Mesh | null {
     if (!this.heightmap || !this.config.enableTerrainCollision) {
       return null;
     }
 
     // Dispose existing proxy
     if (this.terrainProxy) {
-      this.terrainProxy.dispose();
+      disposeMesh(this.scene, this.terrainProxy);
       this.terrainProxy = null;
     }
 
     const fullRes = this.heightmap.getResolution();
     const simplification = this.config.terrainSimplification;
     const proxyRes = Math.max(3, Math.floor(fullRes / simplification));
-    
+
     console.log(`[CollisionProxy] Building terrain proxy: ${proxyRes}x${proxyRes} (from ${fullRes}x${fullRes})`);
 
     // Generate simplified vertex data
     const positions: number[] = [];
     const indices: number[] = [];
-    const normals: number[] = [];
 
     const step = this.terrainSize / (proxyRes - 1);
     const sampleStep = (fullRes - 1) / (proxyRes - 1);
@@ -123,14 +115,13 @@ export class CollisionProxy {
       for (let x = 0; x < proxyRes; x++) {
         const worldX = x * step - this.terrainSize / 2;
         const worldZ = z * step - this.terrainSize / 2;
-        
+
         // Sample height from heightmap
         const hx = Math.min(fullRes - 1, Math.round(x * sampleStep));
         const hz = Math.min(fullRes - 1, Math.round(z * sampleStep));
         const height = this.heightmap.getHeight(hx, hz);
 
         positions.push(worldX, height, worldZ);
-        normals.push(0, 1, 0);  // Will recalculate
       }
     }
 
@@ -148,30 +139,34 @@ export class CollisionProxy {
       }
     }
 
-    // Create mesh
-    this.terrainProxy = new Mesh("terrain_collision_proxy", this.scene);
-    
-    const vertexData = new VertexData();
-    vertexData.positions = positions;
-    vertexData.indices = indices;
-    
-    // Compute normals
-    VertexData.ComputeNormals(positions, indices, normals);
-    vertexData.normals = normals;
-    
-    vertexData.applyToMesh(this.terrainProxy);
+    // Create geometry
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
 
-    // Make invisible but collidable
-    this.terrainProxy.isVisible = this.config.debugVisualization;
-    this.terrainProxy.checkCollisions = true;
-    
+    // Create mesh
+    const material = new THREE.MeshBasicMaterial({
+      wireframe: true,
+      color: 0x00ff00,
+      transparent: true,
+      opacity: 0.3,
+    });
+    this.terrainProxy = new THREE.Mesh(geometry, material);
+    this.terrainProxy.name = "terrain_collision_proxy";
+
+    // Make invisible but keep in scene for raycasting
+    this.terrainProxy.visible = this.config.debugVisualization;
+
     // Set collision layer metadata
-    this.terrainProxy.metadata = {
+    this.terrainProxy.userData = {
       collisionLayer: CollisionLayer.TERRAIN,
     };
 
+    this.scene.add(this.terrainProxy);
+
     console.log(`[CollisionProxy] Terrain proxy built: ${positions.length / 3} vertices, ${indices.length / 3} triangles`);
-    
+
     return this.terrainProxy;
   }
 
@@ -180,42 +175,42 @@ export class CollisionProxy {
    */
   createPropProxy(
     id: string,
-    originalMesh: AbstractMesh,
+    originalMesh: THREE.Object3D,
     layer: CollisionLayer = CollisionLayer.PROPS_STATIC
-  ): Mesh | null {
+  ): THREE.Mesh | null {
     if (!this.config.enablePropCollision) return null;
 
     // Remove existing proxy if any
     this.removePropProxy(id);
 
-    // Get bounding info
-    originalMesh.computeWorldMatrix(true);
-    const boundingInfo = originalMesh.getBoundingInfo();
-    const size = boundingInfo.boundingBox.maximumWorld.subtract(
-      boundingInfo.boundingBox.minimumWorld
-    );
-    const center = boundingInfo.boundingBox.centerWorld;
+    // Get bounding box
+    const box = new THREE.Box3().setFromObject(originalMesh);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
 
     // Create bounding box proxy (simple and fast)
-    const proxyMesh = MeshBuilder.CreateBox(
-      `collision_proxy_${id}`,
-      {
-        width: size.x,
-        height: size.y,
-        depth: size.z,
-      },
-      this.scene
-    );
-    
-    proxyMesh.position = center.clone();
-    proxyMesh.isVisible = this.config.debugVisualization;
-    proxyMesh.checkCollisions = true;
-    
+    const geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+    const material = new THREE.MeshBasicMaterial({
+      wireframe: true,
+      color: 0xff0000,
+      transparent: true,
+      opacity: 0.3,
+    });
+    const proxyMesh = new THREE.Mesh(geometry, material);
+    proxyMesh.name = `collision_proxy_${id}`;
+
+    proxyMesh.position.copy(center);
+    proxyMesh.visible = this.config.debugVisualization;
+
     // Set collision layer metadata
-    proxyMesh.metadata = {
+    proxyMesh.userData = {
       collisionLayer: layer,
       originalMeshId: id,
     };
+
+    this.scene.add(proxyMesh);
 
     // Store proxy data
     this.propProxies.set(id, {
@@ -234,65 +229,60 @@ export class CollisionProxy {
    */
   createSimplifiedPropProxy(
     id: string,
-    originalMesh: AbstractMesh,
+    originalMesh: THREE.Object3D,
     layer: CollisionLayer = CollisionLayer.PROPS_STATIC
-  ): Mesh | null {
+  ): THREE.Mesh | null {
     if (!this.config.enablePropCollision) return null;
 
-    // For complex meshes, we'd use mesh simplification
-    // For now, use convex hull approximation with bounding box
-    
     // Remove existing proxy if any
     this.removePropProxy(id);
 
-    originalMesh.computeWorldMatrix(true);
-    const boundingInfo = originalMesh.getBoundingInfo();
-    const size = boundingInfo.boundingBox.maximumWorld.subtract(
-      boundingInfo.boundingBox.minimumWorld
-    );
-    const center = boundingInfo.boundingBox.centerWorld;
+    const box = new THREE.Box3().setFromObject(originalMesh);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
 
     // Create capsule for tall objects (like trees)
     const isVertical = size.y > Math.max(size.x, size.z) * 1.5;
-    
-    let proxyMesh: Mesh;
-    
+
+    let proxyMesh: THREE.Mesh;
+
     if (isVertical) {
       // Use capsule for vertical objects
       const radius = Math.max(size.x, size.z) / 2;
-      const height = size.y - radius * 2;
-      
-      proxyMesh = MeshBuilder.CreateCapsule(
-        `collision_proxy_${id}`,
-        {
-          radius: radius,
-          height: Math.max(0.1, height),
-          tessellation: 8,
-          subdivisions: 1,
-        },
-        this.scene
-      );
+      const capsuleHeight = Math.max(0.1, size.y - radius * 2);
+
+      const geometry = new THREE.CapsuleGeometry(radius, capsuleHeight, 4, 8);
+      const material = new THREE.MeshBasicMaterial({
+        wireframe: true,
+        color: 0xffff00,
+        transparent: true,
+        opacity: 0.3,
+      });
+      proxyMesh = new THREE.Mesh(geometry, material);
     } else {
       // Use box for other objects
-      proxyMesh = MeshBuilder.CreateBox(
-        `collision_proxy_${id}`,
-        {
-          width: size.x,
-          height: size.y,
-          depth: size.z,
-        },
-        this.scene
-      );
+      const geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+      const material = new THREE.MeshBasicMaterial({
+        wireframe: true,
+        color: 0xff0000,
+        transparent: true,
+        opacity: 0.3,
+      });
+      proxyMesh = new THREE.Mesh(geometry, material);
     }
 
-    proxyMesh.position = center.clone();
-    proxyMesh.isVisible = this.config.debugVisualization;
-    proxyMesh.checkCollisions = true;
-    
-    proxyMesh.metadata = {
+    proxyMesh.name = `collision_proxy_${id}`;
+    proxyMesh.position.copy(center);
+    proxyMesh.visible = this.config.debugVisualization;
+
+    proxyMesh.userData = {
       collisionLayer: layer,
       originalMeshId: id,
     };
+
+    this.scene.add(proxyMesh);
 
     this.propProxies.set(id, {
       id,
@@ -312,10 +302,10 @@ export class CollisionProxy {
     const data = this.propProxies.get(id);
     if (data) {
       if (data.proxyMesh) {
-        data.proxyMesh.dispose();
+        disposeMesh(this.scene, data.proxyMesh);
       }
       if (data.boundingBox && data.boundingBox !== data.proxyMesh) {
-        data.boundingBox.dispose();
+        disposeMesh(this.scene, data.boundingBox);
       }
       this.propProxies.delete(id);
     }
@@ -328,49 +318,60 @@ export class CollisionProxy {
     const data = this.propProxies.get(id);
     if (!data || !data.proxyMesh) return;
 
-    data.originalMesh.computeWorldMatrix(true);
-    const boundingInfo = data.originalMesh.getBoundingInfo();
-    data.proxyMesh.position = boundingInfo.boundingBox.centerWorld.clone();
+    const box = new THREE.Box3().setFromObject(data.originalMesh);
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    data.proxyMesh.position.copy(center);
   }
 
   /**
    * Raycast against collision proxies
    */
   raycast(
-    origin: Vector3,
-    direction: Vector3,
+    origin: THREE.Vector3,
+    direction: THREE.Vector3,
     maxDistance: number = 1000,
     layerMask: number = CollisionLayer.TERRAIN | CollisionLayer.PROPS_STATIC
-  ): { hit: boolean; point: Vector3 | null; distance: number; meshId: string | null } {
+  ): { hit: boolean; point: THREE.Vector3 | null; distance: number; meshId: string | null } {
     const result = {
       hit: false,
-      point: null as Vector3 | null,
+      point: null as THREE.Vector3 | null,
       distance: maxDistance,
       meshId: null as string | null,
     };
 
+    const normalizedDir = direction.clone().normalize();
+    this.raycaster.set(origin, normalizedDir);
+    this.raycaster.far = maxDistance;
+
+    // Collect meshes to test against
+    const meshesToTest: THREE.Object3D[] = [];
+
     // Check terrain proxy
     if ((layerMask & CollisionLayer.TERRAIN) && this.terrainProxy) {
-      const terrainHit = this.raycastMesh(this.terrainProxy, origin, direction, maxDistance);
-      if (terrainHit.hit && terrainHit.distance < result.distance) {
-        result.hit = true;
-        result.point = terrainHit.point;
-        result.distance = terrainHit.distance;
-        result.meshId = "terrain";
-      }
+      meshesToTest.push(this.terrainProxy);
     }
 
     // Check prop proxies
-    for (const [id, data] of this.propProxies) {
+    for (const [, data] of this.propProxies) {
       if (!(layerMask & data.layer)) continue;
       if (!data.proxyMesh) continue;
+      meshesToTest.push(data.proxyMesh);
+    }
 
-      const propHit = this.raycastMesh(data.proxyMesh, origin, direction, maxDistance);
-      if (propHit.hit && propHit.distance < result.distance) {
-        result.hit = true;
-        result.point = propHit.point;
-        result.distance = propHit.distance;
-        result.meshId = id;
+    const intersects = this.raycaster.intersectObjects(meshesToTest, false);
+
+    if (intersects.length > 0) {
+      const closest = intersects[0];
+      result.hit = true;
+      result.point = closest.point.clone();
+      result.distance = closest.distance;
+
+      // Determine mesh id
+      if (closest.object === this.terrainProxy) {
+        result.meshId = "terrain";
+      } else {
+        result.meshId = closest.object.userData?.originalMeshId ?? null;
       }
     }
 
@@ -378,46 +379,18 @@ export class CollisionProxy {
   }
 
   /**
-   * Raycast against a single mesh
-   */
-  private raycastMesh(
-    mesh: Mesh,
-    origin: Vector3,
-    direction: Vector3,
-    maxDistance: number
-  ): { hit: boolean; point: Vector3 | null; distance: number } {
-    const ray = new (Vector3 as any).constructor().copyFrom(direction).normalize();
-    
-    // Use Babylon's built-in ray picking
-    const pickInfo = this.scene.pickWithRay(
-      new (this.scene as any).constructor.Ray(origin, direction, maxDistance),
-      (m) => m === mesh
-    );
-
-    if (pickInfo && pickInfo.hit && pickInfo.pickedPoint) {
-      return {
-        hit: true,
-        point: pickInfo.pickedPoint,
-        distance: pickInfo.distance,
-      };
-    }
-
-    return { hit: false, point: null, distance: maxDistance };
-  }
-
-  /**
    * Toggle debug visualization
    */
   setDebugVisualization(enabled: boolean): void {
     this.config.debugVisualization = enabled;
-    
+
     if (this.terrainProxy) {
-      this.terrainProxy.isVisible = enabled;
+      this.terrainProxy.visible = enabled;
     }
-    
+
     for (const [, data] of this.propProxies) {
       if (data.proxyMesh) {
-        data.proxyMesh.isVisible = enabled;
+        data.proxyMesh.visible = enabled;
       }
     }
   }
@@ -432,12 +405,12 @@ export class CollisionProxy {
   } {
     let terrainVertices = 0;
     let terrainTriangles = 0;
-    
+
     if (this.terrainProxy) {
-      const positions = this.terrainProxy.getVerticesData("position");
-      const indices = this.terrainProxy.getIndices();
-      terrainVertices = positions ? positions.length / 3 : 0;
-      terrainTriangles = indices ? indices.length / 3 : 0;
+      const geo = this.terrainProxy.geometry;
+      const posAttr = geo.getAttribute("position");
+      terrainVertices = posAttr ? posAttr.count : 0;
+      terrainTriangles = geo.index ? geo.index.count / 3 : 0;
     }
 
     return {
@@ -473,22 +446,22 @@ export class CollisionProxy {
    */
   dispose(): void {
     if (this.terrainProxy) {
-      this.terrainProxy.dispose();
+      disposeMesh(this.scene, this.terrainProxy);
       this.terrainProxy = null;
     }
 
     for (const [, data] of this.propProxies) {
       if (data.proxyMesh) {
-        data.proxyMesh.dispose();
+        disposeMesh(this.scene, data.proxyMesh);
       }
       if (data.boundingBox && data.boundingBox !== data.proxyMesh) {
-        data.boundingBox.dispose();
+        disposeMesh(this.scene, data.boundingBox);
       }
     }
     this.propProxies.clear();
 
     for (const mesh of this.debugMeshes) {
-      mesh.dispose();
+      disposeMesh(this.scene, mesh);
     }
     this.debugMeshes = [];
 

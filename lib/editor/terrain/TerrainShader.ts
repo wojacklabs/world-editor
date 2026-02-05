@@ -1,43 +1,23 @@
-import {
-  Scene,
-  ShaderMaterial,
-  Effect,
-  RawTexture,
-  Color3,
-  Vector3,
-  Texture,
-  Engine,
-  BaseTexture,
-} from "@babylonjs/core";
-import { loadTextureWithFallback } from "../../shared/rendering/TextureLoader";
+import * as THREE from "three";
+import { loadTextureWithFallbackSync } from "../../shared/rendering/TextureLoader.three";
 
 /**
  * Load terrain texture with KTX2-first fallback.
  */
-function loadTerrainTexture(basePath: string, scene: Scene): Texture {
-  return loadTextureWithFallback(scene, basePath, {
+function loadTerrainTexture(basePath: string): THREE.Texture {
+  return loadTextureWithFallbackSync(basePath, {
     preferredExtensions: ["ktx2", "jpg", "png"],
-    anisotropicFilteringLevel: 16,
-    wrapU: Texture.WRAP_ADDRESSMODE,
-    wrapV: Texture.WRAP_ADDRESSMODE,
+    anisotropy: 16,
+    wrapS: THREE.RepeatWrapping,
+    wrapT: THREE.RepeatWrapping,
   });
 }
 
-// Register custom shaders
-Effect.ShadersStore["terrainVertexShader"] = `
+// Terrain vertex shader
+const terrainVertexShader = `
 precision highp float;
 
-// Attributes
-attribute vec3 position;
-attribute vec3 normal;
-attribute vec2 uv;
-
 // Uniforms
-uniform mat4 worldViewProjection;
-uniform mat4 world;
-uniform vec3 cameraPosition;
-
-// Displacement uniforms
 uniform sampler2D uSplatMap;
 uniform sampler2D uRockDisp;
 uniform sampler2D uGrassDisp;
@@ -73,11 +53,11 @@ void main() {
     // Grass displacement at 50% strength (smoother terrain)
     float displacement = (rockDispValue - 0.5) * uDispStrength * rockWeight +
                          (grassDispValue - 0.5) * uDispStrength * 0.5 * grassWeight;
-    
+
     vec3 displacedPosition = position + vec3(0.0, displacement, 0.0);
-    
-    vec4 worldPosition = world * vec4(displacedPosition, 1.0);
-    gl_Position = worldViewProjection * vec4(displacedPosition, 1.0);
+
+    vec4 worldPosition = modelMatrix * vec4(displacedPosition, 1.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(displacedPosition, 1.0);
 
     vPosition = worldPosition.xyz;
     vNormal = normalize(normal);
@@ -90,7 +70,7 @@ void main() {
 
     // Calculate slope (0 = flat, 1 = vertical)
     vSlope = 1.0 - abs(dot(vec3(0.0, 1.0, 0.0), vNormal));
-    
+
     // Build TBN matrix for tangent space calculations
     // For terrain on XZ plane: tangent = X, bitangent = Z, normal = Y
     // Fixed TBN for consistent normal mapping across all tiles
@@ -101,7 +81,8 @@ void main() {
 }
 `;
 
-Effect.ShadersStore["terrainFragmentShader"] = `
+// Terrain fragment shader
+const terrainFragmentShader = `
 precision highp float;
 
 // Uniforms
@@ -141,7 +122,6 @@ uniform float uFogDensity;
 uniform float uFogStart;
 uniform float uFogHeightFalloff;   // Height fog base altitude
 uniform float uFogHeightDensity;   // Height fog density
-uniform vec3 cameraPosition;       // Camera position for per-pixel fog calculation
 
 // Water/Underwater
 uniform float uWaterLevel;
@@ -234,18 +214,18 @@ vec3 grassPattern(vec2 pos, vec3 baseColor) {
 // Dirt texture pattern - texture based
 vec3 dirtPattern(vec2 uv, vec2 pos, vec3 baseColor) {
     vec3 texColor = texture2D(uDirtDiffuse, uv).rgb;
-    
+
     // Add subtle color variation
     float variation = fbm(pos * 0.3, 2) * 0.1;
     texColor *= (0.95 + variation);
-    
+
     return texColor;
 }
 
 // Get dirt normal from texture
 vec3 getDirtNormal(vec2 uv) {
     vec3 normalTex = texture2D(uDirtNormal, uv).rgb;
-    
+
     // Convert from [0,1] to [-1,1]
     vec3 n;
     n.x = (normalTex.r * 2.0 - 1.0) * uNormalStrength;
@@ -268,18 +248,18 @@ vec2 hash2(vec2 p) {
 // Returns distorted UV that varies smoothly across the terrain
 vec2 getDistortedUV(vec2 pos) {
     vec2 baseUV = pos * uTextureScale;
-    
+
     // Multi-frequency noise for natural-looking distortion
     vec2 noise1 = vec2(
         fbm(pos * 0.1, 2),
         fbm(pos * 0.1 + vec2(43.0, 17.0), 2)
     ) * 0.15;  // Low frequency, larger offset
-    
+
     vec2 noise2 = vec2(
         noise(pos * 0.5),
         noise(pos * 0.5 + vec2(31.0, 23.0))
     ) * 0.05;  // Medium frequency, smaller offset
-    
+
     // Apply distortion
     return baseUV + noise1 + noise2;
 }
@@ -408,22 +388,22 @@ struct TriplanarUVs {
 
 TriplanarUVs calculateTriplanarUVs(vec3 worldPos, vec3 worldNormal, float scale) {
     TriplanarUVs result;
-    
+
     // Calculate UVs for each projection plane
     result.uvX = worldPos.yz * scale;  // Project onto YZ plane
     result.uvY = worldPos.xz * scale;  // Project onto XZ plane (top-down)
     result.uvZ = worldPos.xy * scale;  // Project onto XY plane
-    
+
     // Calculate blend weights from absolute normal components
     vec3 blendWeights = abs(worldNormal);
-    
+
     // Sharpen the blend for more distinct transitions (power of 4)
     blendWeights = pow(blendWeights, vec3(4.0));
-    
+
     // Normalize weights so they sum to 1
     float weightSum = blendWeights.x + blendWeights.y + blendWeights.z;
     result.weights = blendWeights / max(weightSum, 0.001);
-    
+
     return result;
 }
 
@@ -506,12 +486,12 @@ struct MacroVariation {
 
 MacroVariation calculateMacroVariation(vec2 worldPos) {
     MacroVariation mv;
-    
+
     // Very low frequency noise for large-scale variation (every 20-50 units)
     float macroNoise1 = fbm(worldPos * 0.02, 2);  // ~50 unit scale
     float macroNoise2 = fbm(worldPos * 0.05 + vec2(100.0, 50.0), 2);  // ~20 unit scale
     float macroNoise3 = fbm(worldPos * 0.03 + vec2(37.0, 89.0), 2);  // ~33 unit scale
-    
+
     // Brightness variation: subtle darkening in some areas
     // Range: 0.85 - 1.1 (±15% variation)
     mv.brightness = 0.9 + macroNoise1 * 0.2;
@@ -519,17 +499,17 @@ MacroVariation calculateMacroVariation(vec2 worldPos) {
     // Saturation variation: some areas more/less saturated
     // Range: 0.9 - 1.1
     mv.saturation = 0.95 + macroNoise2 * 0.15;
-    
+
     // Color tint: very subtle hue shifts based on area
     // Simulates natural soil/grass variation across landscape
     float tintR = 1.0 + (macroNoise1 - 0.5) * 0.08;  // Slight red/cyan shift
-    float tintG = 1.0 + (macroNoise2 - 0.5) * 0.06;  // Slight green/magenta shift  
+    float tintG = 1.0 + (macroNoise2 - 0.5) * 0.06;  // Slight green/magenta shift
     float tintB = 1.0 + (macroNoise3 - 0.5) * 0.04;  // Very subtle blue shift
     mv.tint = vec3(tintR, tintG, tintB);
-    
+
     // Normal strength variation for macro bumps
     mv.normalStrength = macroNoise3 * 0.15;  // 0 - 0.15 range
-    
+
     return mv;
 }
 
@@ -537,14 +517,14 @@ MacroVariation calculateMacroVariation(vec2 worldPos) {
 vec3 applyMacroVariation(vec3 color, MacroVariation mv) {
     // Apply tint
     vec3 tinted = color * mv.tint;
-    
+
     // Apply saturation
     float luminance = dot(tinted, vec3(0.299, 0.587, 0.114));
     vec3 saturated = mix(vec3(luminance), tinted, mv.saturation);
-    
+
     // Apply brightness
     vec3 result = saturated * mv.brightness;
-    
+
     return result;
 }
 
@@ -552,46 +532,46 @@ vec3 applyMacroVariation(vec3 color, MacroVariation mv) {
 // Creates very gentle undulations at world scale
 vec3 calculateMacroNormal(vec2 worldPos, vec3 baseNormal, float strength) {
     if (strength < 0.001) return baseNormal;
-    
+
     // Sample heights at offset positions for gradient
     float epsilon = 2.0;  // Large epsilon for macro scale
-    
+
     // Use very low frequency noise as "macro heightmap"
     float h0 = fbm(worldPos * 0.015, 2);
     float hX = fbm((worldPos + vec2(epsilon, 0.0)) * 0.015, 2);
     float hZ = fbm((worldPos + vec2(0.0, epsilon)) * 0.015, 2);
-    
+
     // Calculate gradient (slope in X and Z)
     float dX = (hX - h0) / epsilon;
     float dZ = (hZ - h0) / epsilon;
-    
+
     // Create normal perturbation
     vec3 macroPerturbation = normalize(vec3(-dX * strength, 1.0, -dZ * strength));
-    
+
     // Blend with base normal using reoriented normal mapping technique
     // This properly combines two normal vectors
     vec3 t = baseNormal + vec3(0.0, 1.0, 0.0);
     vec3 u = macroPerturbation * vec3(-1.0, -1.0, 1.0);
     vec3 result = normalize(t * dot(t, u) - u * t.y);
-    
+
     return result;
 }
 
 // Rock texture pattern - simple texture sampling with normal map for depth illusion
 vec3 rockPattern(vec2 uv, vec2 pos, vec3 baseColor) {
     vec3 texColor = texture2D(uRockDiffuse, uv).rgb;
-    
+
     // Add subtle color variation
     float variation = fbm(pos * 0.3, 2) * 0.1;
     texColor *= (0.95 + variation);
-    
+
     return texColor;
 }
 
 // Get rock normal from texture - enhanced normal strength for better depth perception
 vec3 getRockNormal(vec2 uv) {
     vec3 normalTex = texture2D(uRockNormal, uv).rgb;
-    
+
     // Convert from [0,1] to [-1,1]
     vec3 n;
     n.x = (normalTex.r * 2.0 - 1.0) * uNormalStrength;
@@ -615,19 +595,19 @@ vec3 sandPattern(vec2 pos, vec3 baseColor) {
     // Wind ripples (reduced octaves for performance)
     float ripples = sin(pos.x * 8.0 + fbm(pos * 2.0, 2) * 3.0) * 0.03;
     ripples += sin(pos.y * 6.0 + pos.x * 2.0) * 0.02;
-    
+
     // Fine grain
     float grain = noise(pos * 50.0) * 0.03;
     float dunes = fbm(pos * 0.5, 2) * 0.1;
-    
+
     // Slight color shift
     vec3 lightSand = baseColor * 1.1;
     vec3 shadowSand = baseColor * 0.9;
     float colorMix = fbm(pos * 1.0, 2);
-    
+
     vec3 color = mix(shadowSand, lightSand, colorMix);
     color *= (1.0 + ripples + grain + dunes);
-    
+
     return color;
 }
 
@@ -730,7 +710,7 @@ void main() {
     // Calculate triplanar UVs for steep surfaces (cliffs)
     vec3 geometryNormal = normalize(vNormal);
     TriplanarUVs triUVs = calculateTriplanarUVs(vPosition, geometryNormal, uTextureScale);
-    
+
     // Triplanar blend factor: use triplanar on steep slopes (>0.7)
     // 0.5-0.7 = transition zone, >0.7 = full triplanar
     float triplanarBlend = smoothstep(0.5, 0.7, vSlope);
@@ -743,7 +723,7 @@ void main() {
     float grassHeight = hexGrassDisp(hexUV);
     vec3 dirtColor = dirtPattern(texUV, worldPos, uDirtColor);
     vec3 sandColor = sandPattern(worldPos, uSandColor);
-    
+
     // Rock color: blend between hex-tiled planar and triplanar based on slope
     vec3 rockColorPlanar = hexRockDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
     // Inline triplanar rock diffuse sampling (avoid function calls for WebGPU compatibility)
@@ -788,11 +768,11 @@ void main() {
 
     // Auto-blend rock on steep slopes - DISABLED (rock only from splatmap painting)
     float slopeBlend = 0.0;
-    
+
     // Add height-based color variation
     float heightBlend = smoothstep(-2.0, 15.0, vHeight);
     baseColor = mix(baseColor * 0.92, baseColor * 1.08, heightBlend);
-    
+
     // ==========================================================
     // MACRO VARIATION: Apply large-scale color/brightness variation
     // This breaks up tiling patterns at world scale
@@ -801,7 +781,7 @@ void main() {
     baseColor = applyMacroVariation(baseColor, macroVar);
 
     // Lighting - apply normal maps for textured materials
-    
+
     // Get tangent-space normals from textures (planar)
     vec3 rockNormalPlanar = hexRockNormal(hexUV);
     vec3 dirtNormalTex = getDirtNormal(texUV);
@@ -823,7 +803,7 @@ void main() {
         worldNormalY * triUVs.weights.y +
         worldNormalZ * triUVs.weights.z
     );
-    
+
     // Transform planar normals from tangent space to world space using TBN matrix
     vec3 rockPerturbedPlanar = vTBN * rockNormalPlanar;
     vec3 dirtPerturbedNormal = vTBN * dirtNormalTex;
@@ -844,7 +824,7 @@ void main() {
         dirtPerturbedNormal * dirtWeight +
         grassPerturbedNormal * grassWeight
     );
-    
+
     // Apply macro normal variation for world-scale undulations
     vec3 normal = calculateMacroNormal(worldPos, perturbedNormal, macroVar.normalStrength);
 
@@ -1010,130 +990,74 @@ void main() {
 // Counter for unique material IDs
 let terrainMaterialCounter = 0;
 
-export function createTerrainMaterial(scene: Scene, splatData: Float32Array, resolution: number): ShaderMaterial {
+export function createTerrainMaterial(splatTexture: THREE.Texture, waterMaskTexture: THREE.Texture, terrainSize: number): THREE.ShaderMaterial {
   console.log("[TerrainShader] Creating terrain shader material...");
 
-  // Use unique name to prevent any caching issues
-  const uniqueName = `terrainShader_${++terrainMaterialCounter}_${Date.now()}`;
-  const material = new ShaderMaterial(
-    uniqueName,
-    scene,
-    {
-      vertex: "terrain",
-      fragment: "terrain",
-    },
-    {
-      attributes: ["position", "normal", "uv"],
-      uniforms: [
-        "worldViewProjection",
-        "world",
-        "cameraPosition",
-        "uSunDirection",
-        "uSunColor",
-        "uAmbientIntensity",
-        "uTerrainSize",
-        "uGrassColor",
-        "uDirtColor",
-        "uRockColor",
-        "uSandColor",
-        "uTextureScale",
-        "uNormalStrength",
-        "uDispStrength",
-        "uFogColor",
-        "uFogDensity",
-        "uFogStart",
-        "uFogHeightFalloff",
-        "uFogHeightDensity",
-        "uWaterLevel",
-        "uTime",
-        "uUseSplatMap",
-        "uDebugMode",
-      ],
-      samplers: [
-        "uSplatMap",
-        "uWaterMask",
-        "uRockDiffuse",
-        "uRockNormal",
-        "uRockDisp",
-        "uRockARM",
-        "uDirtDiffuse",
-        "uDirtNormal",
-        "uDirtDisp",
-        "uGrassDiffuse",
-        "uGrassNormal",
-        "uGrassARM",
-        "uGrassDisp",
-      ],
-    }
-  );
+  const sunDir = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
 
-  // Create splat map texture
-  const splatTexture = createSplatTexture(scene, splatData, resolution);
+  const uniforms: Record<string, { value: unknown }> = {
+    // Sun / lighting
+    uSunDirection: { value: sunDir },
+    uSunColor: { value: new THREE.Color(1.0, 0.95, 0.85) },
+    uAmbientIntensity: { value: 0.4 },
 
-  // Set uniforms
-  material.setVector3("uSunDirection", new Vector3(0.5, 0.8, 0.3).normalize());
-  material.setColor3("uSunColor", new Color3(1.0, 0.95, 0.85));
-  material.setFloat("uAmbientIntensity", 0.4);
-  material.setTexture("uSplatMap", splatTexture);
-  material.setFloat("uTerrainSize", 64);
+    // Splat / water
+    uSplatMap: { value: splatTexture },
+    uWaterMask: { value: waterMaskTexture },
+    uTerrainSize: { value: terrainSize },
 
-  // Material colors - fallback for procedural patterns
-  material.setColor3("uGrassColor", new Color3(0.4, 0.6, 0.25));   // Bright green grass
-  material.setColor3("uDirtColor", new Color3(0.52, 0.42, 0.28));  // Warm brown dirt
-  material.setColor3("uRockColor", new Color3(0.48, 0.48, 0.5));   // Gray rock (fallback)
-  material.setColor3("uSandColor", new Color3(0.82, 0.72, 0.52));  // Warm sandy yellow
+    // Material colors (fallback)
+    uGrassColor: { value: new THREE.Color(0.4, 0.6, 0.25) },
+    uDirtColor: { value: new THREE.Color(0.52, 0.42, 0.28) },
+    uRockColor: { value: new THREE.Color(0.48, 0.48, 0.5) },
+    uSandColor: { value: new THREE.Color(0.82, 0.72, 0.52) },
 
-  // Load rock textures (supports KTX2 when available)
-  material.setTexture("uRockDiffuse", loadTerrainTexture("/textures/rock_diff", scene));
-  material.setTexture("uRockNormal", loadTerrainTexture("/textures/rock_nor", scene));
-  material.setTexture("uRockDisp", loadTerrainTexture("/textures/rock_disp", scene));
-  material.setTexture("uRockARM", loadTerrainTexture("/textures/rock_arm", scene));
+    // Rock textures
+    uRockDiffuse: { value: loadTerrainTexture("/textures/rock_diff") },
+    uRockNormal: { value: loadTerrainTexture("/textures/rock_nor") },
+    uRockDisp: { value: loadTerrainTexture("/textures/rock_disp") },
+    uRockARM: { value: loadTerrainTexture("/textures/rock_arm") },
 
-  // Load dirt textures (dry mud)
-  material.setTexture("uDirtDiffuse", loadTerrainTexture("/textures/dirt_diffuse", scene));
-  material.setTexture("uDirtNormal", loadTerrainTexture("/textures/dirt_normal", scene));
-  material.setTexture("uDirtDisp", loadTerrainTexture("/textures/dirt_disp", scene));
+    // Dirt textures
+    uDirtDiffuse: { value: loadTerrainTexture("/textures/dirt_diffuse") },
+    uDirtNormal: { value: loadTerrainTexture("/textures/dirt_normal") },
+    uDirtDisp: { value: loadTerrainTexture("/textures/dirt_disp") },
 
-  // Load grass textures (coastal grass)
-  material.setTexture("uGrassDiffuse", loadTerrainTexture("/textures/grass_diff", scene));
-  material.setTexture("uGrassNormal", loadTerrainTexture("/textures/grass_nor", scene));
-  material.setTexture("uGrassARM", loadTerrainTexture("/textures/grass_arm", scene));
-  material.setTexture("uGrassDisp", loadTerrainTexture("/textures/grass_disp", scene));
+    // Grass textures
+    uGrassDiffuse: { value: loadTerrainTexture("/textures/grass_diff") },
+    uGrassNormal: { value: loadTerrainTexture("/textures/grass_nor") },
+    uGrassARM: { value: loadTerrainTexture("/textures/grass_arm") },
+    uGrassDisp: { value: loadTerrainTexture("/textures/grass_disp") },
 
-  // Texture tiling scale (higher = smaller texture, more repeats)
-  material.setFloat("uTextureScale", 1.0);  // 1.0 = texture repeats every 1 world unit (matches original texture size)
-  material.setFloat("uNormalStrength", 1.5);  // Normal map intensity (1.0 = standard, higher = more depth)
-  material.setFloat("uDispStrength", 0.2);  // Vertex displacement strength for rock areas
+    // Texture settings
+    uTextureScale: { value: 1.0 },
+    uNormalStrength: { value: 1.5 },
+    uDispStrength: { value: 0.2 },
 
-  // Fog settings
-  material.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
-  material.setFloat("uFogDensity", 0.008);
-  material.setFloat("uFogStart", 50);
-  material.setFloat("uFogHeightFalloff", 5.0);    // Height fog starts below this altitude
-  material.setFloat("uFogHeightDensity", 0.1);    // Height fog decay rate
+    // Fog
+    uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+    uFogDensity: { value: 0.008 },
+    uFogStart: { value: 50 },
+    uFogHeightFalloff: { value: 5.0 },
+    uFogHeightDensity: { value: 0.1 },
 
-  // Water/underwater settings
-  material.setFloat("uWaterLevel", -100);  // Default below terrain, updated by EditorEngine when water is active
-  material.setFloat("uTime", 0);
+    // Water / underwater
+    uWaterLevel: { value: -100 },
+    uTime: { value: 0 },
 
-  // Debug settings
-  material.setFloat("uUseSplatMap", 1.0);  // Default: splatmap enabled
-  material.setInt("uDebugMode", 0);  // Default: normal rendering
-
-  material.backFaceCulling = false;
-
-  // Check for shader compilation errors
-  material.onError = (effect, errors) => {
-    console.error("[TerrainShader] Shader compilation error:", errors);
+    // Debug
+    uUseSplatMap: { value: 1.0 },
+    uDebugMode: { value: 0 },
   };
 
-  // Bind camera position on each render
-  material.onBindObservable.add((mesh) => {
-    const camera = scene.activeCamera;
-    if (camera) {
-      material.setVector3("cameraPosition", camera.position);
-    }
+  const material = new THREE.ShaderMaterial({
+    vertexShader: terrainVertexShader,
+    fragmentShader: terrainFragmentShader,
+    uniforms,
+    side: THREE.DoubleSide,
   });
+
+  material.name = `terrainShader_${++terrainMaterialCounter}_${Date.now()}`;
 
   console.log("[TerrainShader] Shader material created");
   return material;
@@ -1142,39 +1066,37 @@ export function createTerrainMaterial(scene: Scene, splatData: Float32Array, res
 // Counter for unique texture IDs
 let splatTextureCounter = 0;
 
-export function createSplatTexture(scene: Scene, splatData: Float32Array, resolution: number): RawTexture {
+export function createSplatTexture(splatData: Float32Array, resolution: number): THREE.DataTexture {
   // Convert Float32 RGBA to Uint8 RGBA
   const uint8Data = new Uint8Array(resolution * resolution * 4);
   for (let i = 0; i < resolution * resolution * 4; i++) {
     uint8Data[i] = Math.floor(splatData[i] * 255);
   }
 
-  const texture = new RawTexture(
+  const texture = new THREE.DataTexture(
     uint8Data,
     resolution,
     resolution,
-    Engine.TEXTUREFORMAT_RGBA,
-    scene,
-    false,
-    false,
-    Texture.BILINEAR_SAMPLINGMODE
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType
   );
 
   // Give unique name to prevent any caching issues
   texture.name = `splatTexture_${++splatTextureCounter}_${Date.now()}`;
-  texture.wrapU = Texture.CLAMP_ADDRESSMODE;
-  texture.wrapV = Texture.CLAMP_ADDRESSMODE;
-
-  // Force immediate GPU upload
-  texture.update(uint8Data);
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
 
   return texture;
 }
 
-export function updateSplatTexture(texture: RawTexture, splatData: Float32Array, resolution: number): void {
+export function updateSplatTexture(texture: THREE.DataTexture, splatData: Float32Array, resolution: number): void {
   const uint8Data = new Uint8Array(resolution * resolution * 4);
   for (let i = 0; i < resolution * resolution * 4; i++) {
     uint8Data[i] = Math.floor(splatData[i] * 255);
   }
-  texture.update(uint8Data);
+  texture.image = { data: uint8Data, width: resolution, height: resolution };
+  texture.needsUpdate = true;
 }

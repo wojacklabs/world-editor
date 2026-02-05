@@ -1,13 +1,4 @@
-import {
-  Scene,
-  Vector3,
-  Color3,
-  Color4,
-  ShaderMaterial,
-  DirectionalLight,
-  HemisphericLight,
-  Observer,
-} from "@babylonjs/core";
+import * as THREE from "three";
 import { ProceduralSkyShader } from "./ProceduralSkyShader";
 import { CloudSystem } from "./CloudSystem";
 import { PrecipitationSystem, type PrecipitationType } from "./PrecipitationSystem";
@@ -69,36 +60,39 @@ const WEATHER_PRESETS: Record<WeatherPreset, WeatherConfig> = {
 };
 
 export class SkyWeatherSystem {
-  private scene: Scene;
+  private scene: any;
   private skyShader: ProceduralSkyShader | null = null;
   private cloudSystem: CloudSystem | null = null;
   private precipitationSystem: PrecipitationSystem | null = null;
   private lightningSystem: LightningSystem | null = null;
-  private renderObserver: Observer<Scene> | null = null;
 
   // Current state
   private state: WeatherState;
   private isGameMode: boolean = false;
 
   // Computed values (derived from state)
-  private sunDirection: Vector3 = new Vector3(0.5, 0.8, 0.3).normalize();
-  private sunColor: Color3 = new Color3(1.0, 0.95, 0.85);
+  private sunDirection: THREE.Vector3 = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+  private sunColor: THREE.Color = new THREE.Color(1.0, 0.95, 0.85);
   private ambientIntensity: number = 0.4;
-  private fogColor: Color3 = new Color3(0.6, 0.75, 0.9);
+  private fogColor: THREE.Color = new THREE.Color(0.6, 0.75, 0.9);
   private fogDensity: number = 0.008;
   private nightFactor: number = 0;
 
   // References to external systems for synchronization
-  private terrainMaterial: ShaderMaterial | null = null;
-  private waterMaterial: ShaderMaterial | null = null;
+  // TODO: Restore THREE.ShaderMaterial type after EditorEngine migration
+  private terrainMaterial: any = null;
+  private waterMaterial: any = null;
   private foliageSystem: FoliageSystem | null = null;
-  private directionalLight: DirectionalLight | null = null;
-  private hemisphericLight: HemisphericLight | null = null;
+  private directionalLight: THREE.DirectionalLight | null = null;
+  private hemisphericLight: THREE.HemisphereLight | null = null;
+
+  // Stored camera reference
+  private camera: THREE.Camera | null = null;
 
   // Dirty flag for batched updates
   private shadersDirty: boolean = true;
 
-  constructor(scene: Scene, initialState?: Partial<WeatherState>) {
+  constructor(scene: any, initialState?: Partial<WeatherState>) {
     this.scene = scene;
     this.state = {
       timeOfDay: 12,
@@ -137,28 +131,49 @@ export class SkyWeatherSystem {
     // Calculate initial values
     this.recalculateDerivedValues();
     this.syncAllShaders();
-
-    // Register update loop
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      this.update();
-    });
   }
 
   private findSceneLights(): void {
-    for (const light of this.scene.lights) {
-      if (light instanceof DirectionalLight && !this.directionalLight) {
-        this.directionalLight = light;
-      } else if (light instanceof HemisphericLight && !this.hemisphericLight) {
-        this.hemisphericLight = light;
+    this.scene.traverse((child: THREE.Object3D) => {
+      if (child instanceof THREE.DirectionalLight && !this.directionalLight) {
+        this.directionalLight = child;
+      } else if (child instanceof THREE.HemisphereLight && !this.hemisphericLight) {
+        this.hemisphericLight = child;
       }
+    });
+  }
+
+  /** Set camera reference for subsystems */
+  setCamera(camera: THREE.Camera | null): void {
+    this.camera = camera;
+    if (this.precipitationSystem) {
+      this.precipitationSystem.setCamera(camera);
+    }
+    if (this.lightningSystem) {
+      this.lightningSystem.setCamera(camera);
     }
   }
 
-  private update(): void {
+  /** Call each frame from the render loop */
+  update(): void {
     if (this.shadersDirty) {
       this.recalculateDerivedValues();
       this.syncAllShaders();
       this.shadersDirty = false;
+    }
+
+    // Update subsystems each frame
+    if (this.skyShader) {
+      this.skyShader.update();
+    }
+    if (this.cloudSystem) {
+      this.cloudSystem.update(this.camera ?? undefined);
+    }
+    if (this.precipitationSystem) {
+      this.precipitationSystem.update();
+    }
+    if (this.lightningSystem) {
+      this.lightningSystem.update();
     }
   }
 
@@ -207,12 +222,13 @@ export class SkyWeatherSystem {
   }
 
   // Register external systems for synchronization
-  setTerrainMaterial(material: ShaderMaterial | null): void {
+  // TODO: Restore THREE.ShaderMaterial type after EditorEngine migration
+  setTerrainMaterial(material: any): void {
     this.terrainMaterial = material;
     this.shadersDirty = true;
   }
 
-  setWaterMaterial(material: ShaderMaterial | null): void {
+  setWaterMaterial(material: any): void {
     this.waterMaterial = material;
     this.shadersDirty = true;
   }
@@ -238,7 +254,7 @@ export class SkyWeatherSystem {
     const elevation = Math.cos(hourAngle) * 0.8;
     const azimuth = Math.sin(hourAngle);
 
-    this.sunDirection = new Vector3(
+    this.sunDirection.set(
       azimuth * 0.5,
       Math.max(elevation, -0.3),
       0.3
@@ -268,14 +284,13 @@ export class SkyWeatherSystem {
     this.fogColor = this.calculateFogColor();
 
     // Calculate fog density
-    const baseFogDensity = this.isGameMode ? 0.015 : 0.008;
     this.fogDensity = this.state.fogDensity * preset.fogDensityMultiplier;
     if (this.nightFactor > 0) {
       this.fogDensity *= 1 + this.nightFactor * 0.5;
     }
   }
 
-  private calculateSunColor(time: number): Color3 {
+  private calculateSunColor(time: number): THREE.Color {
     const sunriseStart = 5, sunriseEnd = 7;
     const sunsetStart = 17, sunsetEnd = 19;
 
@@ -286,25 +301,25 @@ export class SkyWeatherSystem {
       warmth = (time - sunsetStart) / (sunsetEnd - sunsetStart);
     }
 
-    const dayColor = new Color3(1.0, 0.95, 0.85);
-    const warmColor = new Color3(1.0, 0.6, 0.3);
-    const nightColor = new Color3(0.3, 0.35, 0.5);
+    const dayColor = new THREE.Color(1.0, 0.95, 0.85);
+    const warmColor = new THREE.Color(1.0, 0.6, 0.3);
+    const nightColor = new THREE.Color(0.3, 0.35, 0.5);
 
-    let color = Color3.Lerp(dayColor, warmColor, warmth);
-    color = Color3.Lerp(color, nightColor, this.nightFactor);
+    const color = dayColor.clone().lerp(warmColor, warmth);
+    color.lerp(nightColor, this.nightFactor);
 
     // Weather affects sun color
     const preset = WEATHER_PRESETS[this.state.weatherPreset];
-    const gray = new Color3(0.7, 0.7, 0.7);
-    color = Color3.Lerp(color, gray, (1 - preset.sunIntensityMultiplier) * 0.5);
+    const gray = new THREE.Color(0.7, 0.7, 0.7);
+    color.lerp(gray, (1 - preset.sunIntensityMultiplier) * 0.5);
 
     return color;
   }
 
-  private calculateFogColor(): Color3 {
-    const dayFog = new Color3(0.7, 0.8, 0.9);
-    const sunsetFog = new Color3(0.9, 0.7, 0.6);
-    const nightFog = new Color3(0.1, 0.12, 0.18);
+  private calculateFogColor(): THREE.Color {
+    const dayFog = new THREE.Color(0.7, 0.8, 0.9);
+    const sunsetFog = new THREE.Color(0.9, 0.7, 0.6);
+    const nightFog = new THREE.Color(0.1, 0.12, 0.18);
 
     // Calculate warmth for sunrise/sunset
     const time = this.state.timeOfDay;
@@ -313,15 +328,44 @@ export class SkyWeatherSystem {
       warmth = 1 - Math.abs(time - (time < 12 ? 6 : 18));
     }
 
-    let fogColor = Color3.Lerp(dayFog, sunsetFog, warmth);
-    fogColor = Color3.Lerp(fogColor, nightFog, this.nightFactor);
+    const fogColor = dayFog.clone().lerp(sunsetFog, warmth);
+    fogColor.lerp(nightFog, this.nightFactor);
 
     // Weather makes fog grayer
-    const preset = WEATHER_PRESETS[this.state.weatherPreset];
-    const grayFog = new Color3(0.5, 0.55, 0.6);
-    fogColor = Color3.Lerp(fogColor, grayFog, this.state.cloudCoverage * 0.5);
+    const grayFog = new THREE.Color(0.5, 0.55, 0.6);
+    fogColor.lerp(grayFog, this.state.cloudCoverage * 0.5);
 
     return fogColor;
+  }
+
+  /**
+   * Sync uniforms to an external material (Babylon.js or Three.js).
+   * TODO: Remove Babylon.js path after EditorEngine migration.
+   */
+  private syncExternalMaterial(material: any, uniforms: Record<string, any>): void {
+    if (material.uniforms) {
+      // Three.js ShaderMaterial
+      for (const [key, val] of Object.entries(uniforms)) {
+        const u = material.uniforms[key];
+        if (!u) continue;
+        if (typeof val === "number") {
+          u.value = val;
+        } else if (val && typeof val.clone === "function") {
+          u.value.copy(val);
+        }
+      }
+    } else if (typeof material.setFloat === "function") {
+      // Babylon.js ShaderMaterial
+      for (const [key, val] of Object.entries(uniforms)) {
+        if (typeof val === "number") {
+          material.setFloat(key, val);
+        } else if (val && val.z !== undefined && val.y !== undefined && val.x !== undefined && val.w === undefined) {
+          if (typeof material.setVector3 === "function") material.setVector3(key, val);
+        } else if (val && val.r !== undefined) {
+          if (typeof material.setColor3 === "function") material.setColor3(key, val);
+        }
+      }
+    }
   }
 
   // Synchronize all shaders with current values
@@ -342,20 +386,26 @@ export class SkyWeatherSystem {
     }
 
     // Update terrain shader
+    // TODO: Switch to Three.js uniform access after EditorEngine migration
     if (this.terrainMaterial) {
-      this.terrainMaterial.setVector3("uSunDirection", this.sunDirection);
-      this.terrainMaterial.setColor3("uSunColor", this.sunColor);
-      this.terrainMaterial.setFloat("uAmbientIntensity", this.ambientIntensity);
-      this.terrainMaterial.setColor3("uFogColor", this.fogColor);
-      this.terrainMaterial.setFloat("uFogDensity", this.fogDensity);
+      this.syncExternalMaterial(this.terrainMaterial, {
+        uSunDirection: this.sunDirection,
+        uSunColor: this.sunColor,
+        uAmbientIntensity: this.ambientIntensity,
+        uFogColor: this.fogColor,
+        uFogDensity: this.fogDensity,
+      });
     }
 
     // Update water shader
+    // TODO: Switch to Three.js uniform access after EditorEngine migration
     if (this.waterMaterial) {
-      this.waterMaterial.setVector3("uSunDirection", this.sunDirection);
-      this.waterMaterial.setColor3("uSunColor", this.sunColor);
-      this.waterMaterial.setColor3("uFogColor", this.fogColor);
-      this.waterMaterial.setFloat("uFogDensity", this.fogDensity);
+      this.syncExternalMaterial(this.waterMaterial, {
+        uSunDirection: this.sunDirection,
+        uSunColor: this.sunColor,
+        uFogColor: this.fogColor,
+        uFogDensity: this.fogDensity,
+      });
     }
 
     // Update foliage system
@@ -405,8 +455,10 @@ export class SkyWeatherSystem {
     const preset = WEATHER_PRESETS[this.state.weatherPreset];
 
     if (this.directionalLight) {
-      this.directionalLight.direction = this.sunDirection.negate();
-      this.directionalLight.diffuse = this.sunColor;
+      // Three.js DirectionalLight: position is where the light comes FROM, it shines toward (0,0,0) by default
+      const negDir = this.sunDirection.clone().negate();
+      this.directionalLight.position.copy(negDir);
+      this.directionalLight.color.copy(this.sunColor);
       this.directionalLight.intensity = 0.6 * preset.sunIntensityMultiplier * (1 - this.nightFactor * 0.8);
     }
 
@@ -414,25 +466,31 @@ export class SkyWeatherSystem {
       this.hemisphericLight.intensity = this.ambientIntensity;
       // Adjust ground color for night
       const groundBrightness = 0.3 - this.nightFactor * 0.2;
-      this.hemisphericLight.groundColor = new Color3(groundBrightness, groundBrightness, groundBrightness + 0.05);
+      this.hemisphericLight.groundColor.setRGB(
+        groundBrightness,
+        groundBrightness,
+        groundBrightness + 0.05
+      );
     }
   }
 
   private updateSceneSettings(): void {
     // Update clear color to match sky horizon
     const horizonColor = this.skyShader?.getHorizonColor() || this.fogColor;
-    this.scene.clearColor = new Color4(
-      horizonColor.r,
-      horizonColor.g,
-      horizonColor.b,
-      1.0
-    );
+    if (this.scene.background instanceof THREE.Color) {
+      this.scene.background.copy(horizonColor);
+    } else {
+      this.scene.background = horizonColor.clone();
+    }
 
     // Update scene fog (for built-in fog mode)
     if (this.isGameMode) {
-      this.scene.fogMode = Scene.FOGMODE_EXP2;
-      this.scene.fogDensity = this.fogDensity;
-      this.scene.fogColor = this.fogColor;
+      if (this.scene.fog instanceof THREE.FogExp2) {
+        this.scene.fog.color.copy(this.fogColor);
+        this.scene.fog.density = this.fogDensity;
+      } else {
+        this.scene.fog = new THREE.FogExp2(this.fogColor, this.fogDensity);
+      }
     }
   }
 
@@ -441,15 +499,15 @@ export class SkyWeatherSystem {
     return { ...this.state };
   }
 
-  getSunDirection(): Vector3 {
+  getSunDirection(): any {
     return this.sunDirection.clone();
   }
 
-  getSunColor(): Color3 {
+  getSunColor(): any {
     return this.sunColor.clone();
   }
 
-  getFogColor(): Color3 {
+  getFogColor(): any {
     return this.fogColor.clone();
   }
 
@@ -465,17 +523,17 @@ export class SkyWeatherSystem {
     return this.nightFactor;
   }
 
-  getSkyHorizonColor(): Color3 {
+  getSkyHorizonColor(): any {
     return this.skyShader?.getHorizonColor() || this.fogColor;
   }
 
-  getSkyZenithColor(): Color3 {
-    return this.skyShader?.getZenithColor() || new Color3(0.35, 0.55, 0.9);
+  getSkyZenithColor(): any {
+    return this.skyShader?.getZenithColor() || new THREE.Color(0.35, 0.55, 0.9);
   }
 
-  getWindDirection(): Vector3 {
+  getWindDirection(): THREE.Vector3 {
     const rad = (this.state.windDirection * Math.PI) / 180;
-    return new Vector3(Math.cos(rad), 0, Math.sin(rad));
+    return new THREE.Vector3(Math.cos(rad), 0, Math.sin(rad));
   }
 
   getWindSpeed(): number {
@@ -497,11 +555,6 @@ export class SkyWeatherSystem {
   }
 
   dispose(): void {
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
-    }
-
     if (this.skyShader) {
       this.skyShader.dispose();
       this.skyShader = null;

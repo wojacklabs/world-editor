@@ -1,34 +1,20 @@
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  ShaderMaterial,
-  Vector3,
-  Vector2,
-  Color3,
-  Effect,
-  Observer,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 
-// Register sky shaders with integrated procedural clouds
-Effect.ShadersStore["proceduralSkyVertexShader"] = `
-precision highp float;
-
-attribute vec3 position;
-
-uniform mat4 worldViewProjection;
-
+// Sky vertex shader
+const proceduralSkyVertexShader = `
 varying vec3 vWorldPosition;
 varying vec3 vViewDirection;
 
 void main() {
     vWorldPosition = position;
     vViewDirection = normalize(position);
-    gl_Position = worldViewProjection * vec4(position, 1.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }
 `;
 
-Effect.ShadersStore["proceduralSkyFragmentShader"] = `
+// Sky fragment shader with integrated procedural clouds
+const proceduralSkyFragmentShader = `
 precision highp float;
 
 varying vec3 vWorldPosition;
@@ -381,8 +367,6 @@ void main() {
 }
 `;
 
-let skyShaderCounter = 0;
-
 export interface SkyShaderConfig {
   radius: number;
   segments: number;
@@ -394,15 +378,14 @@ const DEFAULT_CONFIG: SkyShaderConfig = {
 };
 
 export class ProceduralSkyShader {
-  private scene: Scene;
-  private skyMesh: Mesh | null = null;
-  private skyMaterial: ShaderMaterial | null = null;
+  private scene: any;
+  private skyMesh: THREE.Mesh | null = null;
+  private skyMaterial: THREE.ShaderMaterial | null = null;
   private config: SkyShaderConfig;
-  private renderObserver: Observer<Scene> | null = null;
 
   // Uniforms
-  private sunDirection: Vector3 = new Vector3(0.5, 0.8, 0.3).normalize();
-  private sunColor: Color3 = new Color3(1.0, 0.95, 0.85);
+  private sunDirection: THREE.Vector3 = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+  private sunColor: THREE.Color = new THREE.Color(1.0, 0.95, 0.85);
   private timeOfDay: number = 12;
   private cloudCoverage: number = 0.3;
   private hazeIntensity: number = 0.3;
@@ -410,12 +393,12 @@ export class ProceduralSkyShader {
   private precipitationIntensity: number = 0;
 
   // Cloud animation
-  private windOffset: Vector2 = new Vector2(0, 0);
+  private windOffset: THREE.Vector2 = new THREE.Vector2(0, 0);
   private windSpeed: number = 0.2;
   private windDirection: number = 45; // degrees
   private startTime: number = 0;
 
-  constructor(scene: Scene, config: Partial<SkyShaderConfig> = {}) {
+  constructor(scene: any, config: Partial<SkyShaderConfig> = {}) {
     this.scene = scene;
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.startTime = performance.now() / 1000;
@@ -427,86 +410,50 @@ export class ProceduralSkyShader {
 
     if (this.skyMesh && this.skyMaterial) {
       this.skyMesh.material = this.skyMaterial;
+      this.scene.add(this.skyMesh);
     }
-
-    // Animation update loop
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      this.updateAnimation();
-    });
   }
 
   private createSkyMesh(): void {
-    // Create inverted sphere (normals pointing inward)
-    this.skyMesh = MeshBuilder.CreateSphere(
-      "proceduralSky",
-      {
-        diameter: this.config.radius * 2,
-        segments: this.config.segments,
-        sideOrientation: Mesh.BACKSIDE, // Render inside
-      },
-      this.scene
+    const geo = new THREE.SphereGeometry(
+      this.config.radius,
+      this.config.segments,
+      this.config.segments
     );
 
-    // Disable picking and shadow casting
-    this.skyMesh.isPickable = false;
-    this.skyMesh.receiveShadows = false;
+    // Placeholder material, replaced after createSkyMaterial
+    this.skyMesh = new THREE.Mesh(geo);
+
+    // Disable raycasting
+    this.skyMesh.raycast = () => {};
 
     // Render before everything else
-    this.skyMesh.renderingGroupId = 0;
-    this.skyMesh.infiniteDistance = true;
+    this.skyMesh.renderOrder = -1000;
   }
 
   private createSkyMaterial(): void {
-    const uniqueName = `proceduralSky_${++skyShaderCounter}_${Date.now()}`;
-
-    this.skyMaterial = new ShaderMaterial(
-      uniqueName,
-      this.scene,
-      {
-        vertex: "proceduralSky",
-        fragment: "proceduralSky",
+    this.skyMaterial = new THREE.ShaderMaterial({
+      vertexShader: proceduralSkyVertexShader,
+      fragmentShader: proceduralSkyFragmentShader,
+      uniforms: {
+        uSunDirection: { value: this.sunDirection.clone() },
+        uSunColor: { value: this.sunColor.clone() },
+        uTimeOfDay: { value: this.timeOfDay },
+        uCloudCoverage: { value: this.cloudCoverage },
+        uHazeIntensity: { value: this.hazeIntensity },
+        uNightFactor: { value: this.nightFactor },
+        uWindOffset: { value: this.windOffset.clone() },
+        uCloudTime: { value: 0 },
+        uPrecipitationIntensity: { value: this.precipitationIntensity },
       },
-      {
-        attributes: ["position"],
-        uniforms: [
-          "worldViewProjection",
-          "uSunDirection",
-          "uSunColor",
-          "uTimeOfDay",
-          "uCloudCoverage",
-          "uHazeIntensity",
-          "uNightFactor",
-          "uWindOffset",
-          "uCloudTime",
-          "uPrecipitationIntensity",
-        ],
-      }
-    );
-
-    // Disable depth write so sky is always behind everything
-    this.skyMaterial.backFaceCulling = false;
-    this.skyMaterial.disableDepthWrite = true;
-
-    // Set initial uniforms
-    this.updateUniforms();
-
-    this.skyMaterial.onError = (effect, errors) => {
-      console.error("[ProceduralSkyShader] Shader compile error:", errors);
-    };
+      side: THREE.BackSide,
+      depthWrite: false,
+    });
   }
 
-  private updateUniforms(): void {
-    if (!this.skyMaterial) return;
-
-    this.skyMaterial.setVector3("uSunDirection", this.sunDirection);
-    this.skyMaterial.setColor3("uSunColor", this.sunColor);
-    this.skyMaterial.setFloat("uTimeOfDay", this.timeOfDay);
-    this.skyMaterial.setFloat("uCloudCoverage", this.cloudCoverage);
-    this.skyMaterial.setFloat("uHazeIntensity", this.hazeIntensity);
-    this.skyMaterial.setFloat("uNightFactor", this.nightFactor);
-    this.skyMaterial.setVector2("uWindOffset", this.windOffset);
-    this.skyMaterial.setFloat("uCloudTime", 0);
-    this.skyMaterial.setFloat("uPrecipitationIntensity", this.precipitationIntensity);
+  /** Call each frame to animate clouds */
+  update(): void {
+    this.updateAnimation();
   }
 
   private updateAnimation(): void {
@@ -516,55 +463,54 @@ export class ProceduralSkyShader {
     const elapsed = currentTime - this.startTime;
 
     // Update wind offset for cloud movement
-    // Increased multiplier from 0.02 to 0.15 for visible movement
     const windRad = (this.windDirection * Math.PI) / 180;
     this.windOffset.x = Math.cos(windRad) * elapsed * this.windSpeed * 0.15;
     this.windOffset.y = Math.sin(windRad) * elapsed * this.windSpeed * 0.15;
 
-    this.skyMaterial.setVector2("uWindOffset", this.windOffset);
-    this.skyMaterial.setFloat("uCloudTime", elapsed);
+    this.skyMaterial.uniforms.uWindOffset.value.copy(this.windOffset);
+    this.skyMaterial.uniforms.uCloudTime.value = elapsed;
   }
 
   // Public setters
-  setSunDirection(direction: Vector3): void {
-    this.sunDirection = direction.normalize();
+  setSunDirection(direction: THREE.Vector3): void {
+    this.sunDirection.copy(direction).normalize();
     if (this.skyMaterial) {
-      this.skyMaterial.setVector3("uSunDirection", this.sunDirection);
+      this.skyMaterial.uniforms.uSunDirection.value.copy(this.sunDirection);
     }
   }
 
-  setSunColor(color: Color3): void {
-    this.sunColor = color;
+  setSunColor(color: THREE.Color): void {
+    this.sunColor.copy(color);
     if (this.skyMaterial) {
-      this.skyMaterial.setColor3("uSunColor", this.sunColor);
+      this.skyMaterial.uniforms.uSunColor.value.copy(this.sunColor);
     }
   }
 
   setTimeOfDay(time: number): void {
     this.timeOfDay = time;
     if (this.skyMaterial) {
-      this.skyMaterial.setFloat("uTimeOfDay", time);
+      this.skyMaterial.uniforms.uTimeOfDay.value = time;
     }
   }
 
   setCloudCoverage(coverage: number): void {
     this.cloudCoverage = coverage;
     if (this.skyMaterial) {
-      this.skyMaterial.setFloat("uCloudCoverage", coverage);
+      this.skyMaterial.uniforms.uCloudCoverage.value = coverage;
     }
   }
 
   setHazeIntensity(intensity: number): void {
     this.hazeIntensity = intensity;
     if (this.skyMaterial) {
-      this.skyMaterial.setFloat("uHazeIntensity", intensity);
+      this.skyMaterial.uniforms.uHazeIntensity.value = intensity;
     }
   }
 
   setNightFactor(factor: number): void {
     this.nightFactor = factor;
     if (this.skyMaterial) {
-      this.skyMaterial.setFloat("uNightFactor", factor);
+      this.skyMaterial.uniforms.uNightFactor.value = factor;
     }
   }
 
@@ -579,56 +525,51 @@ export class ProceduralSkyShader {
   setPrecipitationIntensity(intensity: number): void {
     this.precipitationIntensity = intensity;
     if (this.skyMaterial) {
-      this.skyMaterial.setFloat("uPrecipitationIntensity", intensity);
+      this.skyMaterial.uniforms.uPrecipitationIntensity.value = intensity;
     }
   }
 
   // Get current sky color at horizon for fog matching
-  getHorizonColor(): Color3 {
+  getHorizonColor(): THREE.Color {
     // Approximate horizon color based on sun position and time
-    const dayHorizon = new Color3(0.7, 0.8, 0.9);
-    const sunsetHorizon = new Color3(0.9, 0.6, 0.4);
-    const nightHorizon = new Color3(0.02, 0.03, 0.05);
+    const dayHorizon = new THREE.Color(0.7, 0.8, 0.9);
+    const sunsetHorizon = new THREE.Color(0.9, 0.6, 0.4);
+    const nightHorizon = new THREE.Color(0.02, 0.03, 0.05);
 
     // Calculate warmth based on sun angle
     const sunElevation = this.sunDirection.y;
     const warmth = Math.max(0, 1 - Math.abs(sunElevation) * 2);
 
-    let horizonColor = Color3.Lerp(dayHorizon, sunsetHorizon, warmth);
-    horizonColor = Color3.Lerp(horizonColor, nightHorizon, this.nightFactor);
+    const horizonColor = dayHorizon.clone().lerp(sunsetHorizon, warmth);
+    horizonColor.lerp(nightHorizon, this.nightFactor);
 
     return horizonColor;
   }
 
   // Get zenith color for gradient effects
-  getZenithColor(): Color3 {
-    const dayZenith = new Color3(0.35, 0.55, 0.9);
-    const nightZenith = new Color3(0.01, 0.015, 0.03);
-    return Color3.Lerp(dayZenith, nightZenith, this.nightFactor);
+  getZenithColor(): THREE.Color {
+    const dayZenith = new THREE.Color(0.35, 0.55, 0.9);
+    const nightZenith = new THREE.Color(0.01, 0.015, 0.03);
+    return dayZenith.clone().lerp(nightZenith, this.nightFactor);
   }
 
-  getMesh(): Mesh | null {
+  getMesh(): THREE.Mesh | null {
     return this.skyMesh;
   }
 
-  getMaterial(): ShaderMaterial | null {
+  getMaterial(): THREE.ShaderMaterial | null {
     return this.skyMaterial;
   }
 
   setEnabled(enabled: boolean): void {
     if (this.skyMesh) {
-      this.skyMesh.setEnabled(enabled);
+      this.skyMesh.visible = enabled;
     }
   }
 
   dispose(): void {
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
-    }
-
     if (this.skyMesh) {
-      this.skyMesh.dispose();
+      disposeMesh(this.scene, this.skyMesh);
       this.skyMesh = null;
     }
     // Don't dispose shared material

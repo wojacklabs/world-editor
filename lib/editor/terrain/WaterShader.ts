@@ -15,23 +15,7 @@
  * - Reduced mesh subdivisions (64 vs 128)
  */
 
-import {
-  Scene,
-  Mesh,
-  MeshBuilder,
-  Vector2,
-  Vector3,
-  Vector4,
-  Color3,
-  Color4,
-  Texture,
-  RawTexture,
-  ShaderMaterial,
-  Effect,
-  Constants,
-  MirrorTexture,
-  Plane,
-} from "@babylonjs/core";
+import * as THREE from "three";
 import { Heightmap } from "./Heightmap";
 
 // ============================================
@@ -40,14 +24,6 @@ import { Heightmap } from "./Heightmap";
 const waterVertexShader = `
 precision highp float;
 
-attribute vec3 position;
-attribute vec3 normal;
-attribute vec2 uv;
-
-uniform mat4 world;
-uniform mat4 view;
-uniform mat4 projection;
-uniform mat4 viewProjection;
 uniform float uTime;
 uniform float uWaterLevel;
 
@@ -55,9 +31,6 @@ uniform vec4 uWave0;
 uniform vec4 uWave1;
 uniform vec4 uWave2;
 uniform vec4 uWave3;
-
-// Camera position (avoid inverse(view) per vertex)
-uniform vec3 uCameraPosition;
 
 // Wave direction rotation (radians)
 uniform float uWaveAngle;
@@ -98,7 +71,7 @@ vec3 gerstnerWave(vec4 wave, vec3 p) {
 }
 
 void main() {
-    vec3 worldPos = (world * vec4(position, 1.0)).xyz;
+    vec3 worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
     vOrigXZ = worldPos.xz;
 
     // Sample terrain height for depth-based wave attenuation
@@ -131,10 +104,10 @@ void main() {
     vNormal = vec3(0.0, 1.0, 0.0);
     vUV = uv;
 
-    vec4 clipPos = viewProjection * vec4(worldPos, 1.0);
+    vec4 clipPos = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
     vScreenPos = clipPos;
 
-    vViewVector = normalize(uCameraPosition - worldPos);
+    vViewVector = normalize(cameraPosition - worldPos);
 
     gl_Position = clipPos;
 }
@@ -159,7 +132,6 @@ uniform float uTime;
 uniform float uWaterLevel;
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
-uniform vec3 uCameraPosition;
 
 uniform vec4 uWave0;
 uniform vec4 uWave1;
@@ -301,7 +273,7 @@ void main() {
     alpha = clamp(alpha, 0.0, 0.98);
 
     // Distance fog (matches terrain/foliage exponential squared fog)
-    float distanceToCamera = length(vWorldPos - uCameraPosition);
+    float distanceToCamera = length(vWorldPos - cameraPosition);
     float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
     float fogFactor = clamp(distanceFog, 0.0, 1.0);
     color = mix(color, uFogColor, fogFactor);
@@ -310,15 +282,11 @@ void main() {
 }
 `;
 
-// Register shaders
-Effect.ShadersStore["enterpriseWaterVertexShader"] = waterVertexShader;
-Effect.ShadersStore["enterpriseWaterFragmentShader"] = waterFragmentShader;
-
 /**
  * Gerstner Wave Configuration
  */
 interface GerstnerWave {
-  direction: Vector2;
+  direction: THREE.Vector2;
   steepness: number;
   wavelength: number;
 }
@@ -328,9 +296,9 @@ interface GerstnerWave {
  */
 export interface WaterConfig {
   // Colors
-  shallowColor: Color3;
-  deepColor: Color3;
-  fresnelColor: Color3;
+  shallowColor: THREE.Color;
+  deepColor: THREE.Color;
+  fresnelColor: THREE.Color;
 
   // Waves
   waves: GerstnerWave[];
@@ -355,15 +323,15 @@ export interface WaterConfig {
  * Default configuration for realistic ocean water
  */
 export const DEFAULT_WATER_CONFIG: WaterConfig = {
-  shallowColor: new Color3(0.04, 0.12, 0.15),  // Dark teal undertone (reflections dominate)
-  deepColor: new Color3(0.01, 0.04, 0.08),    // Near-black deep water
-  fresnelColor: new Color3(0.45, 0.65, 0.75),  // More vibrant reflection color
+  shallowColor: new THREE.Color(0.04, 0.12, 0.15),  // Dark teal undertone (reflections dominate)
+  deepColor: new THREE.Color(0.01, 0.04, 0.08),    // Near-black deep water
+  fresnelColor: new THREE.Color(0.45, 0.65, 0.75),  // More vibrant reflection color
 
   waves: [
-    { direction: new Vector2(1.0, 0.3), steepness: 0.375, wavelength: 8.0 },   // 0.25 × 1.5
-    { direction: new Vector2(0.3, 1.0), steepness: 0.27, wavelength: 5.0 },    // 0.18 × 1.5
-    { direction: new Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 3.0 },   // 0.12 × 1.5
-    { direction: new Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.5 },   // 0.06 × 1.5
+    { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.375, wavelength: 8.0 },   // 0.25 × 1.5
+    { direction: new THREE.Vector2(0.3, 1.0), steepness: 0.27, wavelength: 5.0 },    // 0.18 × 1.5
+    { direction: new THREE.Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 3.0 },   // 0.12 × 1.5
+    { direction: new THREE.Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.5 },   // 0.06 × 1.5
   ],
 
   fresnelPower: 2.0,
@@ -391,10 +359,10 @@ export const RIVER_WATER_CONFIG = DEFAULT_WATER_CONFIG;
 export const LAKE_WATER_CONFIG: WaterConfig = {
   ...DEFAULT_WATER_CONFIG,
   waves: [
-    { direction: new Vector2(1.0, 0.3), steepness: 0.0225, wavelength: 2.5 },  // 0.015 × 1.5
-    { direction: new Vector2(-0.4, 1.0), steepness: 0.018, wavelength: 1.8 },  // 0.012 × 1.5
-    { direction: new Vector2(0.7, -0.5), steepness: 0.012, wavelength: 1.2 },  // 0.008 × 1.5
-    { direction: new Vector2(-0.3, -0.8), steepness: 0.0075, wavelength: 0.8 },// 0.005 × 1.5
+    { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.0225, wavelength: 2.5 },  // 0.015 × 1.5
+    { direction: new THREE.Vector2(-0.4, 1.0), steepness: 0.018, wavelength: 1.8 },  // 0.012 × 1.5
+    { direction: new THREE.Vector2(0.7, -0.5), steepness: 0.012, wavelength: 1.2 },  // 0.008 × 1.5
+    { direction: new THREE.Vector2(-0.3, -0.8), steepness: 0.0075, wavelength: 0.8 },// 0.005 × 1.5
   ],
 };
 
@@ -408,21 +376,22 @@ export const LAKE_WATER_CONFIG: WaterConfig = {
  * - Uses heightmap texture for depth calculation instead
  */
 export class WaterSystem {
-  private scene: Scene;
+  // TODO: Change back to THREE.Scene after EditorEngine migration
+  private scene: any;
   private heightmap: Heightmap;
 
-  private waterMesh: Mesh | null = null;
-  private waterMaterial: ShaderMaterial | null = null;
-  private heightmapTexture: Texture | null = null;
-  private dummyTexture: RawTexture | null = null;
+  private waterMesh: THREE.Mesh | null = null;
+  private waterMaterial: THREE.ShaderMaterial | null = null;
+  private heightmapTexture: THREE.DataTexture | null = null;
+  private dummyTexture: THREE.DataTexture | null = null;
 
   private config: WaterConfig;
   private waterLevel: number = 0;
   private startTime: number;
-  private mirrorTexture: MirrorTexture | null = null;
-  private renderObserver: ReturnType<typeof this.scene.onBeforeRenderObservable.add> | null = null;
+  private reflectionRenderTarget: THREE.WebGLRenderTarget | null = null;
 
-  constructor(scene: Scene, heightmap: Heightmap, config?: Partial<WaterConfig>) {
+  // TODO: Change back to THREE.Scene after EditorEngine migration
+  constructor(scene: any, heightmap: Heightmap, config?: Partial<WaterConfig>) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.config = { ...DEFAULT_WATER_CONFIG, ...config };
@@ -440,15 +409,12 @@ export class WaterSystem {
     // Heightmap texture for depth calculation (vertex + fragment)
     this.createHeightmapTexture();
 
-    // 1x1 dummy texture for WebGPU sampler binding (all declared samplers must be bound)
-    this.dummyTexture = new RawTexture(
-      new Uint8Array([0, 0, 0, 255]),
-      1, 1,
-      Constants.TEXTUREFORMAT_RGBA,
-      this.scene,
-      false, false,
-      Texture.NEAREST_SAMPLINGMODE
-    );
+    // 1x1 dummy texture for sampler binding
+    const dummyData = new Uint8Array([0, 0, 0, 255]);
+    this.dummyTexture = new THREE.DataTexture(dummyData, 1, 1, THREE.RGBAFormat);
+    this.dummyTexture.magFilter = THREE.NearestFilter;
+    this.dummyTexture.minFilter = THREE.NearestFilter;
+    this.dummyTexture.needsUpdate = true;
   }
 
   /**
@@ -478,19 +444,18 @@ export class WaterSystem {
       }
     }
 
-    // Create RawTexture from data
-    this.heightmapTexture = new RawTexture(
+    // Create DataTexture from data
+    this.heightmapTexture = new THREE.DataTexture(
       data,
       resolution,
       resolution,
-      Constants.TEXTUREFORMAT_RGBA,
-      this.scene,
-      false,  // generateMipMaps
-      false,  // invertY
-      Texture.BILINEAR_SAMPLINGMODE
+      THREE.RGBAFormat
     );
-    this.heightmapTexture.wrapU = Texture.CLAMP_ADDRESSMODE;
-    this.heightmapTexture.wrapV = Texture.CLAMP_ADDRESSMODE;
+    this.heightmapTexture.magFilter = THREE.LinearFilter;
+    this.heightmapTexture.minFilter = THREE.LinearFilter;
+    this.heightmapTexture.wrapS = THREE.ClampToEdgeWrapping;
+    this.heightmapTexture.wrapT = THREE.ClampToEdgeWrapping;
+    this.heightmapTexture.needsUpdate = true;
   }
 
   /**
@@ -503,11 +468,11 @@ export class WaterSystem {
     this.createHeightmapTexture();
 
     if (this.waterMaterial && this.heightmapTexture) {
-      this.waterMaterial.setTexture("uHeightmap", this.heightmapTexture);
+      this.waterMaterial.uniforms.uHeightmap.value = this.heightmapTexture;
       // Update height range and min height (may have changed from terrain editing)
       const heightRange = this.heightmap.getMaxHeight() - this.heightmap.getMinHeight() || 1;
-      this.waterMaterial.setFloat("uHeightScale", heightRange);
-      this.waterMaterial.setFloat("uMinHeight", this.heightmap.getMinHeight());
+      this.waterMaterial.uniforms.uHeightScale.value = heightRange;
+      this.waterMaterial.uniforms.uMinHeight.value = this.heightmap.getMinHeight();
     }
   }
 
@@ -520,43 +485,32 @@ export class WaterSystem {
     width: number,
     depth: number,
     waterLevel: number
-  ): Mesh | null {
+  ): THREE.Mesh | null {
     this.dispose();
 
     this.waterLevel = waterLevel;
 
+    // Create shader material first
+    this.createMaterial();
+
     // Create water mesh - reduced subdivisions for better performance
     // 64 subdivisions is sufficient for gentle Gerstner waves
-    this.waterMesh = MeshBuilder.CreateGround(
-      "water_plane",
-      {
-        width: width,
-        height: depth,
-        subdivisions: 64,
-        updatable: false,
-      },
-      this.scene
-    );
+    const geometry = new THREE.PlaneGeometry(width, depth, 64, 64);
+    geometry.rotateX(-Math.PI / 2); // XZ plane
 
+    this.waterMesh = new THREE.Mesh(geometry, this.waterMaterial!);
     this.waterMesh.position.set(centerX, waterLevel, centerZ);
+    this.waterMesh.name = "water_plane";
+
+    this.scene.add(this.waterMesh);
 
     // Skip RefractionRTT - minimal visual benefit, high performance cost
     // This saves an entire render pass per frame
 
-    // Create shader material
-    this.createMaterial();
-
-    if (this.waterMaterial) {
-      this.waterMesh.material = this.waterMaterial;
-    }
-
-    // Setup mirror reflection if enabled
+    // Setup reflection render target if enabled
     if (this.config.reflectionEnabled) {
-      this.createMirrorTexture();
+      this.createReflectionRenderTarget();
     }
-
-    // Register update loop (store observer for cleanup)
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => this.update());
 
     console.log("[WaterSystem] Created water (optimized: no depth/refraction passes)");
 
@@ -567,139 +521,68 @@ export class WaterSystem {
    * Create the water shader material
    */
   private createMaterial(): void {
-    this.waterMaterial = new ShaderMaterial(
-      "enterpriseWaterMaterial",
-      this.scene,
-      {
-        vertex: "enterpriseWater",
-        fragment: "enterpriseWater",
-      },
-      {
-        attributes: ["position", "normal", "uv"],
-        uniforms: [
-          "world", "view", "projection", "viewProjection",
-          "uTime", "uWaterLevel",
-          "uWave0", "uWave1", "uWave2", "uWave3",
-          "uSunDirection", "uSunColor", "uCameraPosition",
-          "uShallowColor", "uDeepColor", "uFresnelColor",
-          "uFresnelPower", "uMaxDepth", "uShoreBlendDistance",
-          "uFoamIntensity", "uShoreFoamWidth",
-          "uTerrainScale", "uHeightScale", "uMinHeight",
-          "uReflectionStrength", "uReflectionEnabled",
-          "uFogColor", "uFogDensity",
-          "uWaveAngle",
-          "uInteractiveEnabled", "uInteractiveStrength",
-        ],
-        samplers: ["uHeightmap", "uReflectionSampler", "uInteractiveHeight"],
-        needAlphaBlending: true,
-      }
-    );
-
-    // Enable transparency
-    this.waterMaterial.alpha = 0.9;
-    this.waterMaterial.backFaceCulling = false;
-
-    // Set textures
-    if (this.heightmapTexture) {
-      this.waterMaterial.setTexture("uHeightmap", this.heightmapTexture);
-    }
-    // Always bind reflection sampler (WebGPU requires all declared samplers bound)
-    if (this.dummyTexture) {
-      this.waterMaterial.setTexture("uReflectionSampler", this.dummyTexture);
-      // Bind interactive height texture (disabled by default)
-      this.waterMaterial.setTexture("uInteractiveHeight", this.dummyTexture);
-    }
-
-    // Interactive water defaults (disabled)
-    this.waterMaterial.setFloat("uInteractiveEnabled", 0.0);
-    this.waterMaterial.setFloat("uInteractiveStrength", 1.0);
-
-    // Set heightmap uniforms (used in both vertex and fragment shaders)
-    this.waterMaterial.setFloat("uTerrainScale", this.heightmap.getScale());
-    const heightRange = this.heightmap.getMaxHeight() - this.heightmap.getMinHeight() || 1;
-    this.waterMaterial.setFloat("uHeightScale", heightRange);
-    this.waterMaterial.setFloat("uMinHeight", this.heightmap.getMinHeight());
-
-    // Set initial uniforms
-    this.updateUniforms();
-  }
-
-  /**
-   * Update shader uniforms
-   */
-  private updateUniforms(): void {
-    if (!this.waterMaterial) return;
-
     const cfg = this.config;
-    const engine = this.scene.getEngine();
-    const camera = this.scene.activeCamera;
+    const heightRange = this.heightmap.getMaxHeight() - this.heightmap.getMinHeight() || 1;
 
-    // Colors
-    this.waterMaterial.setColor3("uShallowColor", cfg.shallowColor);
-    this.waterMaterial.setColor3("uDeepColor", cfg.deepColor);
-    this.waterMaterial.setColor3("uFresnelColor", cfg.fresnelColor);
+    this.waterMaterial = new THREE.ShaderMaterial({
+      vertexShader: waterVertexShader,
+      fragmentShader: waterFragmentShader,
+      uniforms: {
+        uTime: { value: 0.0 },
+        uWaterLevel: { value: this.waterLevel },
 
-    // Waves (pack into vec4)
-    for (let i = 0; i < 4; i++) {
-      const wave = cfg.waves[i] || { direction: new Vector2(0, 0), steepness: 0, wavelength: 0 };
-      this.waterMaterial.setVector4(
-        `uWave${i}`,
-        new Vector4(wave.direction.x, wave.direction.y, wave.steepness, wave.wavelength)
-      );
-    }
+        uWave0: { value: new THREE.Vector4(cfg.waves[0]?.direction.x ?? 0, cfg.waves[0]?.direction.y ?? 0, cfg.waves[0]?.steepness ?? 0, cfg.waves[0]?.wavelength ?? 0) },
+        uWave1: { value: new THREE.Vector4(cfg.waves[1]?.direction.x ?? 0, cfg.waves[1]?.direction.y ?? 0, cfg.waves[1]?.steepness ?? 0, cfg.waves[1]?.wavelength ?? 0) },
+        uWave2: { value: new THREE.Vector4(cfg.waves[2]?.direction.x ?? 0, cfg.waves[2]?.direction.y ?? 0, cfg.waves[2]?.steepness ?? 0, cfg.waves[2]?.wavelength ?? 0) },
+        uWave3: { value: new THREE.Vector4(cfg.waves[3]?.direction.x ?? 0, cfg.waves[3]?.direction.y ?? 0, cfg.waves[3]?.steepness ?? 0, cfg.waves[3]?.wavelength ?? 0) },
 
-    // Appearance
-    this.waterMaterial.setFloat("uFresnelPower", cfg.fresnelPower);
-    this.waterMaterial.setFloat("uMaxDepth", cfg.maxDepth);
-    this.waterMaterial.setFloat("uShoreBlendDistance", cfg.shoreBlendDistance);
+        uSunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+        uSunColor: { value: new THREE.Color(1.0, 0.95, 0.8) },
 
-    // Foam
-    this.waterMaterial.setFloat("uFoamIntensity", cfg.foamIntensity);
-    this.waterMaterial.setFloat("uShoreFoamWidth", cfg.shoreFoamWidth);
+        uShallowColor: { value: cfg.shallowColor.clone() },
+        uDeepColor: { value: cfg.deepColor.clone() },
+        uFresnelColor: { value: cfg.fresnelColor.clone() },
+        uFresnelPower: { value: cfg.fresnelPower },
+        uMaxDepth: { value: cfg.maxDepth },
+        uShoreBlendDistance: { value: cfg.shoreBlendDistance },
 
-    // Sun
-    this.waterMaterial.setVector3("uSunDirection", new Vector3(0.5, 0.8, 0.3).normalize());
-    this.waterMaterial.setColor3("uSunColor", new Color3(1.0, 0.95, 0.8));
+        uFoamIntensity: { value: cfg.foamIntensity },
+        uShoreFoamWidth: { value: cfg.shoreFoamWidth },
 
-    if (camera) {
-      this.waterMaterial.setVector3("uCameraPosition", camera.position);
-    }
+        uTerrainScale: { value: this.heightmap.getScale() },
+        uHeightScale: { value: heightRange },
+        uMinHeight: { value: this.heightmap.getMinHeight() },
 
-    // Fog (matches terrain/foliage defaults)
-    this.waterMaterial.setColor3("uFogColor", new Color3(0.6, 0.75, 0.9));
-    this.waterMaterial.setFloat("uFogDensity", 0.008);
+        uHeightmap: { value: this.heightmapTexture },
+        uReflectionSampler: { value: this.dummyTexture },
+        uInteractiveHeight: { value: this.dummyTexture },
 
-    // Wave direction angle (default 0 = no rotation)
-    this.waterMaterial.setFloat("uWaveAngle", 0);
+        uReflectionStrength: { value: cfg.reflectionStrength },
+        uReflectionEnabled: { value: cfg.reflectionEnabled ? 1.0 : 0.0 },
 
-    // Reflection
-    this.waterMaterial.setFloat("uReflectionStrength", cfg.reflectionStrength);
-    this.waterMaterial.setFloat("uReflectionEnabled", cfg.reflectionEnabled ? 1.0 : 0.0);
-    if (this.mirrorTexture && cfg.reflectionEnabled) {
-      this.waterMaterial.setTexture("uReflectionSampler", this.mirrorTexture);
-    }
+        uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+        uFogDensity: { value: 0.008 },
+
+        uWaveAngle: { value: 0.0 },
+
+        uInteractiveEnabled: { value: 0.0 },
+        uInteractiveStrength: { value: 1.0 },
+      },
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
   }
 
   /**
-   * Update loop
+   * Public update method - call from render loop
    */
-  private update(): void {
+  update(time: number, cameraPosition: THREE.Vector3): void {
     if (!this.waterMaterial) return;
 
-    const time = (performance.now() / 1000) - this.startTime;
-    this.waterMaterial.setFloat("uTime", time);
-    this.waterMaterial.setFloat("uWaterLevel", this.waterLevel);
-
-    // Update camera position
-    const camera = this.scene.activeCamera;
-    if (camera) {
-      this.waterMaterial.setVector3("uCameraPosition", camera.position);
-    }
-
-    // Update reflection mirror plane
-    if (this.mirrorTexture && this.config.reflectionEnabled) {
-      this.mirrorTexture.mirrorPlane = new Plane(0, -1, 0, this.waterLevel);
-    }
+    const elapsed = time - this.startTime;
+    this.waterMaterial.uniforms.uTime.value = elapsed;
+    this.waterMaterial.uniforms.uWaterLevel.value = this.waterLevel;
   }
 
   /**
@@ -728,66 +611,36 @@ export class WaterSystem {
   }
 
   /**
-   * Create MirrorTexture for planar reflections
+   * Create WebGLRenderTarget for planar reflections
    */
-  private createMirrorTexture(): void {
+  private createReflectionRenderTarget(): void {
     if (!this.config.reflectionEnabled) return;
 
-    if (this.mirrorTexture) {
-      this.mirrorTexture.dispose();
-      this.mirrorTexture = null;
+    if (this.reflectionRenderTarget) {
+      this.reflectionRenderTarget.dispose();
+      this.reflectionRenderTarget = null;
     }
 
     const resolution = this.config.reflectionResolution;
 
-    this.mirrorTexture = new MirrorTexture(
-      "waterReflection",
-      resolution,
-      this.scene,
-      false
-    );
-
-    this.mirrorTexture.mirrorPlane = new Plane(0, -1, 0, this.waterLevel);
-
-    if (this.config.reflectionBlur > 0) {
-      this.mirrorTexture.adaptiveBlurKernel = this.config.reflectionBlur;
-    }
-
-    this.mirrorTexture.refreshRate = 2;
-    this.mirrorTexture.clearColor = new Color4(0.55, 0.7, 0.9, 1.0);
-
-    this.updateReflectionRenderList();
+    this.reflectionRenderTarget = new THREE.WebGLRenderTarget(resolution, resolution, {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+    });
 
     if (this.waterMaterial) {
-      this.waterMaterial.setTexture("uReflectionSampler", this.mirrorTexture);
-      this.waterMaterial.setFloat("uReflectionEnabled", 1.0);
-      this.waterMaterial.setFloat("uReflectionStrength", this.config.reflectionStrength);
+      this.waterMaterial.uniforms.uReflectionSampler.value = this.reflectionRenderTarget.texture;
+      this.waterMaterial.uniforms.uReflectionEnabled.value = 1.0;
+      this.waterMaterial.uniforms.uReflectionStrength.value = this.config.reflectionStrength;
     }
   }
 
   /**
-   * Update which meshes appear in the reflection
+   * Get reflection render target (for external reflection rendering)
    */
-  updateReflectionRenderList(): void {
-    if (!this.mirrorTexture) return;
-
-    this.mirrorTexture.renderList = [];
-
-    for (const mesh of this.scene.meshes) {
-      if (mesh.name === "water_plane" || mesh.name === "unified_water") continue;
-      if (!mesh.isVisible || !mesh.isEnabled()) continue;
-
-      if (
-        mesh.name.startsWith("terrain_lod") ||
-        mesh.name.startsWith("rock_") ||
-        mesh.name.startsWith("foliage_") ||
-        mesh.name.startsWith("inst_") ||
-        mesh.name.includes("_var") ||
-        mesh.name.includes("_lod")
-      ) {
-        this.mirrorTexture.renderList.push(mesh);
-      }
-    }
+  getReflectionRenderTarget(): THREE.WebGLRenderTarget | null {
+    return this.reflectionRenderTarget;
   }
 
   /**
@@ -796,19 +649,19 @@ export class WaterSystem {
   setReflectionEnabled(enabled: boolean): void {
     this.config.reflectionEnabled = enabled;
     if (enabled) {
-      if (!this.mirrorTexture) {
-        this.createMirrorTexture();
+      if (!this.reflectionRenderTarget) {
+        this.createReflectionRenderTarget();
       }
     } else {
-      if (this.mirrorTexture) {
-        this.mirrorTexture.dispose();
-        this.mirrorTexture = null;
+      if (this.reflectionRenderTarget) {
+        this.reflectionRenderTarget.dispose();
+        this.reflectionRenderTarget = null;
       }
       if (this.waterMaterial) {
-        this.waterMaterial.setFloat("uReflectionEnabled", 0.0);
-        // Rebind dummy texture so WebGPU sampler stays valid
+        this.waterMaterial.uniforms.uReflectionEnabled.value = 0.0;
+        // Rebind dummy texture so sampler stays valid
         if (this.dummyTexture) {
-          this.waterMaterial.setTexture("uReflectionSampler", this.dummyTexture);
+          this.waterMaterial.uniforms.uReflectionSampler.value = this.dummyTexture;
         }
       }
     }
@@ -820,7 +673,7 @@ export class WaterSystem {
    */
   setWaveAngle(angleRadians: number): void {
     if (this.waterMaterial) {
-      this.waterMaterial.setFloat("uWaveAngle", angleRadians);
+      this.waterMaterial.uniforms.uWaveAngle.value = angleRadians;
     }
   }
 
@@ -841,23 +694,25 @@ export class WaterSystem {
   /**
    * Sync fog settings with terrain/foliage (used by GamePreview for game mode fog)
    */
-  syncFogSettings(fogColor: Color3, fogDensity: number): void {
+  syncFogSettings(fogColor: THREE.Color, fogDensity: number): void {
     if (!this.waterMaterial) return;
-    this.waterMaterial.setColor3("uFogColor", fogColor);
-    this.waterMaterial.setFloat("uFogDensity", fogDensity);
+    this.waterMaterial.uniforms.uFogColor.value = fogColor;
+    this.waterMaterial.uniforms.uFogDensity.value = fogDensity;
   }
 
   /**
    * Get water mesh for adding to render lists
    */
-  getMesh(): Mesh | null {
+  // TODO: Restore THREE.Mesh return type after EditorEngine migration
+  getMesh(): any {
     return this.waterMesh;
   }
 
   /**
    * Get water material for sharing with other meshes
    */
-  getMaterial(): ShaderMaterial | null {
+  // TODO: Restore THREE.ShaderMaterial return type after EditorEngine migration
+  getMaterial(): any {
     return this.waterMaterial;
   }
 
@@ -866,19 +721,19 @@ export class WaterSystem {
    * @param heightTexture - Height field texture from InteractiveWater.getHeightTexture()
    * @param strength - Ripple strength multiplier (default 1.0)
    */
-  setInteractiveWater(heightTexture: Texture | null, strength: number = 1.0): void {
+  setInteractiveWater(heightTexture: THREE.Texture | null, strength: number = 1.0): void {
     if (!this.waterMaterial) return;
 
     if (heightTexture) {
-      this.waterMaterial.setTexture("uInteractiveHeight", heightTexture);
-      this.waterMaterial.setFloat("uInteractiveEnabled", 1.0);
-      this.waterMaterial.setFloat("uInteractiveStrength", strength);
+      this.waterMaterial.uniforms.uInteractiveHeight.value = heightTexture;
+      this.waterMaterial.uniforms.uInteractiveEnabled.value = 1.0;
+      this.waterMaterial.uniforms.uInteractiveStrength.value = strength;
     } else {
       // Disable interactive water
       if (this.dummyTexture) {
-        this.waterMaterial.setTexture("uInteractiveHeight", this.dummyTexture);
+        this.waterMaterial.uniforms.uInteractiveHeight.value = this.dummyTexture;
       }
-      this.waterMaterial.setFloat("uInteractiveEnabled", 0.0);
+      this.waterMaterial.uniforms.uInteractiveEnabled.value = 0.0;
     }
   }
 
@@ -887,7 +742,56 @@ export class WaterSystem {
    */
   setInteractiveStrength(strength: number): void {
     if (this.waterMaterial) {
-      this.waterMaterial.setFloat("uInteractiveStrength", strength);
+      this.waterMaterial.uniforms.uInteractiveStrength.value = strength;
+    }
+  }
+
+  /**
+   * Update shader uniforms from current config
+   */
+  private updateUniforms(): void {
+    if (!this.waterMaterial) return;
+
+    const cfg = this.config;
+
+    // Colors
+    this.waterMaterial.uniforms.uShallowColor.value = cfg.shallowColor.clone();
+    this.waterMaterial.uniforms.uDeepColor.value = cfg.deepColor.clone();
+    this.waterMaterial.uniforms.uFresnelColor.value = cfg.fresnelColor.clone();
+
+    // Waves (pack into vec4)
+    for (let i = 0; i < 4; i++) {
+      const wave = cfg.waves[i] || { direction: new THREE.Vector2(0, 0), steepness: 0, wavelength: 0 };
+      this.waterMaterial.uniforms[`uWave${i}`].value = new THREE.Vector4(
+        wave.direction.x, wave.direction.y, wave.steepness, wave.wavelength
+      );
+    }
+
+    // Appearance
+    this.waterMaterial.uniforms.uFresnelPower.value = cfg.fresnelPower;
+    this.waterMaterial.uniforms.uMaxDepth.value = cfg.maxDepth;
+    this.waterMaterial.uniforms.uShoreBlendDistance.value = cfg.shoreBlendDistance;
+
+    // Foam
+    this.waterMaterial.uniforms.uFoamIntensity.value = cfg.foamIntensity;
+    this.waterMaterial.uniforms.uShoreFoamWidth.value = cfg.shoreFoamWidth;
+
+    // Sun
+    this.waterMaterial.uniforms.uSunDirection.value = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+    this.waterMaterial.uniforms.uSunColor.value = new THREE.Color(1.0, 0.95, 0.8);
+
+    // Fog (matches terrain/foliage defaults)
+    this.waterMaterial.uniforms.uFogColor.value = new THREE.Color(0.6, 0.75, 0.9);
+    this.waterMaterial.uniforms.uFogDensity.value = 0.008;
+
+    // Wave direction angle (default 0 = no rotation)
+    this.waterMaterial.uniforms.uWaveAngle.value = 0;
+
+    // Reflection
+    this.waterMaterial.uniforms.uReflectionStrength.value = cfg.reflectionStrength;
+    this.waterMaterial.uniforms.uReflectionEnabled.value = cfg.reflectionEnabled ? 1.0 : 0.0;
+    if (this.reflectionRenderTarget && cfg.reflectionEnabled) {
+      this.waterMaterial.uniforms.uReflectionSampler.value = this.reflectionRenderTarget.texture;
     }
   }
 
@@ -895,24 +799,19 @@ export class WaterSystem {
    * Dispose resources
    */
   dispose(): void {
-    // Unregister render callback first
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
-    }
-
-    if (this.mirrorTexture) {
-      this.mirrorTexture.dispose();
-      this.mirrorTexture = null;
+    if (this.reflectionRenderTarget) {
+      this.reflectionRenderTarget.dispose();
+      this.reflectionRenderTarget = null;
     }
     if (this.waterMesh) {
-      this.waterMesh.dispose();
+      this.scene.remove(this.waterMesh);
+      this.waterMesh.geometry.dispose();
+      if (this.waterMesh.material instanceof THREE.ShaderMaterial) {
+        this.waterMesh.material.dispose();
+      }
       this.waterMesh = null;
     }
-    if (this.waterMaterial) {
-      this.waterMaterial.dispose();
-      this.waterMaterial = null;
-    }
+    this.waterMaterial = null;
   }
 
   /**

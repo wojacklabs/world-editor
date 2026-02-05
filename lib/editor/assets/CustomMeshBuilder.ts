@@ -1,4 +1,4 @@
-import * as BABYLON from "@babylonjs/core";
+import * as THREE from "three";
 
 export interface MeshData {
   name: string;
@@ -10,45 +10,38 @@ export interface MeshData {
 }
 
 /**
- * Builds a Babylon.js mesh from raw vertex data
+ * Builds a Three.js mesh from raw vertex data
  */
 export function createMeshFromData(
   meshData: MeshData,
-  scene: BABYLON.Scene
-): BABYLON.Mesh {
-  const mesh = new BABYLON.Mesh(meshData.name, scene);
+  scene: any
+): THREE.Mesh {
+  const geometry = new THREE.BufferGeometry();
 
-  const vertexData = new BABYLON.VertexData();
-
-  vertexData.positions = meshData.vertices;
-  vertexData.indices = meshData.indices;
-  vertexData.normals = meshData.normals;
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(meshData.vertices), 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(meshData.normals), 3));
+  geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(meshData.indices), 1));
 
   if (meshData.uvs && meshData.uvs.length > 0) {
-    vertexData.uvs = meshData.uvs;
+    geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(meshData.uvs), 2));
   }
 
   if (meshData.colors && meshData.colors.length > 0) {
-    vertexData.colors = meshData.colors;
+    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(meshData.colors), 4));
   }
-
-  vertexData.applyToMesh(mesh);
 
   // Create default material with vertex colors if available
-  const material = new BABYLON.StandardMaterial(`${meshData.name}_mat`, scene);
+  const material = new THREE.MeshStandardMaterial({
+    color: meshData.colors && meshData.colors.length > 0 ? 0xffffff : 0xb3b3b3,
+    vertexColors: !!(meshData.colors && meshData.colors.length > 0),
+    metalness: 0.1,
+    roughness: 0.8,
+  });
 
-  if (meshData.colors && meshData.colors.length > 0) {
-    material.diffuseColor = new BABYLON.Color3(1, 1, 1);
-    // Enable vertex colors by setting emissive to use vertex alpha
-    mesh.useVertexColors = true;
-  } else {
-    material.diffuseColor = new BABYLON.Color3(0.7, 0.7, 0.7);
-  }
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.name = meshData.name;
 
-  material.specularColor = new BABYLON.Color3(0.2, 0.2, 0.2);
-  material.backFaceCulling = true;
-
-  mesh.material = material;
+  scene.add(mesh);
 
   return mesh;
 }
@@ -56,30 +49,31 @@ export function createMeshFromData(
 /**
  * Serialize mesh to MeshData for storage
  */
-export function meshToData(mesh: BABYLON.Mesh): MeshData | null {
-  const positions = mesh.getVerticesData(BABYLON.VertexBuffer.PositionKind);
-  const indices = mesh.getIndices();
-  const normals = mesh.getVerticesData(BABYLON.VertexBuffer.NormalKind);
+export function meshToData(mesh: THREE.Mesh): MeshData | null {
+  const geometry = mesh.geometry;
+  const posAttr = geometry.getAttribute("position");
+  const normalAttr = geometry.getAttribute("normal");
+  const indexAttr = geometry.index;
 
-  if (!positions || !indices || !normals) {
+  if (!posAttr || !indexAttr || !normalAttr) {
     return null;
   }
 
   const meshData: MeshData = {
     name: mesh.name,
-    vertices: Array.from(positions),
-    indices: Array.from(indices),
-    normals: Array.from(normals),
+    vertices: Array.from(posAttr.array as Float32Array),
+    indices: Array.from(indexAttr.array as Uint32Array),
+    normals: Array.from(normalAttr.array as Float32Array),
   };
 
-  const uvs = mesh.getVerticesData(BABYLON.VertexBuffer.UVKind);
-  if (uvs) {
-    meshData.uvs = Array.from(uvs);
+  const uvAttr = geometry.getAttribute("uv");
+  if (uvAttr) {
+    meshData.uvs = Array.from(uvAttr.array as Float32Array);
   }
 
-  const colors = mesh.getVerticesData(BABYLON.VertexBuffer.ColorKind);
-  if (colors) {
-    meshData.colors = Array.from(colors);
+  const colorAttr = geometry.getAttribute("color");
+  if (colorAttr) {
+    meshData.colors = Array.from(colorAttr.array as Float32Array);
   }
 
   return meshData;

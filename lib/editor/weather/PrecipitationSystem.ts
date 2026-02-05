@@ -1,25 +1,10 @@
-import {
-  Scene,
-  Mesh,
-  ShaderMaterial,
-  Vector3,
-  Color4,
-  Effect,
-  Observer,
-  Engine,
-  VertexData,
-  VertexBuffer,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 
-// Register precipitation shaders - using custom vertex buffer approach for WebGPU compatibility
-Effect.ShadersStore["precipitationVertexShader"] = `
-precision highp float;
-
-attribute vec3 position;
-attribute vec2 uv;
+// Precipitation vertex shader - custom vertex buffer approach
+const precipitationVertexShader = `
 attribute vec3 particleSeed; // x, y, z seed for each particle
 
-uniform mat4 viewProjection;
 uniform float uTime;
 uniform vec3 uCameraPosition;
 uniform vec3 uWindDirection;
@@ -98,7 +83,7 @@ void main() {
         + right * position.x * sizeMultiplier
         + up * stretchedY * sizeMultiplier;
 
-    gl_Position = viewProjection * vec4(billboardPos, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * vec4(billboardPos, 1.0);
     vUV = uv;
 
     // Fade at edges of spawn box
@@ -113,7 +98,8 @@ void main() {
 }
 `;
 
-Effect.ShadersStore["precipitationFragmentShader"] = `
+// Precipitation fragment shader
+const precipitationFragmentShader = `
 precision highp float;
 
 varying vec2 vUV;
@@ -194,68 +180,70 @@ void main() {
 }
 `;
 
-let precipitationMaterialCounter = 0;
-
 export type PrecipitationType = "rain" | "snow" | "none";
 
 interface PrecipitationConfig {
   type: PrecipitationType;
   particleCount: number;
-  boxSize: Vector3;
+  boxSize: THREE.Vector3;
   fallSpeed: number;
   windInfluence: number;
   particleSize: number;
-  color: Color4;
+  color: THREE.Vector4;
   streakLength: number;
 }
 
 const RAIN_CONFIG: PrecipitationConfig = {
   type: "rain",
   particleCount: 5000,
-  boxSize: new Vector3(60, 40, 60),
+  boxSize: new THREE.Vector3(60, 40, 60),
   fallSpeed: 22,
   windInfluence: 1.0,
   particleSize: 0.06,
-  color: new Color4(0.5, 0.55, 0.6, 0.35),  // Darker, more transparent
+  color: new THREE.Vector4(0.5, 0.55, 0.6, 0.35),  // Darker, more transparent
   streakLength: 4.0,
 };
 
 const SNOW_CONFIG: PrecipitationConfig = {
   type: "snow",
   particleCount: 3500,
-  boxSize: new Vector3(60, 30, 60),
+  boxSize: new THREE.Vector3(60, 30, 60),
   fallSpeed: 2.5,
   windInfluence: 1.5,
   particleSize: 0.03,  // Much smaller particles
-  color: new Color4(0.95, 0.95, 1.0, 0.7),
+  color: new THREE.Vector4(0.95, 0.95, 1.0, 0.7),
   streakLength: 0,
 };
 
 export class PrecipitationSystem {
-  private scene: Scene;
-  private particleMesh: Mesh | null = null;
-  private material: ShaderMaterial | null = null;
-  private renderObserver: Observer<Scene> | null = null;
+  private scene: any;
+  private particleMesh: THREE.Mesh | null = null;
+  private material: THREE.ShaderMaterial | null = null;
+
+  // Stored camera reference
+  private camera: THREE.Camera | null = null;
 
   // State
   private currentType: PrecipitationType = "none";
   private intensity: number = 0;
-  private windDirection: Vector3 = new Vector3(1, 0, 0);
+  private windDirection: THREE.Vector3 = new THREE.Vector3(1, 0, 0);
   private windSpeed: number = 0.2;
 
   // Animation
   private startTime: number = 0;
 
-  constructor(scene: Scene) {
+  constructor(scene: any) {
     this.scene = scene;
     this.startTime = performance.now() / 1000;
   }
 
   init(): void {
-    // Register update loop
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      this.update();
-    });
+    // Nothing to do at init - particles created on demand
+  }
+
+  /** Set camera reference for particle positioning */
+  setCamera(camera: THREE.Camera | null): void {
+    this.camera = camera;
   }
 
   private createParticleSystem(config: PrecipitationConfig): void {
@@ -270,12 +258,11 @@ export class PrecipitationSystem {
     // Create a single mesh with all particles as quads
     // Each particle is a quad (4 vertices, 6 indices)
     const verticesPerParticle = 4;
-    const indicesPerParticle = 6;
 
     const positions = new Float32Array(count * verticesPerParticle * 3);
     const uvs = new Float32Array(count * verticesPerParticle * 2);
     const particleSeeds = new Float32Array(count * verticesPerParticle * 3);
-    const indices = new Uint32Array(count * indicesPerParticle);
+    const indices = new Uint32Array(count * 6);
 
     // Quad local positions (centered at origin)
     const quadPositions = [
@@ -329,73 +316,51 @@ export class PrecipitationSystem {
       indices[iIdx + 5] = vBase + 3;
     }
 
-    // Create mesh
-    this.particleMesh = new Mesh("precipitationMesh", this.scene);
-    this.particleMesh.isPickable = false;
-
-    // Apply vertex data
-    const vertexData = new VertexData();
-    vertexData.positions = positions;
-    vertexData.uvs = uvs;
-    vertexData.indices = indices;
-    vertexData.applyToMesh(this.particleMesh);
-
-    // Add custom attribute for particle seeds
-    this.particleMesh.setVerticesData("particleSeed", particleSeeds, false, 3);
+    // Create geometry
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setAttribute("particleSeed", new THREE.BufferAttribute(particleSeeds, 3));
+    geometry.setIndex(new THREE.BufferAttribute(indices, 1));
 
     // Create material
-    const uniqueName = `precipitation_${++precipitationMaterialCounter}_${Date.now()}`;
-    this.material = new ShaderMaterial(
-      uniqueName,
-      this.scene,
-      {
-        vertex: "precipitation",
-        fragment: "precipitation",
+    this.material = new THREE.ShaderMaterial({
+      vertexShader: precipitationVertexShader,
+      fragmentShader: precipitationFragmentShader,
+      uniforms: {
+        uTime: { value: 0 },
+        uCameraPosition: { value: new THREE.Vector3() },
+        uWindDirection: { value: this.windDirection.clone() },
+        uWindSpeed: { value: this.windSpeed },
+        uFallSpeed: { value: config.fallSpeed },
+        uBoxSize: { value: config.boxSize.clone() },
+        uStreakLength: { value: config.streakLength },
+        uParticleSize: { value: config.particleSize },
+        uColor: { value: config.color.clone() },
+        uPrecipitationType: { value: config.type === "snow" ? 1.0 : 0.0 },
       },
-      {
-        attributes: ["position", "uv", "particleSeed"],
-        uniforms: [
-          "viewProjection",
-          "uTime",
-          "uCameraPosition",
-          "uWindDirection",
-          "uWindSpeed",
-          "uFallSpeed",
-          "uBoxSize",
-          "uStreakLength",
-          "uParticleSize",
-          "uColor",
-          "uPrecipitationType",
-        ],
-        needAlphaBlending: true,
-      }
-    );
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
 
-    this.material.backFaceCulling = false;
-    this.material.alphaMode = Engine.ALPHA_ADD;
+    this.particleMesh = new THREE.Mesh(geometry, this.material);
+    this.particleMesh.raycast = () => {};
+    this.particleMesh.frustumCulled = false;
 
-    // Set uniforms
-    this.material.setFloat("uFallSpeed", config.fallSpeed);
-    this.material.setVector3("uBoxSize", config.boxSize);
-    this.material.setFloat("uStreakLength", config.streakLength);
-    this.material.setFloat("uParticleSize", config.particleSize);
-    this.material.setColor4("uColor", config.color);
-    this.material.setFloat("uPrecipitationType", config.type === "snow" ? 1.0 : 0.0);
-    this.material.setVector3("uWindDirection", this.windDirection);
-    this.material.setFloat("uWindSpeed", this.windSpeed);
-
-    this.particleMesh.material = this.material;
+    this.scene.add(this.particleMesh);
   }
 
-  private update(): void {
+  /** Call each frame */
+  update(): void {
     if (!this.material) return;
 
     const time = (performance.now() / 1000) - this.startTime;
-    this.material.setFloat("uTime", time);
+    this.material.uniforms.uTime.value = time;
 
-    const camera = this.scene.activeCamera;
-    if (camera) {
-      this.material.setVector3("uCameraPosition", camera.position);
+    if (this.camera) {
+      this.material.uniforms.uCameraPosition.value.copy(this.camera.position);
     }
   }
 
@@ -415,17 +380,17 @@ export class PrecipitationSystem {
     this.rebuildParticles();
   }
 
-  setWindDirection(direction: Vector3): void {
-    this.windDirection = direction.normalize();
+  setWindDirection(direction: THREE.Vector3): void {
+    this.windDirection.copy(direction).normalize();
     if (this.material) {
-      this.material.setVector3("uWindDirection", this.windDirection);
+      this.material.uniforms.uWindDirection.value.copy(this.windDirection);
     }
   }
 
   setWindSpeed(speed: number): void {
     this.windSpeed = speed;
     if (this.material) {
-      this.material.setFloat("uWindSpeed", this.windSpeed);
+      this.material.uniforms.uWindSpeed.value = this.windSpeed;
     }
   }
 
@@ -441,26 +406,19 @@ export class PrecipitationSystem {
 
   private disposeParticles(): void {
     if (this.particleMesh) {
-      this.particleMesh.dispose();
+      disposeMesh(this.scene, this.particleMesh);
       this.particleMesh = null;
     }
-    if (this.material) {
-      this.material.dispose();
-      this.material = null;
-    }
+    this.material = null;
   }
 
   setEnabled(enabled: boolean): void {
     if (this.particleMesh) {
-      this.particleMesh.setEnabled(enabled);
+      this.particleMesh.visible = enabled;
     }
   }
 
   dispose(): void {
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
-    }
     this.disposeParticles();
   }
 }

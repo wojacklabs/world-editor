@@ -1,27 +1,8 @@
-import {
-  Scene,
-  Mesh,
-  AbstractMesh,
-  MeshBuilder,
-  ShaderMaterial,
-  Vector3,
-  Vector2,
-  Color3,
-  Effect,
-  RawTexture,
-  Texture,
-  Observer,
-  Engine,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { disposeMesh, createDataTexture } from "../../shared/rendering/threeHelpers";
 
-// Register cloud shaders
-Effect.ShadersStore["cloudLayerVertexShader"] = `
-precision highp float;
-
-attribute vec3 position;
-attribute vec2 uv;
-
-uniform mat4 worldViewProjection;
+// Cloud layer vertex shader
+const cloudLayerVertexShader = `
 uniform vec3 uCameraPosition;
 uniform float uLayerHeight;
 uniform float uLayerScale;
@@ -40,11 +21,12 @@ void main() {
     vUV = uv;
     vDistanceToCamera = length(worldPos - uCameraPosition);
 
-    gl_Position = worldViewProjection * vec4(worldPos, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
 }
 `;
 
-Effect.ShadersStore["cloudLayerFragmentShader"] = `
+// Cloud layer fragment shader
+const cloudLayerFragmentShader = `
 precision highp float;
 
 varying vec2 vUV;
@@ -117,8 +99,6 @@ void main() {
 }
 `;
 
-let cloudMaterialCounter = 0;
-
 interface CloudLayerConfig {
   height: number;
   scale: number;
@@ -134,30 +114,28 @@ const DEFAULT_LAYERS: CloudLayerConfig[] = [
 ];
 
 interface CloudLayer {
-  mesh: Mesh;
-  material: ShaderMaterial;
+  mesh: THREE.Mesh;
+  material: THREE.ShaderMaterial;
   config: CloudLayerConfig;
-  bindObserver: Observer<AbstractMesh> | null;
 }
 
 export class CloudSystem {
-  private scene: Scene;
+  private scene: any;
   private layers: CloudLayer[] = [];
-  private noiseTexture: RawTexture | null = null;
-  private renderObserver: Observer<Scene> | null = null;
+  private noiseTexture: THREE.DataTexture | null = null;
 
   // State
   private cloudCoverage: number = 0.3;
   private windSpeed: number = 0.2;
   private windDirection: number = 45;
-  private sunDirection: Vector3 = new Vector3(0.5, 0.8, 0.3).normalize();
-  private sunColor: Color3 = new Color3(1.0, 0.95, 0.85);
+  private sunDirection: THREE.Vector3 = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
+  private sunColor: THREE.Color = new THREE.Color(1.0, 0.95, 0.85);
 
   // Animation
-  private windOffset: Vector2 = new Vector2(0, 0);
+  private windOffset: THREE.Vector2 = new THREE.Vector2(0, 0);
   private startTime: number = 0;
 
-  constructor(scene: Scene) {
+  constructor(scene: any) {
     this.scene = scene;
     this.startTime = performance.now() / 1000;
   }
@@ -165,11 +143,6 @@ export class CloudSystem {
   init(): void {
     this.generateNoiseTexture();
     this.createCloudLayers();
-
-    // Register update loop
-    this.renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      this.update();
-    });
   }
 
   private generateNoiseTexture(): void {
@@ -210,18 +183,7 @@ export class CloudSystem {
       }
     }
 
-    this.noiseTexture = new RawTexture(
-      data,
-      size,
-      size,
-      Engine.TEXTUREFORMAT_RGBA,
-      this.scene,
-      false,
-      false,
-      Texture.BILINEAR_SAMPLINGMODE
-    );
-    this.noiseTexture.wrapU = Texture.WRAP_ADDRESSMODE;
-    this.noiseTexture.wrapV = Texture.WRAP_ADDRESSMODE;
+    this.noiseTexture = createDataTexture(data, size, size);
   }
 
   private createCloudLayers(): void {
@@ -232,77 +194,41 @@ export class CloudSystem {
 
   private createLayer(config: CloudLayerConfig): void {
     // Create horizontal plane for cloud layer
-    const mesh = MeshBuilder.CreateGround(
-      `cloudLayer_${config.height}`,
-      { width: 1, height: 1, subdivisions: 1 },
-      this.scene
-    );
+    const geo = new THREE.PlaneGeometry(1, 1, 1, 1);
+    // Rotate plane to be horizontal (PlaneGeometry faces +Z by default in Three.js)
+    geo.rotateX(-Math.PI / 2);
 
-    mesh.isPickable = false;
-    mesh.receiveShadows = false;
-
-    // Create material
-    const uniqueName = `cloudMaterial_${++cloudMaterialCounter}_${Date.now()}`;
-    const material = new ShaderMaterial(
-      uniqueName,
-      this.scene,
-      {
-        vertex: "cloudLayer",
-        fragment: "cloudLayer",
+    const material = new THREE.ShaderMaterial({
+      vertexShader: cloudLayerVertexShader,
+      fragmentShader: cloudLayerFragmentShader,
+      uniforms: {
+        uCameraPosition: { value: new THREE.Vector3() },
+        uLayerHeight: { value: config.height },
+        uLayerScale: { value: config.scale },
+        uNoiseTexture: { value: this.noiseTexture },
+        uTime: { value: 0 },
+        uCloudCoverage: { value: this.cloudCoverage },
+        uCloudDensity: { value: config.density },
+        uSunDirection: { value: this.sunDirection.clone() },
+        uSunColor: { value: this.sunColor.clone() },
+        uWindOffset: { value: this.windOffset.clone() },
+        uLayerOpacity: { value: config.opacity },
       },
-      {
-        attributes: ["position", "uv"],
-        uniforms: [
-          "worldViewProjection",
-          "uCameraPosition",
-          "uLayerHeight",
-          "uLayerScale",
-          "uNoiseTexture",
-          "uTime",
-          "uCloudCoverage",
-          "uCloudDensity",
-          "uSunDirection",
-          "uSunColor",
-          "uWindOffset",
-          "uLayerOpacity",
-        ],
-        samplers: ["uNoiseTexture"],
-        needAlphaBlending: true,
-      }
-    );
-
-    material.backFaceCulling = false;
-    material.alphaMode = Engine.ALPHA_COMBINE;
-
-    // Set initial uniforms
-    material.setFloat("uLayerHeight", config.height);
-    material.setFloat("uLayerScale", config.scale);
-    material.setFloat("uCloudDensity", config.density);
-    material.setFloat("uLayerOpacity", config.opacity);
-    material.setFloat("uCloudCoverage", this.cloudCoverage);
-    material.setVector3("uSunDirection", this.sunDirection);
-    material.setColor3("uSunColor", this.sunColor);
-    material.setVector2("uWindOffset", this.windOffset);
-    material.setFloat("uTime", 0);
-
-    if (this.noiseTexture) {
-      material.setTexture("uNoiseTexture", this.noiseTexture);
-    }
-
-    // Update camera position per frame - store observer reference for cleanup
-    const bindObserver = material.onBindObservable.add(() => {
-      const camera = this.scene.activeCamera;
-      if (camera && material.getEffect()?.isReady()) {
-        material.setVector3("uCameraPosition", camera.position);
-      }
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: false,
     });
 
-    mesh.material = material;
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.raycast = () => {};
+    mesh.frustumCulled = false;
 
-    this.layers.push({ mesh, material, config, bindObserver });
+    this.scene.add(mesh);
+    this.layers.push({ mesh, material, config });
   }
 
-  private update(): void {
+  /** Call each frame to animate clouds */
+  update(camera?: THREE.Camera): void {
     const time = (performance.now() / 1000) - this.startTime;
 
     // Calculate wind offset
@@ -314,13 +240,16 @@ export class CloudSystem {
     // Update all layers
     for (const layer of this.layers) {
       const windMult = layer.config.windMultiplier;
-      const layerOffset = new Vector2(
+
+      layer.material.uniforms.uTime.value = time;
+      layer.material.uniforms.uWindOffset.value.set(
         this.windOffset.x * windMult,
         this.windOffset.y * windMult
       );
 
-      layer.material.setFloat("uTime", time);
-      layer.material.setVector2("uWindOffset", layerOffset);
+      if (camera) {
+        layer.material.uniforms.uCameraPosition.value.copy(camera.position);
+      }
     }
   }
 
@@ -328,7 +257,7 @@ export class CloudSystem {
   setCloudCoverage(coverage: number): void {
     this.cloudCoverage = coverage;
     for (const layer of this.layers) {
-      layer.material.setFloat("uCloudCoverage", coverage);
+      layer.material.uniforms.uCloudCoverage.value = coverage;
     }
   }
 
@@ -340,39 +269,29 @@ export class CloudSystem {
     this.windDirection = direction;
   }
 
-  setSunDirection(direction: Vector3): void {
-    this.sunDirection = direction.normalize();
+  setSunDirection(direction: THREE.Vector3): void {
+    this.sunDirection.copy(direction).normalize();
     for (const layer of this.layers) {
-      layer.material.setVector3("uSunDirection", this.sunDirection);
+      layer.material.uniforms.uSunDirection.value.copy(this.sunDirection);
     }
   }
 
-  setSunColor(color: Color3): void {
-    this.sunColor = color;
+  setSunColor(color: THREE.Color): void {
+    this.sunColor.copy(color);
     for (const layer of this.layers) {
-      layer.material.setColor3("uSunColor", this.sunColor);
+      layer.material.uniforms.uSunColor.value.copy(this.sunColor);
     }
   }
 
   setEnabled(enabled: boolean): void {
     for (const layer of this.layers) {
-      layer.mesh.setEnabled(enabled);
+      layer.mesh.visible = enabled;
     }
   }
 
   dispose(): void {
-    if (this.renderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.renderObserver);
-      this.renderObserver = null;
-    }
-
     for (const layer of this.layers) {
-      // Remove onBindObservable before disposing material
-      if (layer.bindObserver) {
-        layer.material.onBindObservable.remove(layer.bindObserver);
-      }
-      layer.mesh.dispose();
-      layer.material.dispose();
+      disposeMesh(this.scene, layer.mesh);
     }
     this.layers = [];
 

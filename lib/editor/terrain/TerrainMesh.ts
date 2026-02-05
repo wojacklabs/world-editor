@@ -1,43 +1,31 @@
-import {
-  Scene,
-  Mesh,
-  VertexData,
-  Vector3,
-  Color3,
-  StandardMaterial,
-  ShaderMaterial,
-  RawTexture,
-  Texture,
-  Engine,
-  Material,
-  Observer,
-} from "@babylonjs/core";
+import * as THREE from "three";
 import { Heightmap } from "./Heightmap";
 import { SplatMap } from "./SplatMap";
-import { createTerrainMaterial, updateSplatTexture } from "./TerrainShader";
+import { createTerrainMaterial, createSplatTexture, updateSplatTexture } from "./TerrainShader";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 
 // LOD level configuration
 interface LODLevel {
   distance: number;  // Camera distance threshold
   resolution: number;  // Target resolution for this LOD
-  mesh: Mesh | null;
+  mesh: THREE.Mesh | null;
 }
 
 export class TerrainMesh {
-  private scene: Scene;
+  private scene: any;
   private heightmap: Heightmap;
   private splatMap: SplatMap;
-  private mesh: Mesh | null = null;  // Current active mesh
-  private shaderMaterial: ShaderMaterial | null = null;
-  private simpleMaterial: StandardMaterial | null = null;
-  private splatTexture: RawTexture | null = null;
-  private waterMaskTexture: RawTexture | null = null;
+  private mesh: THREE.Mesh | null = null;  // Current active mesh
+  private shaderMaterial: THREE.ShaderMaterial | null = null;
+  private simpleMaterial: THREE.MeshStandardMaterial | null = null;
+  private splatTexture: THREE.DataTexture | null = null;
+  private waterMaskTexture: THREE.DataTexture | null = null;
   private useShader = true;
 
   // Displacement strength (GPU shader based)
   private dispStrength = 0.5;
   private textureScale = 1.0;  // Must match shader's uTextureScale
-  
+
   // Displacement texture data for baking
   private dispTextureData: { pixels: Uint8Array; width: number; height: number } | null = null;
   private dispTextureLoaded = false;
@@ -46,9 +34,8 @@ export class TerrainMesh {
   private lodLevels: LODLevel[] = [];
   private currentLOD = 0;
   private lodEnabled = true;
-  private beforeRenderObserver: Observer<Scene> | null = null;
 
-  constructor(scene: Scene, heightmap: Heightmap) {
+  constructor(scene: any, heightmap: Heightmap) {
     this.scene = scene;
     this.heightmap = heightmap;
     this.splatMap = new SplatMap(heightmap.getResolution() * 2);
@@ -59,18 +46,23 @@ export class TerrainMesh {
    * Load displacement texture for baking into mesh during export
    */
   private loadDisplacementTexture(): void {
-    const dispTexture = new Texture("/textures/rock_disp.jpg", this.scene, false, false);
-    dispTexture.onLoadObservable.addOnce(async () => {
-      const size = dispTexture.getSize();
-      const pixels = await dispTexture.readPixels() as Uint8Array;
+    const loader = new THREE.TextureLoader();
+    loader.load("/textures/rock_disp.jpg", (tex) => {
+      const image = tex.image as HTMLImageElement;
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(image, 0, 0);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       this.dispTextureData = {
-        pixels: pixels || new Uint8Array([128]),
-        width: size.width,
-        height: size.height,
+        pixels: new Uint8Array(imageData.data.buffer),
+        width: canvas.width,
+        height: canvas.height,
       };
       this.dispTextureLoaded = true;
-      console.log("[TerrainMesh] Displacement texture loaded for baking:", size.width, "x", size.height);
-      dispTexture.dispose();
+      console.log("[TerrainMesh] Displacement texture loaded for baking:", canvas.width, "x", canvas.height);
+      tex.dispose();
     });
   }
 
@@ -123,7 +115,7 @@ export class TerrainMesh {
     // Define LOD levels based on base resolution and terrain scale
     // Distance thresholds are relative to terrain size for proper scaling
     this.lodLevels = [];
-    
+
     // LOD 0: Full resolution (always) - close up view
     this.lodLevels.push({
       distance: 0,
@@ -171,7 +163,7 @@ export class TerrainMesh {
       );
       // Hide all except LOD 0
       if (i > 0 && this.lodLevels[i].mesh) {
-        this.lodLevels[i].mesh!.setEnabled(false);
+        this.lodLevels[i].mesh!.visible = false;
       }
     }
 
@@ -179,16 +171,13 @@ export class TerrainMesh {
     this.mesh = this.lodLevels[0].mesh;
     this.currentLOD = 0;
 
-    // Setup LOD switching in render loop
-    this.setupLODSwitching();
-
     console.log("[TerrainMesh] Mesh created with", this.lodLevels.length, "LOD levels");
   }
 
   /**
    * Create a mesh at specific resolution
    */
-  private createMeshForResolution(targetResolution: number, name: string): Mesh {
+  private createMeshForResolution(targetResolution: number, name: string): THREE.Mesh {
     const baseResolution = this.heightmap.getResolution();
     const scale = this.heightmap.getScale();
     const step = Math.max(1, Math.floor((baseResolution - 1) / (targetResolution - 1)));
@@ -225,19 +214,18 @@ export class TerrainMesh {
       }
     }
 
-    const mesh = new Mesh(name, this.scene);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+    geometry.setIndex(indices);
+    geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
 
-    const vertexData = new VertexData();
-    vertexData.positions = positions;
-    vertexData.indices = indices;
-    vertexData.uvs = uvs;
-    vertexData.applyToMesh(mesh, true);
+    const material = this.useShader ? this.shaderMaterial : this.simpleMaterial;
+    const mesh = new THREE.Mesh(geometry, material!);
+    mesh.name = name;
+    this.scene.add(mesh);
 
     // Calculate normals
     this.calculateNormalsForMesh(mesh, actualResolution, cellSize, positions);
-
-    // Apply material
-    mesh.material = this.useShader ? this.shaderMaterial : this.simpleMaterial;
 
     console.log(`[TerrainMesh] Created ${name}: ${actualResolution}x${actualResolution} = ${positions.length / 3} vertices`);
     return mesh;
@@ -246,12 +234,11 @@ export class TerrainMesh {
   /**
    * Calculate normals for a specific mesh
    */
-  private calculateNormalsForMesh(mesh: Mesh, resolution: number, cellSize: number, positions: number[]): void {
+  private calculateNormalsForMesh(mesh: THREE.Mesh, resolution: number, cellSize: number, positions: number[]): void {
     const normals: number[] = [];
 
     for (let z = 0; z < resolution; z++) {
       for (let x = 0; x < resolution; x++) {
-        const idx = (z * resolution + x) * 3;
         const idxL = (z * resolution + Math.max(0, x - 1)) * 3;
         const idxR = (z * resolution + Math.min(resolution - 1, x + 1)) * 3;
         const idxD = (Math.max(0, z - 1) * resolution + x) * 3;
@@ -271,43 +258,36 @@ export class TerrainMesh {
       }
     }
 
-    mesh.setVerticesData("normal", normals, true);
+    mesh.geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normals), 3));
   }
 
   /**
-   * Setup automatic LOD switching based on camera distance
+   * Update LOD based on camera distance. Call each frame.
    */
-  private setupLODSwitching(): void {
-    if (this.lodLevels.length <= 1) return;  // No LOD switching needed
+  updateLOD(camera: THREE.Camera): void {
+    if (!this.lodEnabled || this.lodLevels.length <= 1) return;
 
-    const terrainCenter = new Vector3(
+    const terrainCenter = new THREE.Vector3(
       this.heightmap.getScale() / 2,
       0,
       this.heightmap.getScale() / 2
     );
 
-    this.beforeRenderObserver = this.scene.onBeforeRenderObservable.add(() => {
-      if (!this.lodEnabled) return;
+    const distance = camera.position.distanceTo(terrainCenter);
 
-      const camera = this.scene.activeCamera;
-      if (!camera) return;
-
-      const distance = Vector3.Distance(camera.position, terrainCenter);
-
-      // Find appropriate LOD level
-      let targetLOD = 0;
-      for (let i = this.lodLevels.length - 1; i >= 0; i--) {
-        if (distance >= this.lodLevels[i].distance) {
-          targetLOD = i;
-          break;
-        }
+    // Find appropriate LOD level
+    let targetLOD = 0;
+    for (let i = this.lodLevels.length - 1; i >= 0; i--) {
+      if (distance >= this.lodLevels[i].distance) {
+        targetLOD = i;
+        break;
       }
+    }
 
-      // Switch LOD if needed
-      if (targetLOD !== this.currentLOD) {
-        this.switchLOD(targetLOD);
-      }
-    });
+    // Switch LOD if needed
+    if (targetLOD !== this.currentLOD) {
+      this.switchLOD(targetLOD);
+    }
   }
 
   /**
@@ -319,12 +299,12 @@ export class TerrainMesh {
 
     // Hide current LOD mesh
     if (this.lodLevels[this.currentLOD].mesh) {
-      this.lodLevels[this.currentLOD].mesh!.setEnabled(false);
+      this.lodLevels[this.currentLOD].mesh!.visible = false;
     }
 
     // Show new LOD mesh
     if (this.lodLevels[level].mesh) {
-      this.lodLevels[level].mesh!.setEnabled(true);
+      this.lodLevels[level].mesh!.visible = true;
     }
 
     this.currentLOD = level;
@@ -357,15 +337,16 @@ export class TerrainMesh {
       }
     }
 
-    this.mesh.setVerticesData("normal", normals, true);
+    this.mesh.geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normals), 3));
   }
 
   private createMaterials(): void {
     const resolution = this.heightmap.getResolution();
+    const scale = this.heightmap.getScale();
     console.log("[TerrainMesh] Creating materials, resolution:", resolution);
 
-    // Create splat texture
-    this.splatTexture = this.createSplatTexture();
+    // Create splat texture using TerrainShader helper
+    this.splatTexture = createSplatTexture(this.splatMap.getData(), this.splatMap.getResolution());
     console.log("[TerrainMesh] Splat texture created");
 
     // Create water mask texture
@@ -375,14 +356,12 @@ export class TerrainMesh {
     // Create shader material
     try {
       this.shaderMaterial = createTerrainMaterial(
-        this.scene,
-        this.splatMap.getData(),
-        resolution
+        this.splatTexture,
+        this.waterMaskTexture,
+        scale
       );
-      this.shaderMaterial.setTexture("uSplatMap", this.splatTexture);
-      this.shaderMaterial.setTexture("uWaterMask", this.waterMaskTexture);
       // Set initial displacement strength
-      this.shaderMaterial.setFloat("uDispStrength", this.dispStrength);
+      this.shaderMaterial.uniforms.uDispStrength.value = this.dispStrength;
       console.log("[TerrainMesh] Shader material created successfully");
     } catch (e) {
       console.error("[TerrainMesh] Failed to create shader material:", e);
@@ -390,40 +369,15 @@ export class TerrainMesh {
     }
 
     // Create simple fallback material
-    this.simpleMaterial = new StandardMaterial("terrainSimple", this.scene);
-    this.simpleMaterial.diffuseColor = new Color3(0.35, 0.55, 0.2);
-    this.simpleMaterial.specularColor = new Color3(0.1, 0.1, 0.1);
-    this.simpleMaterial.specularPower = 16;
+    this.simpleMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(0.35, 0.55, 0.2),
+      roughness: 0.8,
+      metalness: 0.0,
+    });
     console.log("[TerrainMesh] Using shader:", this.useShader);
   }
 
-  private createSplatTexture(): RawTexture {
-    const resolution = this.splatMap.getResolution();
-    const data = this.splatMap.getData();
-    const uint8Data = new Uint8Array(resolution * resolution * 4);
-
-    for (let i = 0; i < resolution * resolution * 4; i++) {
-      uint8Data[i] = Math.floor(data[i] * 255);
-    }
-
-    const texture = new RawTexture(
-      uint8Data,
-      resolution,
-      resolution,
-      Engine.TEXTUREFORMAT_RGBA,
-      this.scene,
-      false,
-      false,
-      Texture.BILINEAR_SAMPLINGMODE
-    );
-
-    texture.wrapU = Texture.CLAMP_ADDRESSMODE;
-    texture.wrapV = Texture.CLAMP_ADDRESSMODE;
-
-    return texture;
-  }
-
-  private createWaterMaskTexture(): RawTexture {
+  private createWaterMaskTexture(): THREE.DataTexture {
     const resolution = this.splatMap.getResolution();
     const waterMask = this.splatMap.getWaterMask();
     // Use RGBA format for compatibility - store water value in R channel
@@ -437,19 +391,18 @@ export class TerrainMesh {
       uint8Data[i * 4 + 3] = 255;    // A
     }
 
-    const texture = new RawTexture(
+    const texture = new THREE.DataTexture(
       uint8Data,
       resolution,
       resolution,
-      Engine.TEXTUREFORMAT_RGBA,
-      this.scene,
-      false,
-      false,
-      Texture.BILINEAR_SAMPLINGMODE
+      THREE.RGBAFormat
     );
 
-    texture.wrapU = Texture.CLAMP_ADDRESSMODE;
-    texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.needsUpdate = true;
 
     return texture;
   }
@@ -472,28 +425,13 @@ export class TerrainMesh {
       uint8Data[i * 4 + 3] = 255;    // A
     }
 
-    this.waterMaskTexture.update(uint8Data);
+    this.waterMaskTexture.image = { data: uint8Data, width: resolution, height: resolution };
+    this.waterMaskTexture.needsUpdate = true;
   }
 
   updateSplatTexture(): void {
-    if (!this.splatTexture) {
-      console.warn("[TerrainMesh] updateSplatTexture: No splatTexture!");
-      return;
-    }
-
-    const resolution = this.splatMap.getResolution();
-    const data = this.splatMap.getData();
-    const uint8Data = new Uint8Array(resolution * resolution * 4);
-
-    for (let i = 0; i < resolution * resolution; i++) {
-      const idx = i * 4;
-      uint8Data[idx] = Math.floor(data[idx] * 255);
-      uint8Data[idx + 1] = Math.floor(data[idx + 1] * 255);
-      uint8Data[idx + 2] = Math.floor(data[idx + 2] * 255);
-      uint8Data[idx + 3] = Math.floor(data[idx + 3] * 255);
-    }
-
-    this.splatTexture.update(uint8Data);
+    if (!this.splatTexture) return;
+    updateSplatTexture(this.splatTexture, this.splatMap.getData(), this.splatMap.getResolution());
   }
 
   getSplatMap(): SplatMap {
@@ -511,15 +449,16 @@ export class TerrainMesh {
   /**
    * Update a specific mesh from heightmap
    */
-  private updateMeshFromHeightmap(mesh: Mesh, targetResolution: number): void {
+  private updateMeshFromHeightmap(mesh: THREE.Mesh, targetResolution: number): void {
     const baseResolution = this.heightmap.getResolution();
     const scale = this.heightmap.getScale();
     const step = Math.max(1, Math.floor((baseResolution - 1) / (targetResolution - 1)));
     const actualResolution = Math.floor((baseResolution - 1) / step) + 1;
     const cellSize = scale / (actualResolution - 1);
 
-    const positions = mesh.getVerticesData("position");
-    if (!positions) return;
+    const posAttr = mesh.geometry.getAttribute('position');
+    if (!posAttr) return;
+    const positions = posAttr.array as Float32Array;
 
     for (let z = 0; z < actualResolution; z++) {
       for (let x = 0; x < actualResolution; x++) {
@@ -530,9 +469,10 @@ export class TerrainMesh {
       }
     }
 
-    mesh.setVerticesData("position", positions, true);
+    posAttr.needsUpdate = true;
     this.calculateNormalsForMesh(mesh, actualResolution, cellSize, Array.from(positions));
-    mesh.refreshBoundingInfo();
+    mesh.geometry.computeBoundingBox();
+    mesh.geometry.computeBoundingSphere();
   }
 
   /**
@@ -541,7 +481,7 @@ export class TerrainMesh {
   setDispStrength(strength: number): void {
     this.dispStrength = strength;
     if (this.shaderMaterial) {
-      this.shaderMaterial.setFloat("uDispStrength", strength);
+      this.shaderMaterial.uniforms.uDispStrength.value = strength;
     }
   }
 
@@ -585,13 +525,13 @@ export class TerrainMesh {
 
   setSplatMapEnabled(enabled: boolean): void {
     if (this.shaderMaterial) {
-      this.shaderMaterial.setFloat("uUseSplatMap", enabled ? 1.0 : 0.0);
+      this.shaderMaterial.uniforms.uUseSplatMap.value = enabled ? 1.0 : 0.0;
     }
   }
 
   setDebugMode(mode: number): void {
     if (this.shaderMaterial) {
-      this.shaderMaterial.setInt("uDebugMode", mode);
+      this.shaderMaterial.uniforms.uDebugMode.value = mode;
     }
   }
 
@@ -600,16 +540,16 @@ export class TerrainMesh {
     // Update material for all LOD meshes
     for (const lod of this.lodLevels) {
       if (lod.mesh) {
-        lod.mesh.material = use ? this.shaderMaterial : this.simpleMaterial;
+        lod.mesh.material = use ? this.shaderMaterial! : this.simpleMaterial!;
       }
     }
   }
 
-  getMesh(): Mesh | null {
+  getMesh(): any {
     return this.mesh;
   }
 
-  getMaterial(): Material | null {
+  getMaterial(): any {
     return this.useShader ? this.shaderMaterial : this.simpleMaterial;
   }
 
@@ -617,7 +557,8 @@ export class TerrainMesh {
    * Create a mesh with displacement baked into vertices for export
    * This replicates what the vertex shader does but on CPU
    */
-  createBakedMeshForExport(): Mesh | null {
+  // TODO: Restore THREE.Mesh return type after page.tsx migration
+  createBakedMeshForExport(): any {
     if (!this.dispTextureLoaded || !this.dispTextureData) {
       console.warn("[TerrainMesh] Displacement texture not loaded yet, exporting without displacement");
     }
@@ -636,22 +577,22 @@ export class TerrainMesh {
       for (let x = 0; x < resolution; x++) {
         const worldX = x * cellSize;
         const worldZ = z * cellSize;
-        
+
         // Base height from heightmap
         let height = this.heightmap.getHeight(x, z);
-        
+
         // Add displacement for rock areas (same logic as vertex shader)
         if (this.dispTextureData) {
           const weights = this.splatMap.getWeights(x, z);
           const rockWeight = weights[2];  // index 2 = rock (blue channel)
-          
+
           if (rockWeight > 0) {
             const dispValue = this.sampleDisplacement(worldX, worldZ);
             // Same formula as vertex shader: (dispValue - 0.5) * strength * rockWeight
             height += (dispValue - 0.5) * this.dispStrength * rockWeight;
           }
         }
-        
+
         positions.push(worldX, height, worldZ);
         uvs.push(x / (resolution - 1), z / (resolution - 1));
         normals.push(0, 1, 0);
@@ -671,20 +612,16 @@ export class TerrainMesh {
       }
     }
 
-    // Create export mesh
-    const exportMesh = new Mesh("terrain_export", this.scene);
-
-    const vertexData = new VertexData();
-    vertexData.positions = positions;
-    vertexData.indices = indices;
-    vertexData.uvs = uvs;
-    vertexData.applyToMesh(exportMesh, false);
+    // Create export mesh geometry
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+    geometry.setIndex(indices);
+    geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
 
     // Calculate normals for baked mesh
     const bakedNormals: number[] = [];
     for (let z = 0; z < resolution; z++) {
       for (let x = 0; x < resolution; x++) {
-        const idx = (z * resolution + x) * 3;
         const idxL = (z * resolution + Math.max(0, x - 1)) * 3;
         const idxR = (z * resolution + Math.min(resolution - 1, x + 1)) * 3;
         const idxD = (Math.max(0, z - 1) * resolution + x) * 3;
@@ -703,28 +640,22 @@ export class TerrainMesh {
         bakedNormals.push(nx / len, 1 / len, nz / len);
       }
     }
-    exportMesh.setVerticesData("normal", bakedNormals, false);
+    geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(bakedNormals), 3));
 
     // Apply simple material for export (shader won't work in GLB)
-    const exportMaterial = new StandardMaterial("terrain_export_mat", this.scene);
-    exportMaterial.diffuseColor = new Color3(0.5, 0.5, 0.5);
-    exportMesh.material = exportMaterial;
+    const exportMaterial = new THREE.MeshStandardMaterial({ color: 0x808080 });
+    const exportMesh = new THREE.Mesh(geometry, exportMaterial);
+    exportMesh.name = "terrain_export";
 
     console.log("[TerrainMesh] Created baked mesh for export with", positions.length / 3, "vertices");
     return exportMesh;
   }
 
   dispose(): void {
-    // Remove render observer
-    if (this.beforeRenderObserver) {
-      this.scene.onBeforeRenderObservable.remove(this.beforeRenderObserver);
-      this.beforeRenderObserver = null;
-    }
-
     // Dispose all LOD meshes
     for (const lod of this.lodLevels) {
       if (lod.mesh) {
-        lod.mesh.dispose();
+        disposeMesh(this.scene, lod.mesh);
         lod.mesh = null;
       }
     }

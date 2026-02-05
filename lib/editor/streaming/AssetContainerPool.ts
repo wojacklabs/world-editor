@@ -1,16 +1,12 @@
-import {
-  Scene,
-  AssetContainer,
-  SceneLoader,
-  AbstractMesh,
-  TransformNode,
-} from "@babylonjs/core";
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { disposeMesh } from "../../shared/rendering/threeHelpers";
 
 /**
  * Asset entry in the pool
  */
 interface PooledAsset {
-  container: AssetContainer;
+  scene: THREE.Group;
   refCount: number;
   lastUsed: number;
   path: string;
@@ -22,13 +18,13 @@ interface PooledAsset {
 export interface AssetInstance {
   id: string;
   assetPath: string;
-  rootNode: TransformNode;
-  meshes: AbstractMesh[];
+  rootNode: THREE.Group;
+  meshes: THREE.Mesh[];
 }
 
 /**
  * AssetContainerPool manages loading, caching, and instancing of GLB/GLTF assets
- * 
+ *
  * Features:
  * - Lazy loading with caching
  * - Reference counting for automatic cleanup
@@ -36,27 +32,30 @@ export interface AssetInstance {
  * - Memory management with LRU eviction
  */
 export class AssetContainerPool {
-  private scene: Scene;
+  // TODO: Change back to THREE.Scene after EditorEngine migration
+  private parentScene: any;
   private pool: Map<string, PooledAsset> = new Map();
   private instances: Map<string, AssetInstance> = new Map();
   private maxPoolSize: number;
   private instanceCounter: number = 0;
+  private gltfLoader: GLTFLoader;
 
-  constructor(scene: Scene, maxPoolSize: number = 50) {
-    this.scene = scene;
+  constructor(scene: any, maxPoolSize: number = 50) {
+    this.parentScene = scene;
     this.maxPoolSize = maxPoolSize;
+    this.gltfLoader = new GLTFLoader();
   }
 
   /**
-   * Load an asset container (cached)
+   * Load an asset (cached)
    */
-  async loadAsset(path: string): Promise<AssetContainer> {
+  async loadAsset(path: string): Promise<THREE.Group> {
     // Check cache first
     const existing = this.pool.get(path);
     if (existing) {
       existing.refCount++;
       existing.lastUsed = Date.now();
-      return existing.container;
+      return existing.scene;
     }
 
     // Evict if pool is full
@@ -66,16 +65,12 @@ export class AssetContainerPool {
 
     // Load new asset
     console.log(`[AssetContainerPool] Loading asset: ${path}`);
-    
+
     try {
-      const container = await SceneLoader.LoadAssetContainerAsync(
-        "",
-        path,
-        this.scene
-      );
+      const gltf = await this.gltfLoader.loadAsync(path);
 
       const pooled: PooledAsset = {
-        container,
+        scene: gltf.scene,
         refCount: 1,
         lastUsed: Date.now(),
         path,
@@ -83,8 +78,8 @@ export class AssetContainerPool {
 
       this.pool.set(path, pooled);
       console.log(`[AssetContainerPool] Loaded and cached: ${path}`);
-      
-      return container;
+
+      return gltf.scene;
     } catch (error) {
       console.error(`[AssetContainerPool] Failed to load: ${path}`, error);
       throw error;
@@ -101,26 +96,17 @@ export class AssetContainerPool {
     scale?: { x: number; y: number; z: number }
   ): Promise<AssetInstance | null> {
     try {
-      const container = await this.loadAsset(assetPath);
-      
-      // Instantiate into scene
-      const result = container.instantiateModelsToScene(
-        (name) => `${name}_inst_${this.instanceCounter}`,
-        false
-      );
+      const sourceScene = await this.loadAsset(assetPath);
 
-      if (!result.rootNodes || result.rootNodes.length === 0) {
-        console.warn(`[AssetContainerPool] No root nodes in: ${assetPath}`);
-        return null;
-      }
-
-      const rootNode = result.rootNodes[0] as TransformNode;
-      const meshes: AbstractMesh[] = [];
+      // Clone the scene graph
+      const rootNode = sourceScene.clone();
+      rootNode.name = `${sourceScene.name}_inst_${this.instanceCounter}`;
 
       // Collect all meshes
-      rootNode.getChildMeshes(false).forEach(mesh => {
-        if (mesh instanceof AbstractMesh) {
-          meshes.push(mesh);
+      const meshes: THREE.Mesh[] = [];
+      rootNode.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          meshes.push(child);
         }
       });
 
@@ -132,8 +118,10 @@ export class AssetContainerPool {
         rootNode.rotation.set(rotation.x, rotation.y, rotation.z);
       }
       if (scale) {
-        rootNode.scaling.set(scale.x, scale.y, scale.z);
+        rootNode.scale.set(scale.x, scale.y, scale.z);
       }
+
+      this.parentScene.add(rootNode);
 
       const instanceId = `inst_${this.instanceCounter++}`;
       const instance: AssetInstance = {
@@ -144,7 +132,7 @@ export class AssetContainerPool {
       };
 
       this.instances.set(instanceId, instance);
-      
+
       return instance;
     } catch (error) {
       console.error(`[AssetContainerPool] Failed to create instance: ${assetPath}`, error);
@@ -160,8 +148,7 @@ export class AssetContainerPool {
     if (!instance) return;
 
     // Dispose meshes and root node
-    instance.meshes.forEach(mesh => mesh.dispose());
-    instance.rootNode.dispose();
+    disposeMesh(this.parentScene, instance.rootNode);
 
     this.instances.delete(instanceId);
 
@@ -170,20 +157,6 @@ export class AssetContainerPool {
     if (pooled) {
       pooled.refCount--;
     }
-  }
-
-  /**
-   * Add all meshes from a container to the scene
-   */
-  addContainerToScene(container: AssetContainer): void {
-    container.addAllToScene();
-  }
-
-  /**
-   * Remove all meshes from a container from the scene
-   */
-  removeContainerFromScene(container: AssetContainer): void {
-    container.removeAllFromScene();
   }
 
   /**
@@ -206,7 +179,7 @@ export class AssetContainerPool {
   private evictLeastRecentlyUsed(): void {
     // Find assets with zero references, sorted by last used time
     const candidates: Array<{ path: string; lastUsed: number }> = [];
-    
+
     for (const [path, pooled] of this.pool) {
       if (pooled.refCount <= 0) {
         candidates.push({ path, lastUsed: pooled.lastUsed });
@@ -222,7 +195,17 @@ export class AssetContainerPool {
       const pooled = this.pool.get(toEvict.path);
       if (pooled) {
         console.log(`[AssetContainerPool] Evicting: ${toEvict.path}`);
-        pooled.container.dispose();
+        // Dispose all geometries and materials in the cached scene
+        pooled.scene.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry?.dispose();
+            if (Array.isArray(child.material)) {
+              child.material.forEach((m) => m.dispose());
+            } else {
+              child.material?.dispose();
+            }
+          }
+        });
         this.pool.delete(toEvict.path);
       }
     }
@@ -234,7 +217,7 @@ export class AssetContainerPool {
   async preload(paths: string[]): Promise<void> {
     const promises = paths.map(path => this.loadAsset(path).catch(() => null));
     await Promise.all(promises);
-    
+
     // Release references since we're just preloading
     paths.forEach(path => this.releaseAsset(path));
   }
@@ -264,7 +247,7 @@ export class AssetContainerPool {
    */
   clearUnused(): void {
     const toRemove: string[] = [];
-    
+
     for (const [path, pooled] of this.pool) {
       if (pooled.refCount <= 0) {
         toRemove.push(path);
@@ -274,7 +257,16 @@ export class AssetContainerPool {
     for (const path of toRemove) {
       const pooled = this.pool.get(path);
       if (pooled) {
-        pooled.container.dispose();
+        pooled.scene.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry?.dispose();
+            if (Array.isArray(child.material)) {
+              child.material.forEach((m) => m.dispose());
+            } else {
+              child.material?.dispose();
+            }
+          }
+        });
         this.pool.delete(path);
       }
     }
@@ -291,9 +283,18 @@ export class AssetContainerPool {
       this.removeInstance(instanceId);
     }
 
-    // Dispose all containers
+    // Dispose all cached scenes
     for (const pooled of this.pool.values()) {
-      pooled.container.dispose();
+      pooled.scene.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry?.dispose();
+          if (Array.isArray(child.material)) {
+            child.material.forEach((m) => m.dispose());
+          } else {
+            child.material?.dispose();
+          }
+        }
+      });
     }
 
     this.pool.clear();
