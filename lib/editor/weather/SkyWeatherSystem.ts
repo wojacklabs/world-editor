@@ -440,11 +440,16 @@ export class SkyWeatherSystem {
     const preset = WEATHER_PRESETS[this.state.weatherPreset];
 
     if (this.directionalLight) {
-      // Three.js DirectionalLight: position is where the light comes FROM, it shines toward (0,0,0) by default
-      const negDir = this.sunDirection.clone().negate();
-      this.directionalLight.position.copy(negDir);
+      // Three.js DirectionalLight: position is where the light comes FROM
+      // Scale up to move shadow camera further from terrain center for better coverage
+      const lightPos = this.sunDirection.clone().multiplyScalar(100);
+      this.directionalLight.position.copy(lightPos);
       this.directionalLight.color.copy(this.sunColor);
       this.directionalLight.intensity = 0.6 * preset.sunIntensityMultiplier * (1 - this.nightFactor * 0.8);
+
+      // Update shadow camera target to terrain center
+      this.directionalLight.target.position.set(32, 0, 32);
+      this.directionalLight.target.updateMatrixWorld();
     }
 
     if (this.hemisphericLight) {

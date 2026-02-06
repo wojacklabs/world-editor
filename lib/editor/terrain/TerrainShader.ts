@@ -17,6 +17,9 @@ function loadTerrainTexture(basePath: string): THREE.Texture {
 const terrainVertexShader = `
 precision highp float;
 
+#include <common>
+#include <shadowmap_pars_vertex>
+
 // Uniforms
 uniform sampler2D uSplatMap;
 uniform sampler2D uRockDisp;
@@ -78,12 +81,19 @@ void main() {
     vec3 B = vec3(0.0, 0.0, 1.0);
     vec3 N = vNormal;
     vTBN = mat3(T, B, N);
+
+    // Shadow map coordinate computation
+    #include <shadowmap_vertex>
 }
 `;
 
 // Terrain fragment shader
 const terrainFragmentShader = `
 precision highp float;
+
+#include <common>
+#include <packing>
+#include <shadowmap_pars_fragment>
 
 // Uniforms
 uniform vec3 uSunDirection;
@@ -907,8 +917,25 @@ void main() {
         return;
     }
 
-    // Final color composition
-    vec3 color = baseColor * ao * (uAmbientIntensity + diffuse * uSunColor) + specular * uSunColor + rim;
+    // Shadow factor from shadow map
+    float shadowFactor = 1.0;
+    #if NUM_DIR_LIGHT_SHADOWS > 0
+    {
+        DirectionalLightShadow dirShadow = directionalLightShadows[0];
+        shadowFactor = getShadow(
+            directionalShadowMap[0],
+            dirShadow.shadowMapSize,
+            dirShadow.shadowIntensity,
+            dirShadow.shadowBias,
+            dirShadow.shadowNormalBias,
+            dirShadow.shadowRadius,
+            vDirectionalShadowCoord[0]
+        );
+    }
+    #endif
+
+    // Final color composition (shadow affects diffuse and specular, not ambient)
+    vec3 color = baseColor * ao * (uAmbientIntensity + diffuse * uSunColor * shadowFactor) + specular * uSunColor * shadowFactor + rim;
 
     // ========== Improved Fog System ==========
     // 1. Calculate distance from fragment's world position to camera (per-pixel)
@@ -1051,7 +1078,11 @@ export function createTerrainMaterial(splatTexture: THREE.Texture, waterMaskText
   const material = new THREE.ShaderMaterial({
     vertexShader: terrainVertexShader,
     fragmentShader: terrainFragmentShader,
-    uniforms,
+    uniforms: THREE.UniformsUtils.merge([
+      THREE.UniformsLib.lights,
+      uniforms,
+    ]),
+    lights: true,
     side: THREE.DoubleSide,
   });
 

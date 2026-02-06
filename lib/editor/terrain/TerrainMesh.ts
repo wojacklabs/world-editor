@@ -222,6 +222,7 @@ export class TerrainMesh {
     const material = this.useShader ? this.shaderMaterial : this.simpleMaterial;
     const mesh = new THREE.Mesh(geometry, material!);
     mesh.name = name;
+    mesh.receiveShadow = true;
     this.scene.add(mesh);
 
     // Calculate normals

@@ -503,6 +503,10 @@ void main() {
 const rockFragmentShader = `
 precision highp float;
 
+#include <common>
+#include <packing>
+#include <shadowmap_pars_fragment>
+
 varying vec3 vNormal;
 varying vec3 vWorldPosition;
 
@@ -545,8 +549,25 @@ void main() {
     vec3 halfVec = normalize(uSunDirection + viewDir);
     float specular = pow(max(dot(normal, halfVec), 0.0), 32.0) * 0.15;
 
-    vec3 color = albedo * (uAmbient + diffuse * uSunColor);
-    color += uSpecularColor * specular * uSunColor;
+    // Shadow factor
+    float shadowFactor = 1.0;
+    #if NUM_DIR_LIGHT_SHADOWS > 0
+    {
+        DirectionalLightShadow dirShadow = directionalLightShadows[0];
+        shadowFactor = getShadow(
+            directionalShadowMap[0],
+            dirShadow.shadowMapSize,
+            dirShadow.shadowIntensity,
+            dirShadow.shadowBias,
+            dirShadow.shadowNormalBias,
+            dirShadow.shadowRadius,
+            vDirectionalShadowCoord[0]
+        );
+    }
+    #endif
+
+    vec3 color = albedo * (uAmbient + diffuse * uSunColor * shadowFactor);
+    color += uSpecularColor * specular * uSunColor * shadowFactor;
 
     // ========== Fog System (matching terrain) ==========
     float distanceToCamera = length(vWorldPosition - cameraPosition);
@@ -574,6 +595,9 @@ void main() {
 const rockVertexShaderFull = `
 precision highp float;
 
+#include <common>
+#include <shadowmap_pars_vertex>
+
 varying vec3 vNormal;
 varying vec3 vWorldPosition;
 
@@ -585,6 +609,9 @@ void main() {
     vNormal = normalize(mat3(worldMatrix) * normal);
 
     gl_Position = projectionMatrix * viewMatrix * worldPos;
+
+    // Shadow map coordinate computation
+    #include <shadowmap_vertex>
 }
 `;
 
@@ -1301,19 +1328,23 @@ export class FoliageSystem {
     this.rockMaterial = new THREE.ShaderMaterial({
       vertexShader: rockVertexShaderFull,
       fragmentShader: rockFragmentShader,
-      uniforms: {
-        uSunDirection: { value: new THREE.Vector3(0.5, 1, 0.5).normalize() },
-        uSunColor: { value: new THREE.Color(1, 0.95, 0.8) },
-        uAmbient: { value: 0.4 },
-        uDiffuseColor: { value: new THREE.Color(0.5, 0.48, 0.45) },
-        uSpecularColor: { value: new THREE.Color(0.1, 0.1, 0.1) },
-        rockTexture: { value: rockTex },
-        textureScale: { value: 1.0 },
-        uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
-        uFogDensity: { value: 0.008 },
-        uFogHeightFalloff: { value: 5.0 },
-        uFogHeightDensity: { value: 0.1 },
-      },
+      uniforms: THREE.UniformsUtils.merge([
+        THREE.UniformsLib.lights,
+        {
+          uSunDirection: { value: new THREE.Vector3(0.5, 1, 0.5).normalize() },
+          uSunColor: { value: new THREE.Color(1, 0.95, 0.8) },
+          uAmbient: { value: 0.4 },
+          uDiffuseColor: { value: new THREE.Color(0.5, 0.48, 0.45) },
+          uSpecularColor: { value: new THREE.Color(0.1, 0.1, 0.1) },
+          rockTexture: { value: rockTex },
+          textureScale: { value: 1.0 },
+          uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+          uFogDensity: { value: 0.008 },
+          uFogHeightFalloff: { value: 5.0 },
+          uFogHeightDensity: { value: 0.1 },
+        },
+      ]),
+      lights: true,
       side: THREE.DoubleSide,
     });
 
@@ -1513,6 +1544,11 @@ export class FoliageSystem {
     const instanceCount = matrices.length / 16;
     const instMesh = new THREE.InstancedMesh(geometry, material, instanceCount);
     instMesh.name = name;
+
+    // Rocks cast and receive shadows; grass only receives (too many instances to cast)
+    const isRock = name.includes("rock");
+    instMesh.castShadow = isRock;
+    instMesh.receiveShadow = true;
 
     const mat4 = new THREE.Matrix4();
     for (let i = 0; i < instanceCount; i++) {

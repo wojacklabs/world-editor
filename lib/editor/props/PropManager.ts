@@ -38,6 +38,9 @@ const REFERENCE_TREE_URL = "/assets/references/infinite-terrain/tree.glb";
 const propThinVertexShader = `
 precision highp float;
 
+#include <common>
+#include <shadowmap_pars_vertex>
+
 varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vLocalPosition;
@@ -57,11 +60,17 @@ void main() {
     vUV = uv;
     vCameraDistance = length(cameraPosition - worldPos.xyz);
     vViewDirection = normalize(cameraPosition - worldPos.xyz);
+
+    #include <shadowmap_vertex>
 }
 `;
 
 const propThinFragmentShader = `
 precision highp float;
+
+#include <common>
+#include <packing>
+#include <shadowmap_pars_fragment>
 
 uniform vec3 baseColor;
 uniform vec3 detailColor;
@@ -146,11 +155,28 @@ void main() {
     // Ambient occlusion approximation
     float ao = 0.5 + 0.5 * normal.y;
 
-    // Final lighting
+    // Shadow factor
+    float shadowFactor = 1.0;
+    #if NUM_DIR_LIGHT_SHADOWS > 0
+    {
+        DirectionalLightShadow dirShadow = directionalLightShadows[0];
+        shadowFactor = getShadow(
+            directionalShadowMap[0],
+            dirShadow.shadowMapSize,
+            dirShadow.shadowIntensity,
+            dirShadow.shadowBias,
+            dirShadow.shadowNormalBias,
+            dirShadow.shadowRadius,
+            vDirectionalShadowCoord[0]
+        );
+    }
+    #endif
+
+    // Final lighting (shadow affects diffuse, not ambient)
     vec3 ambient = vec3(ambientIntensity) * ao;
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.85, 1.0);
 
-    color = color * (ambient + diffuse) + rim;
+    color = color * (ambient + diffuse * shadowFactor) + rim;
 
     // Fog
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
@@ -165,6 +191,9 @@ void main() {
 // Wind-enabled instanced mesh shader for foliage props
 const propThinWindVertexShader = `
 precision highp float;
+
+#include <common>
+#include <shadowmap_pars_vertex>
 
 attribute vec4 color;
 
@@ -235,11 +264,17 @@ void main() {
     vCameraDistance = length(cameraPosition - worldPos.xyz);
     vViewDirection = normalize(cameraPosition - worldPos.xyz);
     vColor = color;
+
+    #include <shadowmap_vertex>
 }
 `;
 
 const propThinWindFragmentShader = `
 precision highp float;
+
+#include <common>
+#include <packing>
+#include <shadowmap_pars_fragment>
 
 uniform vec3 baseColor;
 uniform vec3 detailColor;
@@ -360,12 +395,29 @@ void main() {
     float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y) * leafMask;
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
 
-    // Final lighting
+    // Shadow factor
+    float shadowFactor = 1.0;
+    #if NUM_DIR_LIGHT_SHADOWS > 0
+    {
+        DirectionalLightShadow dirShadow = directionalLightShadows[0];
+        shadowFactor = getShadow(
+            directionalShadowMap[0],
+            dirShadow.shadowMapSize,
+            dirShadow.shadowIntensity,
+            dirShadow.shadowBias,
+            dirShadow.shadowNormalBias,
+            dirShadow.shadowRadius,
+            vDirectionalShadowCoord[0]
+        );
+    }
+    #endif
+
+    // Final lighting (shadow affects diffuse, not ambient)
     float diffuse = halfLambert * 0.6 + 0.4;
     vec3 ambient = vec3(ambientIntensity);
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
 
-    color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
+    color = color * (ambient + diffuse * shadowFactor) + rim + vec3(0.1, 0.15, 0.05) * sss;
 
     // Fresnel: mix blend for softer rim
     color = mix(color, uFresnelColor, clamp(fresnel * leafMask, 0.0, 1.0));
@@ -1046,34 +1098,38 @@ export class PropManager {
       material = new THREE.ShaderMaterial({
         vertexShader: propThinWindVertexShader,
         fragmentShader: propThinWindFragmentShader,
-        uniforms: {
-          cameraPosition: { value: new THREE.Vector3() },
-          uTime: { value: 0 },
-          uWindDirection: { value: new THREE.Vector2(Math.cos(windAngle), Math.sin(windAngle)) },
-          uWindStrength: { value: windStrength },
-          uMinWindHeight: { value: minWindHeight },
-          uMaxWindHeight: { value: maxWindHeight },
-          uPropsPrimarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed },
-          uPropsSecondarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed },
-          uPropsNoiseSpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed },
-          baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
-          detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
-          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
-          ambientIntensity: { value: 0.4 },
-          fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
-          fogDensity: { value: 0.008 },
-          dirtTexture: { value: dirtTex },
-          dirtTextureScale: { value: 0.5 },
-          leafAtlas: { value: leafAtlas },
-          uLeafAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
-          uLeafFadeStart: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart },
-          uLeafFadeEnd: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd },
-          uUseLeafAtlas: { value: assetType === "tree" || assetType === "bush" ? 1.0 : 0.0 },
-          uLeafMaskFromLuma: { value: 1.0 },
-          uFresnelPower: { value: 3.0 },
-          uFresnelStrength: { value: 0.4 },
-          uFresnelColor: { value: new THREE.Color(0.8, 0.95, 0.7) },
-        },
+        uniforms: THREE.UniformsUtils.merge([
+          THREE.UniformsLib.lights,
+          {
+            cameraPosition: { value: new THREE.Vector3() },
+            uTime: { value: 0 },
+            uWindDirection: { value: new THREE.Vector2(Math.cos(windAngle), Math.sin(windAngle)) },
+            uWindStrength: { value: windStrength },
+            uMinWindHeight: { value: minWindHeight },
+            uMaxWindHeight: { value: maxWindHeight },
+            uPropsPrimarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed },
+            uPropsSecondarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed },
+            uPropsNoiseSpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed },
+            baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
+            detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
+            sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+            ambientIntensity: { value: 0.4 },
+            fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+            fogDensity: { value: 0.008 },
+            dirtTexture: { value: dirtTex },
+            dirtTextureScale: { value: 0.5 },
+            leafAtlas: { value: leafAtlas },
+            uLeafAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
+            uLeafFadeStart: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart },
+            uLeafFadeEnd: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd },
+            uUseLeafAtlas: { value: assetType === "tree" || assetType === "bush" ? 1.0 : 0.0 },
+            uLeafMaskFromLuma: { value: 1.0 },
+            uFresnelPower: { value: 3.0 },
+            uFresnelStrength: { value: 0.4 },
+            uFresnelColor: { value: new THREE.Color(0.8, 0.95, 0.7) },
+          },
+        ]),
+        lights: true,
         side: THREE.DoubleSide,
       });
     } else {
@@ -1090,17 +1146,21 @@ export class PropManager {
       material = new THREE.ShaderMaterial({
         vertexShader: propThinVertexShader,
         fragmentShader: propThinFragmentShader,
-        uniforms: {
-          cameraPosition: { value: new THREE.Vector3() },
-          baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
-          detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
-          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
-          ambientIntensity: { value: 0.4 },
-          fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
-          fogDensity: { value: 0.008 },
-          rockTexture: { value: rockTex },
-          textureScale: { value: 1.0 },
-        },
+        uniforms: THREE.UniformsUtils.merge([
+          THREE.UniformsLib.lights,
+          {
+            cameraPosition: { value: new THREE.Vector3() },
+            baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
+            detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
+            sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+            ambientIntensity: { value: 0.4 },
+            fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+            fogDensity: { value: 0.008 },
+            rockTexture: { value: rockTex },
+            textureScale: { value: 1.0 },
+          },
+        ]),
+        lights: true,
         side: THREE.DoubleSide,
       });
     }
@@ -1545,6 +1605,8 @@ export class PropManager {
         groupMesh = new THREE.InstancedMesh(baseGeometry, material, capacity);
         groupMesh.name = `inst_${lodGroupKey}`;
         groupMesh.frustumCulled = false;  // We handle frustum culling manually
+        groupMesh.castShadow = true;
+        groupMesh.receiveShadow = true;
         this.scene.add(groupMesh);
         this.instanceGroups.set(lodGroupKey, groupMesh);
       }

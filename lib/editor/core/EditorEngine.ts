@@ -92,6 +92,10 @@ export class EditorEngine {
 
   // Render loop
   private animationFrameId: number = 0;
+  private lastFrameTime: number = 0;
+  private frameCount: number = 0;
+  private fps: number = 0;
+  private fpsAccumulator: number = 0;
 
   // Camera animation state
   private cameraAnimation: {
@@ -123,7 +127,11 @@ export class EditorEngine {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ReinhardToneMapping;
     this.renderer.toneMappingExposure = 1.1;
-    console.log("[EditorEngine] Using WebGL renderer");
+
+    // Enable shadow mapping
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    console.log("[EditorEngine] Using WebGL renderer with PCFSoftShadowMap");
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0.08, 0.08, 0.1);
@@ -141,9 +149,21 @@ export class EditorEngine {
 
     // Start render loop
     const startTime = performance.now() / 1000;
+    this.lastFrameTime = performance.now();
     const animate = () => {
       this.animationFrameId = requestAnimationFrame(animate);
-      const time = (performance.now() / 1000) - startTime;
+      const now = performance.now();
+      const time = (now / 1000) - startTime;
+
+      // FPS calculation
+      this.frameCount++;
+      this.fpsAccumulator += now - this.lastFrameTime;
+      this.lastFrameTime = now;
+      if (this.fpsAccumulator >= 1000) {
+        this.fps = this.frameCount;
+        this.frameCount = 0;
+        this.fpsAccumulator -= 1000;
+      }
 
       // Update terrain shader uniforms for water effects
       if (this.terrainMesh) {
@@ -274,12 +294,30 @@ export class EditorEngine {
 
   private setupLighting(): void {
     const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4d4d59, 0.6);
-    // groundColor = Color3(0.3, 0.3, 0.35) ~ #4d4d59
     this.scene.add(hemiLight);
 
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
-    dirLight.position.set(0.5, 1, 0.5); // Opposite of direction (-0.5,-1,-0.5)
+    dirLight.position.set(0.5, 1, 0.5);
+
+    // Shadow configuration
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
+    dirLight.shadow.bias = -0.0005;
+    dirLight.shadow.normalBias = 0.02;
+
+    // Shadow camera frustum (covers terrain area)
+    const shadowSize = 80;
+    dirLight.shadow.camera.left = -shadowSize;
+    dirLight.shadow.camera.right = shadowSize;
+    dirLight.shadow.camera.top = shadowSize;
+    dirLight.shadow.camera.bottom = -shadowSize;
+    dirLight.shadow.camera.near = 0.5;
+    dirLight.shadow.camera.far = 200;
+
+    dirLight.target.position.set(32, 0, 32);
     this.scene.add(dirLight);
+    this.scene.add(dirLight.target);
   }
 
   private setupGrid(): void {
@@ -1248,6 +1286,18 @@ export class EditorEngine {
 
   getRenderer(): THREE.WebGLRenderer {
     return this.renderer;
+  }
+
+  /**
+   * Get renderer performance stats (FPS, draw calls, triangles)
+   */
+  getStats(): { fps: number; drawCalls: number; triangles: number } {
+    const info = this.renderer.info.render;
+    return {
+      fps: this.fps,
+      drawCalls: info.calls,
+      triangles: info.triangles,
+    };
   }
 
   getCamera(): THREE.PerspectiveCamera {

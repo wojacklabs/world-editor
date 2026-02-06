@@ -16,6 +16,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
   const animationRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
   const [engineReady, setEngineReady] = useState(false);
+  const [stats, setStats] = useState({ fps: 0, drawCalls: 0, triangles: 0 });
 
   const {
     activeTool,
@@ -84,6 +85,17 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       }
     };
   }, [onEngineReady, setModified]);
+
+  // FPS stats polling
+  useEffect(() => {
+    if (!engineReady || !engineRef.current) return;
+    const id = setInterval(() => {
+      if (engineRef.current) {
+        setStats(engineRef.current.getStats());
+      }
+    }, 500);
+    return () => clearInterval(id);
+  }, [engineReady]);
 
   // Brush application loop
   useEffect(() => {
@@ -464,6 +476,13 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
         className="w-full h-full outline-none"
         style={{ touchAction: "none" }}
       />
+
+      {/* FPS overlay */}
+      <div className="absolute top-4 right-4 text-xs text-zinc-400 bg-zinc-900/80 px-3 py-2 rounded-lg font-mono">
+        <p>{stats.fps} FPS</p>
+        <p>{stats.drawCalls} draws</p>
+        <p>{(stats.triangles / 1000).toFixed(1)}K tris</p>
+      </div>
 
       {/* Controls hint */}
       <div className="absolute bottom-4 left-4 text-xs text-zinc-500 bg-zinc-900/80 px-3 py-2 rounded-lg">
