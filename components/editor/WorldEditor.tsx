@@ -175,6 +175,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
   // Props tool: Create preview when entering props mode or when type/seed changes
   useEffect(() => {
     if (!engineReady || !engineRef.current) return;
+    // Skip in game mode
+    if (engineRef.current.getIsGameMode()) return;
 
     if (activeTool === "props") {
       // Create preview when entering props mode or type/seed changes
@@ -193,6 +195,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
   // Update preview size separately (preserves position)
   useEffect(() => {
     if (!engineReady || !engineRef.current || activeTool !== "props") return;
+    // Skip in game mode
+    if (engineRef.current.getIsGameMode()) return;
     engineRef.current.updatePropPreviewSize(assetSettings.size);
   }, [engineReady, activeTool, assetSettings.size]);
 
@@ -205,6 +209,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
 
     const handleMouseMove = (e: MouseEvent) => {
       if (!engineRef.current) return;
+      // Skip in game mode
+      if (engineRef.current.getIsGameMode()) return;
 
       const point = engineRef.current.pickTerrain(e.clientX, e.clientY);
       if (point) {
@@ -225,6 +231,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
 
     const handleClick = (e: MouseEvent) => {
       if (!engineRef.current) return;
+      // Skip in game mode
+      if (engineRef.current.getIsGameMode()) return;
 
       // Ignore if shift/ctrl is held (camera pan)
       if (e.shiftKey || e.ctrlKey) return;
@@ -286,6 +294,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
 
     const handleClick = (e: MouseEvent) => {
       if (!engineRef.current) return;
+      // Skip in game mode
+      if (engineRef.current.getIsGameMode()) return;
 
       // Ignore if shift/ctrl is held (camera pan)
       if (e.shiftKey || e.ctrlKey) return;
@@ -332,6 +342,8 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     const handleWheel = (e: WheelEvent) => {
       // Only handle if mouse is over canvas
       if (!canvas.contains(e.target as Node)) return;
+      // Skip in game mode
+      if (engineRef.current?.getIsGameMode()) return;
 
       const store = useEditorStore.getState();
 
@@ -366,6 +378,9 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     const keysPressed = new Set<string>();
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip editor shortcuts while in game mode
+      if (engineRef.current?.getIsGameMode()) return;
+
       const store = useEditorStore.getState();
       const key = e.key.toLowerCase();
 
@@ -422,7 +437,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     // Camera movement loop
     let animationId: number;
     const updateCameraMovement = () => {
-      if (engineRef.current) {
+      if (engineRef.current && !engineRef.current.getIsGameMode()) {
         const speed = 1.5;
         if (keysPressed.has("w")) engineRef.current.moveCamera("forward", speed);
         if (keysPressed.has("s")) engineRef.current.moveCamera("backward", speed);

@@ -47,7 +47,6 @@ Exports terrain geometry only. Use for static environments without heightmap acc
 
 See [docs/EXPORT_GUIDE.md](docs/EXPORT_GUIDE.md) for detailed integration instructions with:
 
-- Babylon.js implementation examples
 - Three.js implementation examples
 - Infinite terrain setup
 - Coordinate system reference
@@ -70,8 +69,8 @@ world-editor/
 
 ## Tech Stack
 
-- Next.js 15 (App Router)
-- Babylon.js 7+ (3D rendering)
-- Zustand (State management)
-- TypeScript
-- Tailwind CSS
+- Next.js 16 (App Router)
+- Three.js (3D rendering, WebGL2, custom GLSL shaders)
+- Zustand 5 (State management)
+- TypeScript 5.9 (strict mode)
+- Tailwind CSS v4

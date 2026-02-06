@@ -224,6 +224,8 @@ void main() {
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
 
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 
@@ -382,11 +384,9 @@ void main() {
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping (matching terrain shader)
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

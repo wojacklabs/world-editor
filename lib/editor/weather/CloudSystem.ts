@@ -96,6 +96,8 @@ void main() {
     alpha *= edgeFade;
 
     gl_FragColor = vec4(cloudColor, alpha);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

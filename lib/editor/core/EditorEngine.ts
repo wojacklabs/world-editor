@@ -28,8 +28,9 @@ export class EditorEngine {
   private renderer!: THREE.WebGLRenderer;
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
-  private controls!: OrbitControls;
+  private controls: OrbitControls | null = null;
   private gridMesh: THREE.GridHelper | null = null;
+  private resizeObserver: ResizeObserver | null = null;
 
   // Terrain
   private heightmap: Heightmap | null = null;
@@ -68,6 +69,7 @@ export class EditorEngine {
   private gamePreview: GamePreview | null = null;
   private isGameMode = false;
   private savedClearColor: THREE.Color | null = null;
+  private gamePointerBlocker: ((e: PointerEvent) => void) | null = null;
 
   // Sky and weather system
   private skyWeatherSystem: SkyWeatherSystem | null = null;
@@ -119,6 +121,8 @@ export class EditorEngine {
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.setSize(this.canvas.clientWidth, this.canvas.clientHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ReinhardToneMapping;
+    this.renderer.toneMappingExposure = 1.1;
     console.log("[EditorEngine] Using WebGL renderer");
 
     this.scene = new THREE.Scene();
@@ -158,18 +162,54 @@ export class EditorEngine {
         this.foliageSystem.updateTime(performance.now() / 1000);
       }
 
-      // Update sky weather
-      if (this.skyWeatherSystem) {
-        this.skyWeatherSystem.update();
+      // Update prop wind animation
+      if (this.propManager) {
+        this.propManager.update(this.camera);
       }
 
-      this.controls.update();
-      this.renderer.render(this.scene, this.camera);
+      // Update water animation
+      const waterSystem = this.biomeDecorator?.getWaterSystem();
+      if (waterSystem) {
+        waterSystem.update(performance.now() / 1000, this.camera.position);
+      }
+
+      // Game mode: update GamePreview and render with its camera
+      if (this.isGameMode && this.gamePreview) {
+        const deltaTime = 1 / 60; // Approximate delta
+        this.gamePreview.update(deltaTime);
+
+        // Update sky weather AFTER camera moves (so sky sphere follows game camera)
+        if (this.skyWeatherSystem) {
+          this.skyWeatherSystem.update();
+        }
+
+        const gameCamera = this.gamePreview.getCamera();
+        if (gameCamera) {
+          this.renderer.render(this.scene, gameCamera);
+        }
+      } else {
+        // Editor mode: update OrbitControls and render with editor camera
+        this.controls?.update();
+
+        // Update sky weather after camera update
+        if (this.skyWeatherSystem) {
+          this.skyWeatherSystem.update();
+        }
+
+        this.renderer.render(this.scene, this.camera);
+      }
     };
     animate();
     console.log("[EditorEngine] Render loop started");
 
-    // Handle resize
+    // Handle resize using ResizeObserver on parent element (canvas has inline styles)
+    this.resizeObserver = new ResizeObserver(() => {
+      this.handleResize();
+    });
+    const parent = this.canvas.parentElement;
+    if (parent) {
+      this.resizeObserver.observe(parent);
+    }
     window.addEventListener("resize", this.handleResize);
 
     // Initialize streaming infrastructure (disabled by default in editor)
@@ -184,6 +224,8 @@ export class EditorEngine {
     // Initialize sky and weather system
     this.skyWeatherSystem = new SkyWeatherSystem(this.scene);
     this.skyWeatherSystem.init();
+    // Set editor camera for sky sphere positioning
+    this.skyWeatherSystem.setCamera(this.camera);
     // Connect terrain material for shader sync
     if (this.terrainMesh) {
       const material = this.terrainMesh.getMaterial() as THREE.ShaderMaterial | null;
@@ -296,6 +338,9 @@ export class EditorEngine {
   };
 
   private handlePointerMove(event: PointerEvent): void {
+    // Double-check game mode (safety guard)
+    if (this.isGameMode) return;
+
     const rect = this.canvas.getBoundingClientRect();
     const currentX = event.clientX - rect.left;
     const currentY = event.clientY - rect.top;
@@ -968,6 +1013,14 @@ export class EditorEngine {
    * Only visible when waterType is "river"
    */
   private updateWaterDirectionIndicator(): void {
+    // Don't show indicator in game mode
+    if (this.isGameMode) {
+      if (this.waterDirectionIndicator) {
+        this.waterDirectionIndicator.visible = false;
+      }
+      return;
+    }
+
     if (this.waterType !== "river") {
       // Hide indicator for lake type
       if (this.waterDirectionIndicator) {
@@ -1224,7 +1277,7 @@ export class EditorEngine {
   }
 
   focusOnTerrain(): void {
-    if (this.heightmap) {
+    if (this.heightmap && this.controls) {
       const size = this.heightmap.getScale();
       this.controls.target.set(size / 2, 0, size / 2);
       // Approximate radius = size * 1.5 -> set camera distance
@@ -1268,17 +1321,22 @@ export class EditorEngine {
         break;
     }
 
-    this.controls.target.add(movement);
+    if (this.controls) {
+      this.controls.target.add(movement);
+    }
     this.camera.position.add(movement);
   }
 
   // Control camera wheel zoom
   setCameraWheelEnabled(enabled: boolean): void {
-    this.controls.enableZoom = enabled;
+    if (this.controls) {
+      this.controls.enableZoom = enabled;
+    }
   }
 
   // Manual camera zoom using raw deltaY from wheel event
   zoomCamera(deltaY: number): void {
+    if (!this.controls) return;
     const minDist = this.controls.minDistance;
     const maxDist = this.controls.maxDistance;
 
@@ -1291,6 +1349,7 @@ export class EditorEngine {
   }
 
   setTopView(): void {
+    if (!this.controls) return;
     const dist = this.camera.position.distanceTo(this.controls.target);
     const target = this.controls.target.clone();
     this.camera.position.set(target.x, target.y + dist, target.z + 0.01);
@@ -1301,22 +1360,40 @@ export class EditorEngine {
   enterGameMode(): void {
     if (this.isGameMode || !this.heightmap || !this.terrainMesh) return;
 
+    // Set game mode flag FIRST to prevent race conditions with event handlers
+    this.isGameMode = true;
+
     // Disable terrain LOD FIRST so getMesh() returns the full resolution mesh
     this.terrainMesh.setLODEnabled(false);
 
     const mesh = this.terrainMesh.getMesh();
-    if (!mesh) return;
+    if (!mesh) {
+      this.isGameMode = false;
+      return;
+    }
 
     // Save current state
     this.savedClearColor = (this.scene.background as THREE.Color)?.clone() || null;
 
-    // Hide editor elements
-    if (this.gridMesh) this.gridMesh.visible = false;
-    if (this.brushPreview) this.brushPreview.visible = false;
-    if (this.waterDirectionIndicator) this.waterDirectionIndicator.visible = false;
+    // Remove all editor elements from scene (not just hide)
+    if (this.gridMesh) this.scene.remove(this.gridMesh);
+    if (this.brushPreview) this.scene.remove(this.brushPreview);
+    if (this.waterDirectionIndicator) this.scene.remove(this.waterDirectionIndicator);
+    if (this.propManager) this.propManager.setPreviewVisible(false);
 
-    // Disable editor controls
-    this.controls.enabled = false;
+    // Disable and dispose editor controls to prevent pointer capture conflicts
+    if (this.controls) {
+      this.controls.enabled = false;
+      this.controls.dispose();
+      this.controls = null;
+    }
+
+    // Block any remaining OrbitControls pointer events (dispose may not fully clean up)
+    this.gamePointerBlocker = (e: PointerEvent) => {
+      // Let PointerLockControls handle clicks, block OrbitControls
+      e.stopPropagation();
+    };
+    this.canvas.addEventListener("pointerdown", this.gamePointerBlocker, { capture: true });
 
     // Create and enable game preview with foliage and water systems
     this.gamePreview = new GamePreview(
@@ -1329,17 +1406,28 @@ export class EditorEngine {
     );
     this.gamePreview.enable(mesh);
 
-    this.isGameMode = true;
     this.onGameModeChange?.(true);
+
+    // Trigger resize after DOM settles (sidebar hidden)
+    setTimeout(() => this.handleResize(), 100);
   }
 
   exitGameMode(): void {
     if (!this.isGameMode) return;
 
+    // Set game mode flag FIRST
+    this.isGameMode = false;
+
     // Disable game preview
     if (this.gamePreview) {
       this.gamePreview.disable();
       this.gamePreview = null;
+    }
+
+    // Remove pointer blocker
+    if (this.gamePointerBlocker) {
+      this.canvas.removeEventListener("pointerdown", this.gamePointerBlocker, { capture: true });
+      this.gamePointerBlocker = null;
     }
 
     // Re-enable terrain LOD and ensure mesh is visible
@@ -1356,23 +1444,46 @@ export class EditorEngine {
       this.foliageSystem.resetAllChunkVisibility();
     }
 
-    // Restore editor controls
-    this.controls.enabled = true;
+    // Recreate editor controls (dispose removed all event listeners)
+    this.controls = new OrbitControls(this.camera, this.canvas);
+    this.controls.target.set(32, 0, 32);
+    this.controls.minDistance = 10;
+    this.controls.maxDistance = 300;
+    this.controls.minPolarAngle = 0.1;
+    this.controls.maxPolarAngle = Math.PI / 2 - 0.1;
+    this.controls.enablePan = true;
+    this.controls.panSpeed = 1.0;
+    this.controls.update();
 
     // Restore clear color
     if (this.savedClearColor) {
       this.scene.background = this.savedClearColor;
     }
 
-    // Show editor elements
-    if (this.gridMesh) this.gridMesh.visible = true;
+    // Add editor elements back to scene
+    if (this.gridMesh) {
+      this.scene.add(this.gridMesh);
+      this.gridMesh.visible = true;
+    }
+    if (this.brushPreview) {
+      this.scene.add(this.brushPreview);
+      this.brushPreview.visible = false; // Start hidden, will show on mouse move
+    }
     // Restore direction indicator if river type
-    if (this.waterDirectionIndicator && this.waterType === "river") {
-      this.waterDirectionIndicator.visible = true;
+    if (this.waterDirectionIndicator) {
+      this.scene.add(this.waterDirectionIndicator);
+      this.waterDirectionIndicator.visible = this.waterType === "river";
     }
 
-    this.isGameMode = false;
+    // Restore editor camera for sky sphere positioning
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setCamera(this.camera);
+    }
+
     this.onGameModeChange?.(false);
+
+    // Trigger resize after DOM settles (sidebar shown)
+    setTimeout(() => this.handleResize(), 100);
   }
 
   toggleGameMode(): void {
@@ -1397,11 +1508,27 @@ export class EditorEngine {
    * Clone mode uses simple tile repetition
    */
   private handleResize = (): void => {
-    const width = this.canvas.clientWidth;
-    const height = this.canvas.clientHeight;
+    // Use parent element size since canvas has inline styles from setSize
+    const parent = this.canvas.parentElement;
+    const width = parent?.clientWidth || this.canvas.clientWidth;
+    const height = parent?.clientHeight || this.canvas.clientHeight;
     this.renderer.setSize(width, height, false);
+    // Force canvas to fill parent (setSize adds inline styles)
+    this.canvas.style.width = "100%";
+    this.canvas.style.height = "100%";
+
+    // Update editor camera
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
+
+    // Update game camera if in game mode
+    if (this.isGameMode && this.gamePreview) {
+      const gameCamera = this.gamePreview.getCamera() as THREE.PerspectiveCamera | null;
+      if (gameCamera) {
+        gameCamera.aspect = width / height;
+        gameCamera.updateProjectionMatrix();
+      }
+    }
   };
 
   // ============================================
@@ -1596,6 +1723,14 @@ export class EditorEngine {
     this.canvas.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("resize", this.handleResize);
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
+    if (this.gamePointerBlocker) {
+      this.canvas.removeEventListener("pointerdown", this.gamePointerBlocker, { capture: true });
+      this.gamePointerBlocker = null;
+    }
 
     // Stop render loop
     cancelAnimationFrame(this.animationFrameId);

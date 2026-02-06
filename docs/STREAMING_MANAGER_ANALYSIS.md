@@ -21,7 +21,7 @@ TerrainMesh LOD: 개별 타일의 시각적 품질 (4-level)
 - 역할 명확히 분리 - 각 시스템 독립적 최적화 가능
 - 위험도 낮음 - 검증된 코드 건드리지 않음
 
-### Thin Instance: Option A (셀별 별도 메시) 권장
+### InstancedMesh: Option A (셀별 별도 메시) 권장
 
 **현재 문제:**
 - 부분 업데이트 불가 - 전체 버퍼 재업로드 필요
@@ -135,7 +135,7 @@ TerrainMesh LOD: 개별 타일의 시각적 품질 (4-level)
 
 ### Phase 3: FoliageSystem (2-3일)
 - 청크→셀 매핑
-- 셀별 thin instance 버퍼
+- 셀별 instanced mesh 버퍼
 - getChunksInCell(), unloadChunk()
 
 ### Phase 4: BiomeDecorator (1일)
@@ -169,7 +169,7 @@ TerrainMesh LOD: 개별 타일의 시각적 품질 (4-level)
 
 ---
 
-## 참고: Thin Instance 메모리 계산
+## 참고: InstancedMesh 메모리 계산
 
 ```
 셀당 ~5,000 인스턴스 × 16 floats × 4 bytes = 320KB

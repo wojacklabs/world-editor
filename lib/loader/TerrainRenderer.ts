@@ -158,10 +158,9 @@ void main() {
     float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
     color = mix(color, uFogColor, fogFactor);
 
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

@@ -52,7 +52,7 @@ async function canReachDecoder(basePath: string): Promise<boolean> {
 
   const base = normalizeBasePath(basePath);
   // Check for Basis Universal transcoder (used by Three.js KTX2Loader)
-  const decoderUrl = `${base}/basis_transcoder.js`;
+  const decoderUrl = `${base}/msc_basis_transcoder.js`;
 
   try {
     const head = await fetch(decoderUrl, {

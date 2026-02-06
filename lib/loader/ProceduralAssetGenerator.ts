@@ -28,7 +28,6 @@ precision highp float;
 
 attribute vec4 color;
 
-uniform vec3 cameraPosition;
 uniform float uTime;
 uniform vec2 uWindDirection;
 uniform float uWindStrength;
@@ -225,11 +224,9 @@ void main() {
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping and gamma (matching editor/terrain shaders)
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 
@@ -238,8 +235,6 @@ const proceduralAssetVertexShader = `
 precision highp float;
 
 attribute vec4 color;
-
-uniform vec3 cameraPosition;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -386,11 +381,9 @@ void main() {
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

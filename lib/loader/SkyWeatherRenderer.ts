@@ -178,11 +178,11 @@ void main() {
     // Blend clouds
     skyColor = mix(skyColor, cloudColor, cloudDensity * 0.95);
 
-    // Tone mapping
-    skyColor = skyColor / (skyColor + vec3(0.8));
-    skyColor = pow(skyColor, vec3(0.95));
+    skyColor *= 1.15;
 
     gl_FragColor = vec4(skyColor, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

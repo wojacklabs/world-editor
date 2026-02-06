@@ -62,132 +62,6 @@ interface PropData {
 
 ## Loading World Data
 
-### Babylon.js Example
-
-```typescript
-import { Scene, Mesh, VertexData, Vector3, StandardMaterial } from '@babylonjs/core';
-
-// 1. Heightmap class for terrain height queries
-class Heightmap {
-  private resolution: number;
-  private scale: number;
-  private data: Float32Array;
-
-  constructor(resolution: number, scale: number) {
-    this.resolution = resolution + 1;  // +1 for vertex count
-    this.scale = scale;
-    this.data = new Float32Array(this.resolution * this.resolution);
-  }
-
-  fromBase64(base64: string): void {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    this.data = new Float32Array(bytes.buffer);
-  }
-
-  getHeight(x: number, z: number): number {
-    if (x < 0 || x >= this.resolution || z < 0 || z >= this.resolution) return 0;
-    return this.data[z * this.resolution + x];
-  }
-
-  getInterpolatedHeight(worldX: number, worldZ: number): number {
-    const cellSize = this.scale / (this.resolution - 1);
-    const x = worldX / cellSize;
-    const z = worldZ / cellSize;
-
-    const x0 = Math.floor(x);
-    const z0 = Math.floor(z);
-    const xFrac = x - x0;
-    const zFrac = z - z0;
-
-    const h00 = this.getHeight(x0, z0);
-    const h10 = this.getHeight(x0 + 1, z0);
-    const h01 = this.getHeight(x0, z0 + 1);
-    const h11 = this.getHeight(x0 + 1, z0 + 1);
-
-    const h0 = h00 * (1 - xFrac) + h10 * xFrac;
-    const h1 = h01 * (1 - xFrac) + h11 * xFrac;
-    return h0 * (1 - zFrac) + h1 * zFrac;
-  }
-}
-
-// 2. Create terrain mesh from heightmap
-function createTerrainMesh(scene: Scene, heightmap: Heightmap, size: number): Mesh {
-  const resolution = heightmap.resolution;
-  const cellSize = size / (resolution - 1);
-
-  const positions: number[] = [];
-  const normals: number[] = [];
-  const uvs: number[] = [];
-  const indices: number[] = [];
-
-  // Create vertices
-  for (let z = 0; z < resolution; z++) {
-    for (let x = 0; x < resolution; x++) {
-      const height = heightmap.getHeight(x, z);
-      positions.push(x * cellSize, height, z * cellSize);
-      uvs.push(x / (resolution - 1), z / (resolution - 1));
-      normals.push(0, 1, 0);  // Calculate proper normals later
-    }
-  }
-
-  // Create indices (two triangles per cell)
-  for (let z = 0; z < resolution - 1; z++) {
-    for (let x = 0; x < resolution - 1; x++) {
-      const topLeft = z * resolution + x;
-      const topRight = topLeft + 1;
-      const bottomLeft = (z + 1) * resolution + x;
-      const bottomRight = bottomLeft + 1;
-
-      indices.push(topLeft, bottomLeft, topRight);
-      indices.push(topRight, bottomLeft, bottomRight);
-    }
-  }
-
-  const mesh = new Mesh('terrain', scene);
-  const vertexData = new VertexData();
-  vertexData.positions = positions;
-  vertexData.indices = indices;
-  vertexData.uvs = uvs;
-  vertexData.applyToMesh(mesh, true);
-
-  // Material
-  const material = new StandardMaterial('terrainMat', scene);
-  material.backFaceCulling = false;  // Render both sides
-  mesh.material = material;
-
-  return mesh;
-}
-
-// 3. Load world from JSON
-async function loadWorld(jsonUrl: string, scene: Scene) {
-  const response = await fetch(jsonUrl);
-  const project = await response.json();
-
-  // Create heightmap
-  const heightmap = new Heightmap(project.terrain.resolution, project.terrain.size);
-  if (project.terrain.heightmap) {
-    heightmap.fromBase64(project.terrain.heightmap);
-  }
-
-  // Create terrain mesh
-  const terrain = createTerrainMesh(scene, heightmap, project.terrain.size);
-
-  // Load props
-  for (const prop of project.props) {
-    if (prop.glbPath) {
-      // Load GLB and position it
-      // SceneLoader.ImportMeshAsync('', '', prop.glbPath, scene)...
-    }
-  }
-
-  return { heightmap, terrain };
-}
-```
-
 ### Three.js Example
 
 ```javascript
@@ -233,14 +107,14 @@ async function loadWorld(jsonUrl) {
 For seamless infinite terrain, create a 3x3 grid of terrain clones:
 
 ```typescript
-function createInfiniteTerrain(originalMesh: Mesh, tileSize: number): Mesh[] {
-  const clones: Mesh[] = [];
+function createInfiniteTerrain(originalMesh: THREE.Mesh, tileSize: number): THREE.Mesh[] {
+  const clones: THREE.Mesh[] = [];
 
   for (let x = -1; x <= 1; x++) {
     for (let z = -1; z <= 1; z++) {
       if (x === 0 && z === 0) continue;  // Skip center (original)
 
-      const clone = originalMesh.clone(`terrain_${x}_${z}`);
+      const clone = originalMesh.clone();
       clone.position.x = x * tileSize;
       clone.position.z = z * tileSize;
       clones.push(clone);
@@ -251,7 +125,7 @@ function createInfiniteTerrain(originalMesh: Mesh, tileSize: number): Mesh[] {
 }
 
 // Wrap player position for infinite world
-function wrapPosition(position: Vector3, tileSize: number): void {
+function wrapPosition(position: THREE.Vector3, tileSize: number): void {
   if (position.x > tileSize) position.x -= tileSize;
   if (position.x < 0) position.x += tileSize;
   if (position.z > tileSize) position.z -= tileSize;
@@ -275,21 +149,25 @@ function wrapPosition(position: Vector3, tileSize: number): void {
 Props are stored as references to external GLB files. Ensure these files are accessible from your game:
 
 ```typescript
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
 // Props array contains paths like:
 // - "/assets/tree.glb" (local)
 // - "https://example.com/models/rock.glb" (remote)
 
+const loader = new GLTFLoader();
 for (const prop of project.props) {
-  const result = await SceneLoader.ImportMeshAsync('', '', prop.glbPath, scene);
-  
-  const root = result.meshes[0];
-  root.position = new Vector3(prop.position.x, prop.position.y, prop.position.z);
-  root.rotation = new Vector3(
+  if (!prop.glbPath) continue;
+  const gltf = await loader.loadAsync(prop.glbPath);
+  const root = gltf.scene;
+  root.position.set(prop.position.x, prop.position.y, prop.position.z);
+  root.rotation.set(
     prop.rotation.x * Math.PI / 180,
     prop.rotation.y * Math.PI / 180,
     prop.rotation.z * Math.PI / 180
   );
-  root.scaling = new Vector3(prop.scale.x, prop.scale.y, prop.scale.z);
+  root.scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
+  scene.add(root);
 }
 ```
 
@@ -300,17 +178,16 @@ for (const prop of project.props) {
 1. **Use JSON over GLB** - JSON provides heightmap data for runtime collision/physics
 2. **Host prop assets** - Ensure GLB paths in props array are accessible URLs
 3. **Match coordinate systems** - Terrain is at origin (0,0), not centered
-4. **Disable backface culling** - Set `material.backFaceCulling = false` for terrain
-5. **Set camera clipping planes** - Use `camera.minZ = 0.1` and `camera.maxZ = 2000`
+4. **Disable backface culling** - Set `material.side = THREE.DoubleSide` for terrain
+5. **Set camera clipping planes** - Use `camera.near = 0.1` and `camera.far = 2000`
 
 ---
 
 ## Troubleshooting
 
 ### Terrain disappears at certain angles
-- Set `mesh.alwaysSelectAsActiveMesh = true`
-- Set `material.backFaceCulling = false`
-- Call `mesh.refreshBoundingInfo()` after creating geometry
+- Set `material.side = THREE.DoubleSide`
+- Call `geometry.computeBoundingSphere()` after modifying vertices
 
 ### Character appears underground
 - Place character at terrain center: `(size/2, heightAtCenter, size/2)`
@@ -324,7 +201,7 @@ for (const prop of project.props) {
 
 ## Using the Loader Package (Recommended)
 
-The `lib/loader` package provides ready-to-use renderers for Babylon.js:
+The `lib/loader` package provides ready-to-use renderers for Three.js:
 
 ```typescript
 import {

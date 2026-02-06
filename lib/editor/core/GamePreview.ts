@@ -98,12 +98,13 @@ export class GamePreview {
     // Change scene background for game feel - sky/horizon color
     this.scene.background = new THREE.Color(skyColor.r, skyColor.g, skyColor.b);
 
-    // Atmospheric fog - blends objects into the sky at distance
-    this.scene.fog = new THREE.FogExp2(new THREE.Color(skyColor.r, skyColor.g, skyColor.b), fogDensity);
-
     // Notify weather system of game mode (it will handle shader sync)
     if (this.skyWeatherSystem) {
       this.skyWeatherSystem.setGameMode(true);
+      // Set game camera so sky sphere follows it
+      if (this.camera) {
+        this.skyWeatherSystem.setCamera(this.camera);
+      }
     } else {
       // Fallback: manual sync if no weather system
       // Sync terrain shader fog with scene fog (same color = seamless blend)
@@ -198,9 +199,6 @@ export class GamePreview {
       this.controls = null;
     }
     this.camera = null;
-
-    // Reset fog
-    this.scene.fog = null;
 
     // Fallback: ensure pointer is unlocked even after controls disposal
     if (document.pointerLockElement) {

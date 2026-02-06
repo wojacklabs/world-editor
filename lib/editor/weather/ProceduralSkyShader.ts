@@ -359,11 +359,11 @@ void main() {
     vec3 hazeColor = mix(uSunColor * 0.85, vec3(0.3, 0.35, 0.4), uNightFactor);
     skyColor = mix(skyColor, hazeColor, haze * uHazeIntensity * (1.0 - uNightFactor * 0.7));
 
-    // Tone mapping - preserve saturation for vivid sky
-    skyColor = skyColor / (skyColor + vec3(0.8)); // Less aggressive compression
-    skyColor = pow(skyColor, vec3(0.95)); // Preserve brightness
+    skyColor *= 1.15;
 
     gl_FragColor = vec4(skyColor, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 
@@ -373,7 +373,7 @@ export interface SkyShaderConfig {
 }
 
 const DEFAULT_CONFIG: SkyShaderConfig = {
-  radius: 1000,
+  radius: 900,  // Smaller than camera far plane (1000) to avoid clipping
   segments: 32,
 };
 
@@ -520,6 +520,13 @@ export class ProceduralSkyShader {
 
   setWindDirection(direction: number): void {
     this.windDirection = direction;
+  }
+
+  /** Update sky sphere position to follow camera (keeps camera inside the sphere) */
+  updateCameraPosition(cameraPosition: THREE.Vector3): void {
+    if (this.skyMesh) {
+      this.skyMesh.position.copy(cameraPosition);
+    }
   }
 
   setPrecipitationIntensity(intensity: number): void {

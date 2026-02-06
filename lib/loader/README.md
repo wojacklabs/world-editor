@@ -112,7 +112,7 @@ const terrainMesh = terrainRenderer.getMesh();
 
 ### 2. FoliageRenderer - 잔디/식생
 
-thin instance를 사용하여 대량의 잔디를 효율적으로 렌더링합니다.
+InstancedMesh를 사용하여 대량의 잔디를 효율적으로 렌더링합니다.
 
 ```typescript
 import { FoliageRenderer } from '@world-editor/loader';
@@ -255,7 +255,7 @@ waterRenderer.setWaveHeight(0.4);
 ## 전체 예제
 
 ```typescript
-import { Scene, Vector3, Color3, Color4 } from '@babylonjs/core';
+import * as THREE from 'three';
 import {
   WorldLoader,
   TerrainRenderer,
@@ -265,7 +265,7 @@ import {
 } from '@world-editor/loader';
 
 class Game {
-  private scene: Scene;
+  private scene: THREE.Scene;
   private terrainRenderer: TerrainRenderer | null = null;
   private foliageRenderer: FoliageRenderer | null = null;
   private propsRenderer: ProceduralPropsRenderer | null = null;
@@ -284,12 +284,7 @@ class Game {
     const worldData = result.data;
     const tile = worldData.mainTile;
 
-    // 2. Scene fog 설정
-    this.scene.fogMode = Scene.FOGMODE_EXP2;
-    this.scene.fogDensity = worldData.weather?.fogDensity ?? 0.008;
-    this.scene.fogColor = new Color3(0.55, 0.7, 0.9);
-
-    // 3. 하늘 렌더러
+    // 2. 하늘 렌더러
     this.skyRenderer = new SkyWeatherRenderer(this.scene, {
       timeOfDay: worldData.weather?.timeOfDay ?? 0.3,
       weatherIntensity: worldData.weather?.intensity ?? 0,
@@ -315,7 +310,7 @@ class Game {
       splatmap: tile.splatmap,
     });
 
-    this.terrainRenderer.setFog(this.scene.fogColor, this.scene.fogDensity);
+    this.terrainRenderer.setFog(new THREE.Color(0.55, 0.7, 0.9), 0.008);
 
     // 5. 잔디/바위 foliage 렌더러
     if (worldData.mainTile?.foliage) {
@@ -328,7 +323,7 @@ class Game {
         lodDistances: { near: 100, mid: 200, far: 450 },
       });
       this.foliageRenderer.loadTile(worldData.mainTile.foliage);
-      this.foliageRenderer.setFog(this.scene.fogColor, this.scene.fogDensity);
+      this.foliageRenderer.setFog(new THREE.Color(0.55, 0.7, 0.9), 0.008);
     }
 
     // 6. 프로시저럴 Props 렌더러

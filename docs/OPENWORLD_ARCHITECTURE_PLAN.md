@@ -2,7 +2,7 @@
 
 ## 개요
 
-Babylon.js 기반 world-editor를 엔터프라이즈 레벨의 오픈월드 RPG 에디터로 개선하기 위한 단계별 구현 계획입니다.
+Three.js 기반 world-editor를 엔터프라이즈 레벨의 오픈월드 RPG 에디터로 개선하기 위한 단계별 구현 계획입니다.
 
 **핵심 원칙**: 셀 스트리밍 + 레이어 분리 + LOD/밀도 예산 + 텍스처 압축
 
@@ -10,14 +10,14 @@ Babylon.js 기반 world-editor를 엔터프라이즈 레벨의 오픈월드 RPG 
 
 ## Phase 1: 성능 기반 (즉시)
 
-### 1.1 Thin Instance 도입
+### 1.1 InstancedMesh 도입
 - **목표**: 식생/프롭 드로우 콜 대폭 감소
 - **현재**: 개별 Mesh 생성 (1000개 풀 = 1000 드로우 콜)
-- **개선**: Thin Instance 사용 (1000개 풀 = 1 드로우 콜)
+- **개선**: InstancedMesh 사용 (1000개 풀 = 1 드로우 콜)
 - **파일**: `lib/editor/terrain/FoliageSystem.ts` (신규)
 - **작업**:
   - [ ] FoliageSystem 클래스 생성
-  - [ ] Thin Instance 기반 풀/나무/돌 배치
+  - [ ] InstancedMesh 기반 풀/나무/돌 배치
   - [ ] 청크(패치) 단위 메쉬 분할 (32x32 단위)
   - [ ] BiomeDecorator와 통합
 
@@ -26,7 +26,7 @@ Babylon.js 기반 world-editor를 엔터프라이즈 레벨의 오픈월드 RPG 
 - **현재**: JPG 직접 로드 (비압축 → GPU 메모리 낭비)
 - **개선**: KTX2(Basis Universal) GPU 압축 텍스처
 - **작업**:
-  - [ ] @babylonjs/core KTX2 로더 활성화
+  - [ ] Three.js KTX2Loader + Basis Universal 트랜스코더 활성화
   - [ ] 기존 텍스처를 KTX2로 변환 (toktx 사용)
   - [ ] TerrainShader.ts 텍스처 로딩 수정
   - [ ] Near/Mid/Far 해상도 차등 적용
@@ -54,14 +54,14 @@ Babylon.js 기반 world-editor를 엔터프라이즈 레벨의 오픈월드 RPG 
   - [ ] 타일 경계 Seam 처리 검증
   - [ ] 타일별 독립 SplatMap
 
-### 2.2 AssetContainer 기반 로딩
+### 2.2 AssetContainerPool 기반 로딩
 - **목표**: 깔끔한 로드/언로드 관리
 - **현재**: 직접 씬에 추가/제거
-- **개선**: AssetContainer 단위 관리
+- **개선**: GLTFLoader + Group 단위 관리
 - **작업**:
-  - [ ] loadAssetContainerAsync 래퍼 함수
-  - [ ] 레이어별 컨테이너 분리 (terrain/props/foliage)
-  - [ ] 컨테이너 풀링 시스템
+  - [ ] GLTFLoader 래퍼 함수
+  - [ ] 레이어별 Group 분리 (terrain/props/foliage)
+  - [ ] 에셋 풀링 시스템
 
 ### 2.3 Near/Mid/Far 스트리밍 링
 - **목표**: 카메라 주변만 고품질 로드
@@ -168,7 +168,7 @@ lib/editor/
 ├── core/
 │   ├── EditorEngine.ts          # 기존 (수정)
 │   ├── StreamingManager.ts      # 신규 - 셀 스트리밍
-│   └── AssetContainerPool.ts    # 신규 - 컨테이너 풀링
+│   └── AssetContainerPool.ts    # 신규 - 에셋 풀링
 │
 ├── terrain/
 │   ├── TerrainTileManager.ts    # 기존 (활성화)
@@ -180,7 +180,7 @@ lib/editor/
 ├── foliage/                     # 신규 폴더
 │   ├── FoliageSystem.ts         # 식생 총괄
 │   ├── FoliageChunk.ts          # 청크 단위 관리
-│   ├── ThinInstancePool.ts      # Thin Instance 풀
+│   ├── InstancePool.ts           # InstancedMesh 풀
 │   └── ImpostorSystem.ts        # 빌보드 시스템
 │
 ├── streaming/                   # 신규 폴더
@@ -235,7 +235,7 @@ toktx --t2 --bcmp --normal_mode rock_nor.ktx2 rock_nor.png
 ## 구현 순서
 
 ### 즉시 (Phase 1)
-1. FoliageSystem + Thin Instance
+1. FoliageSystem + InstancedMesh
 2. KTX2 텍스처 변환
 3. 청크 기반 컬링
 
@@ -259,7 +259,7 @@ toktx --t2 --bcmp --normal_mode rock_nor.ktx2 rock_nor.png
 
 ## 참고 자료
 
-- [Babylon.js Thin Instances](https://doc.babylonjs.com/features/featuresDeepDive/mesh/copies/thinInstances)
-- [Babylon.js KTX2 Textures](https://doc.babylonjs.com/features/featuresDeepDive/materials/using/ktx2Compression)
-- [Babylon.js AssetContainer](https://doc.babylonjs.com/features/featuresDeepDive/importers/assetContainers)
-- [Babylon.js TerrainMaterial](https://doc.babylonjs.com/toolsAndResources/assetLibraries/materialsLibrary/terrainMat)
+- [Three.js InstancedMesh](https://threejs.org/docs/#api/en/objects/InstancedMesh)
+- [Three.js KTX2Loader](https://threejs.org/docs/#examples/en/loaders/KTX2Loader)
+- [Three.js GLTFLoader](https://threejs.org/docs/#examples/en/loaders/GLTFLoader)
+- [Three.js ShaderMaterial](https://threejs.org/docs/#api/en/materials/ShaderMaterial)

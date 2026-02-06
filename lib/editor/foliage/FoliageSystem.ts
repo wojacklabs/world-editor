@@ -478,11 +478,9 @@ void main() {
     float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
     color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping and gamma (matching original infinite-terrain)
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 
@@ -566,11 +564,9 @@ void main() {
     // Apply fog
     color = mix(color, uFogColor, fogFactor);
 
-    // Tone mapping and gamma (matching terrain shader)
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 
@@ -663,6 +659,8 @@ void main() {
     color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
     gl_FragColor = vec4(color, alpha * 0.8);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

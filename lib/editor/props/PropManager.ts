@@ -38,8 +38,6 @@ const REFERENCE_TREE_URL = "/assets/references/infinite-terrain/tree.glb";
 const propThinVertexShader = `
 precision highp float;
 
-uniform vec3 cameraPosition;
-
 varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vLocalPosition;
@@ -158,11 +156,9 @@ void main() {
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping (matching terrain shader)
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 
@@ -172,7 +168,6 @@ precision highp float;
 
 attribute vec4 color;
 
-uniform vec3 cameraPosition;
 uniform float uTime;
 uniform vec2 uWindDirection;
 uniform float uWindStrength;
@@ -379,11 +374,9 @@ void main() {
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
 
-    // Tone mapping and gamma (matching terrain/foliage shaders)
-    color = color / (color + vec3(1.0)) * 1.1;
-    color = pow(color, vec3(0.95));
-
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 
@@ -416,12 +409,24 @@ export interface PropInstance {
  * Adds missing color attribute if absent.
  */
 function ensureAttributes(geometry: THREE.BufferGeometry): void {
+  const posCount = geometry.getAttribute("position")?.count ?? 0;
+
+  // Strip unexpected attributes so mergeGeometries sees a uniform set
+  const keep = new Set(["position", "normal", "uv", "color"]);
+  const names = Object.keys(geometry.attributes);
+  for (const name of names) {
+    if (!keep.has(name)) {
+      geometry.deleteAttribute(name);
+    }
+  }
+
+  if (!geometry.getAttribute("normal")) {
+    geometry.computeVertexNormals();
+  }
   if (!geometry.getAttribute("uv")) {
-    const posCount = geometry.getAttribute("position")?.count ?? 0;
     geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(posCount * 2), 2));
   }
   if (!geometry.getAttribute("color")) {
-    const posCount = geometry.getAttribute("position")?.count ?? 0;
     const colors = new Float32Array(posCount * 4);
     for (let i = 0; i < posCount; i++) {
       colors[i * 4 + 3] = 1.0;
@@ -874,8 +879,7 @@ export class PropManager {
 
             const seed = variationIdx * 1001 + 8;
             const subdivision = LOD_SUBDIVISIONS[assetType][lod];
-            const useReference =
-              assetType === "tree" || assetType === "bush";
+            const useReference = false;
 
             let geometry: THREE.BufferGeometry | null = null;
             if (useReference) {

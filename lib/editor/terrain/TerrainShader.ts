@@ -927,10 +927,6 @@ void main() {
     // 5. Apply fog
     color = mix(color, uFogColor, fogFactor);
 
-    // Tone mapping and gamma
-    color = color / (color + vec3(1.0)) * 1.1; // Simple Reinhard
-    color = pow(color, vec3(0.95));
-
     // Wet sand/shore effect - only apply near actual water (where water mask exists)
     // This prevents the wet effect from applying to all terrain at similar heights
     if (waterMaskValue > 0.1) {
@@ -984,6 +980,8 @@ void main() {
     }
 
     gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

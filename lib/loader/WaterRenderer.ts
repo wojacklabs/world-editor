@@ -200,6 +200,8 @@ void main() {
     float alpha = mix(0.92, 1.0, fresnel);
 
     gl_FragColor = vec4(color, alpha);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
 }
 `;
 

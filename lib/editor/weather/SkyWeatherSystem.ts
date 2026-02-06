@@ -164,6 +164,10 @@ export class SkyWeatherSystem {
     // Update subsystems each frame
     if (this.skyShader) {
       this.skyShader.update();
+      // Keep sky sphere centered on camera
+      if (this.camera) {
+        this.skyShader.updateCameraPosition(this.camera.position);
+      }
     }
     if (this.cloudSystem) {
       this.cloudSystem.update(this.camera ?? undefined);
@@ -464,15 +468,6 @@ export class SkyWeatherSystem {
       this.scene.background = horizonColor.clone();
     }
 
-    // Update scene fog (for built-in fog mode)
-    if (this.isGameMode) {
-      if (this.scene.fog instanceof THREE.FogExp2) {
-        this.scene.fog.color.copy(this.fogColor);
-        this.scene.fog.density = this.fogDensity;
-      } else {
-        this.scene.fog = new THREE.FogExp2(this.fogColor, this.fogDensity);
-      }
-    }
   }
 
   // Public getters
