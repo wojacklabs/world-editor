@@ -192,7 +192,6 @@ void main() {
             dirShadow.shadowMapSize,
             dirShadow.shadowIntensity,
             dirShadow.shadowBias,
-            dirShadow.shadowNormalBias,
             dirShadow.shadowRadius,
             vDirectionalShadowCoord[0]
         );
@@ -461,7 +460,6 @@ void main() {
             dirShadow.shadowMapSize,
             dirShadow.shadowIntensity,
             dirShadow.shadowBias,
-            dirShadow.shadowNormalBias,
             dirShadow.shadowRadius,
             vDirectionalShadowCoord[0]
         );
