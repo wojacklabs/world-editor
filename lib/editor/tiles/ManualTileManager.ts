@@ -24,6 +24,9 @@ export interface TileData {
   waterMask: string; // Base64 encoded Float32Array
   seaLevel: number;
   waterDepth: number;
+  // Grid coordinates for multi-tile world
+  gridX?: number;
+  gridZ?: number;
   // Foliage instance data: type -> Base64 encoded matrices
   foliageData?: Record<string, string>;
 }
@@ -55,6 +58,8 @@ export interface TileRef {
   modifiedAt: string;
   resolution: number;
   size: number;
+  gridX?: number;
+  gridZ?: number;
 }
 
 export class ManualTileManager {
@@ -325,6 +330,8 @@ export class ManualTileManager {
         modifiedAt: tile.modifiedAt,
         resolution: tile.resolution,
         size: tile.size,
+        gridX: tile.gridX,
+        gridZ: tile.gridZ,
       });
     }
     return refs.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
@@ -351,6 +358,67 @@ export class ManualTileManager {
     this.activeTileId = id;
   }
 
+
+  /**
+   * Get tile at specific grid coordinates
+   */
+  getTileAt(gridX: number, gridZ: number): TileData | null {
+    for (const tile of this.tiles.values()) {
+      if (tile.gridX === gridX && tile.gridZ === gridZ) {
+        return tile;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Save tile with grid coordinates
+   */
+  saveTileWithGrid(
+    gridX: number,
+    gridZ: number,
+    name: string,
+    heightmapData: Float32Array,
+    splatmapData: Float32Array,
+    waterMaskData: Float32Array,
+    resolution: number,
+    size: number,
+    seaLevel: number,
+    waterDepth: number,
+    foliageData?: Record<string, string>
+  ): string {
+    // Check if tile already exists at this grid position
+    const existing = this.getTileAt(gridX, gridZ);
+    const id = existing?.id || this.generateId();
+
+    const tileId = this.saveTileFromCurrent(
+      name, heightmapData, splatmapData, waterMaskData,
+      resolution, size, seaLevel, waterDepth, id, foliageData
+    );
+
+    // Set grid coordinates on the saved tile
+    const tile = this.tiles.get(tileId);
+    if (tile) {
+      tile.gridX = gridX;
+      tile.gridZ = gridZ;
+      this.saveTileToIndexedDB(tile).catch(console.error);
+    }
+
+    return tileId;
+  }
+
+  /**
+   * Get all tiles that have grid coordinates assigned
+   */
+  getGridTiles(): TileData[] {
+    const result: TileData[] = [];
+    for (const tile of this.tiles.values()) {
+      if (tile.gridX !== undefined && tile.gridZ !== undefined) {
+        result.push(tile);
+      }
+    }
+    return result;
+  }
 
   /**
    * Export a tile to JSON

@@ -137,6 +137,29 @@ uniform float uFogHeightDensity;   // Height fog density
 uniform float uWaterLevel;
 uniform float uTime;
 
+// Point lights (Forward+)
+uniform vec3 uPointLightPositions[8];
+uniform vec3 uPointLightColors[8];
+uniform float uPointLightRanges[8];
+uniform int uPointLightCount;
+
+vec3 calcPointLights(vec3 worldPos, vec3 normal) {
+    vec3 totalLight = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= uPointLightCount) break;
+        vec3 lightDir = uPointLightPositions[i] - worldPos;
+        float dist = length(lightDir);
+        float range = uPointLightRanges[i];
+        if (dist > range) continue;
+        lightDir /= dist;
+        float NdotL = max(dot(normal, lightDir), 0.0);
+        float attenuation = 1.0 / (1.0 + dist * dist / (range * range));
+        float window = max(1.0 - pow(dist / range, 4.0), 0.0);
+        totalLight += uPointLightColors[i] * NdotL * attenuation * window;
+    }
+    return totalLight;
+}
+
 // Varyings
 varying vec3 vPosition;
 varying vec3 vNormal;
@@ -934,8 +957,11 @@ void main() {
     }
     #endif
 
+    // Point light contribution
+    vec3 pointLightContrib = calcPointLights(vPosition, finalNormal);
+
     // Final color composition (shadow affects diffuse and specular, not ambient)
-    vec3 color = baseColor * ao * (uAmbientIntensity + diffuse * uSunColor * shadowFactor) + specular * uSunColor * shadowFactor + rim;
+    vec3 color = baseColor * ao * (uAmbientIntensity + diffuse * uSunColor * shadowFactor + pointLightContrib) + specular * uSunColor * shadowFactor + rim;
 
     // ========== Improved Fog System ==========
     // 1. Calculate distance from fragment's world position to camera (per-pixel)
@@ -1073,6 +1099,12 @@ export function createTerrainMaterial(splatTexture: THREE.Texture, waterMaskText
     // Debug
     uUseSplatMap: { value: 1.0 },
     uDebugMode: { value: 0 },
+
+    // Point lights (Forward+)
+    uPointLightPositions: { value: new Float32Array(8 * 3) },
+    uPointLightColors: { value: new Float32Array(8 * 3) },
+    uPointLightRanges: { value: new Float32Array(8) },
+    uPointLightCount: { value: 0 },
   };
 
   const material = new THREE.ShaderMaterial({

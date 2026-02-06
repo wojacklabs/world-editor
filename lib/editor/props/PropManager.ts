@@ -5,6 +5,7 @@ import { Heightmap } from "../terrain/Heightmap";
 import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from "./ProceduralAsset";
 import { loadTextureWithFallbackSync } from "../../shared/rendering/TextureLoader.three";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
+import type { LightManager } from "../lighting/LightManager";
 // ============================================
 // LOD Configuration
 // ============================================
@@ -80,6 +81,29 @@ uniform vec3 fogColor;
 uniform float fogDensity;
 uniform sampler2D rockTexture;
 uniform float textureScale;
+
+// Point lights
+uniform vec3 uPointLightPositions[8];
+uniform vec3 uPointLightColors[8];
+uniform float uPointLightRanges[8];
+uniform int uPointLightCount;
+
+vec3 calcPointLights(vec3 worldPos, vec3 n) {
+    vec3 total = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= uPointLightCount) break;
+        vec3 ld = uPointLightPositions[i] - worldPos;
+        float d = length(ld);
+        float r = uPointLightRanges[i];
+        if (d > r) continue;
+        ld /= d;
+        float nl = max(dot(n, ld), 0.0);
+        float att = 1.0 / (1.0 + d * d / (r * r));
+        float w = max(1.0 - pow(d / r, 4.0), 0.0);
+        total += uPointLightColors[i] * nl * att * w;
+    }
+    return total;
+}
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -172,11 +196,14 @@ void main() {
     }
     #endif
 
+    // Point light contribution
+    vec3 ptLight = calcPointLights(vPosition, normal);
+
     // Final lighting (shadow affects diffuse, not ambient)
     vec3 ambient = vec3(ambientIntensity) * ao;
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.85, 1.0);
 
-    color = color * (ambient + diffuse * shadowFactor) + rim;
+    color = color * (ambient + diffuse * shadowFactor + ptLight) + rim;
 
     // Fog
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
@@ -293,6 +320,29 @@ uniform float uLeafMaskFromLuma;
 uniform float uFresnelPower;
 uniform float uFresnelStrength;
 uniform vec3 uFresnelColor;
+
+// Point lights
+uniform vec3 uPointLightPositions[8];
+uniform vec3 uPointLightColors[8];
+uniform float uPointLightRanges[8];
+uniform int uPointLightCount;
+
+vec3 calcPointLights(vec3 worldPos, vec3 n) {
+    vec3 total = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= uPointLightCount) break;
+        vec3 ld = uPointLightPositions[i] - worldPos;
+        float d = length(ld);
+        float r = uPointLightRanges[i];
+        if (d > r) continue;
+        ld /= d;
+        float nl = max(dot(n, ld), 0.0);
+        float att = 1.0 / (1.0 + d * d / (r * r));
+        float w = max(1.0 - pow(d / r, 4.0), 0.0);
+        total += uPointLightColors[i] * nl * att * w;
+    }
+    return total;
+}
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -417,7 +467,8 @@ void main() {
     vec3 ambient = vec3(ambientIntensity);
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
 
-    color = color * (ambient + diffuse * shadowFactor) + rim + vec3(0.1, 0.15, 0.05) * sss;
+    vec3 ptLight = calcPointLights(vPosition, normal);
+    color = color * (ambient + diffuse * shadowFactor + ptLight) + rim + vec3(0.1, 0.15, 0.05) * sss;
 
     // Fresnel: mix blend for softer rim
     color = mix(color, uFresnelColor, clamp(fresnel * leafMask, 0.0, 1.0));
@@ -548,6 +599,9 @@ export class PropManager {
 
   // Material start time for wind animation
   private materialStartTime = 0;
+
+  // Light manager reference for point light uniforms
+  private lightManager: LightManager | null = null;
 
   constructor(scene: THREE.Scene, heightmap: Heightmap) {
     this.scene = scene;
@@ -1127,6 +1181,11 @@ export class PropManager {
             uFresnelPower: { value: 3.0 },
             uFresnelStrength: { value: 0.4 },
             uFresnelColor: { value: new THREE.Color(0.8, 0.95, 0.7) },
+            // Point lights
+            uPointLightPositions: { value: new Float32Array(8 * 3) },
+            uPointLightColors: { value: new Float32Array(8 * 3) },
+            uPointLightRanges: { value: new Float32Array(8) },
+            uPointLightCount: { value: 0 },
           },
         ]),
         lights: true,
@@ -1158,6 +1217,11 @@ export class PropManager {
             fogDensity: { value: 0.008 },
             rockTexture: { value: rockTex },
             textureScale: { value: 1.0 },
+            // Point lights
+            uPointLightPositions: { value: new Float32Array(8 * 3) },
+            uPointLightColors: { value: new Float32Array(8 * 3) },
+            uPointLightRanges: { value: new Float32Array(8) },
+            uPointLightCount: { value: 0 },
           },
         ]),
         lights: true,
@@ -1197,6 +1261,13 @@ export class PropManager {
   }
 
   /**
+   * Set light manager for point light uniform sync
+   */
+  setLightManager(manager: LightManager | null): void {
+    this.lightManager = manager;
+  }
+
+  /**
    * Update per-frame uniforms (camera position, time).
    * Call this once per frame from the editor engine.
    */
@@ -1209,6 +1280,10 @@ export class PropManager {
       if (needsWind) {
         const elapsed = (performance.now() - this.materialStartTime) / 1000;
         material.uniforms.uTime.value = elapsed;
+      }
+      // Apply point light uniforms
+      if (this.lightManager) {
+        this.lightManager.applyToMaterial(material);
       }
     }
 

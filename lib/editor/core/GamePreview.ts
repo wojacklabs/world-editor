@@ -33,6 +33,10 @@ export class GamePreview {
   private moveDown = false;
   private isSprinting = false;
 
+  // Multi-tile grid bounds (defaults to single tile)
+  private gridBoundsMin = new THREE.Vector2(0, 0);
+  private gridBoundsMax = new THREE.Vector2(0, 0); // Set in enable()
+
   // Event handler references for cleanup
   private canvas: HTMLCanvasElement | null = null;
   private onCanvasClick: (() => void) | null = null;
@@ -60,12 +64,27 @@ export class GamePreview {
     this.skyWeatherSystem = system;
   }
 
+  /**
+   * Set the world bounds for multi-tile grid (in world units).
+   * Camera will be clamped within these bounds.
+   */
+  setGridBounds(minX: number, minZ: number, maxX: number, maxZ: number): void {
+    this.gridBoundsMin.set(minX, minZ);
+    this.gridBoundsMax.set(maxX, maxZ);
+  }
+
   enable(terrainMesh: THREE.Mesh): void {
     this.originalMesh = terrainMesh;
 
+    // Set default bounds to single tile
+    const size = this.heightmap.getScale();
+    if (this.gridBoundsMax.x === 0 && this.gridBoundsMax.y === 0) {
+      this.gridBoundsMin.set(0, 0);
+      this.gridBoundsMax.set(size, size);
+    }
+
     // Adjust foliage LOD distances for game mode
     // Use smaller distances for performance - foliage fades into fog
-    const size = this.heightmap.getScale();
     if (this.foliageSystem) {
       this.foliageSystem.setLODDistances(
         size * 0.25,  // near: 25% of terrain size (full detail)
@@ -357,11 +376,13 @@ export class GamePreview {
       this.camera.position.y += upAmount * speed * deltaTime;
     }
 
-    // Keep camera within single terrain bounds (0 to size)
-    const minBound = 0;
-    const maxBound = size;
-    this.camera.position.x = Math.max(minBound, Math.min(maxBound, this.camera.position.x));
-    this.camera.position.z = Math.max(minBound, Math.min(maxBound, this.camera.position.z));
+    // Keep camera within terrain bounds (supports multi-tile grid)
+    const minBoundX = this.gridBoundsMin.x;
+    const maxBoundX = this.gridBoundsMax.x > 0 ? this.gridBoundsMax.x : size;
+    const minBoundZ = this.gridBoundsMin.y;
+    const maxBoundZ = this.gridBoundsMax.y > 0 ? this.gridBoundsMax.y : size;
+    this.camera.position.x = Math.max(minBoundX, Math.min(maxBoundX, this.camera.position.x));
+    this.camera.position.z = Math.max(minBoundZ, Math.min(maxBoundZ, this.camera.position.z));
 
     // Prevent going below ground
     const checkX = Math.max(0, Math.min(size - 0.01, this.camera.position.x));

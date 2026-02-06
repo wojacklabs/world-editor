@@ -23,11 +23,13 @@ import { AssetContainerPool } from "../streaming/AssetContainerPool";
 import { getManualTileManager } from "../tiles/ManualTileManager";
 import { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
 import { UndoManager } from "./UndoManager";
+import { LightManager } from "../lighting/LightManager";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
+import { VolumetricFogPass } from "../weather/VolumetricFogPass";
 
 export class EditorEngine {
   private canvas: HTMLCanvasElement;
@@ -84,9 +86,18 @@ export class EditorEngine {
   private undoManager = new UndoManager(20);
   private snapshotPushedForStroke = false;
 
+  // Multi-tile grid
+  private currentGridX: number = 0;
+  private currentGridZ: number = 0;
+  private neighborMeshes: Map<string, THREE.Mesh> = new Map(); // "gridX_gridZ" -> mesh
+
+  // Multi-light system
+  private lightManager = new LightManager();
+
   // Post-processing
   private composer: EffectComposer | null = null;
   private renderPass: RenderPass | null = null;
+  private volumetricFogPass: VolumetricFogPass | null = null;
 
   // Callbacks
   private onModified: (() => void) | null = null;
@@ -201,6 +212,15 @@ export class EditorEngine {
         this.propManager.update(this.camera);
       }
 
+      // Update point lights
+      this.lightManager.updateCamera(this.camera.position);
+      this.lightManager.update();
+      // Apply light uniforms to terrain material
+      if (this.terrainMesh) {
+        const terrainMat = this.terrainMesh.getMaterial() as THREE.ShaderMaterial | null;
+        if (terrainMat) this.lightManager.applyToMaterial(terrainMat);
+      }
+
       // Update water animation
       const waterSystem = this.biomeDecorator?.getWaterSystem();
       if (waterSystem) {
@@ -218,6 +238,19 @@ export class EditorEngine {
         }
 
         const gameCamera = this.gamePreview.getCamera();
+
+        // Sync volumetric fog with weather and camera
+        if (this.volumetricFogPass && this.skyWeatherSystem) {
+          const cam = gameCamera || this.camera;
+          this.volumetricFogPass.updateCamera(cam);
+          this.volumetricFogPass.syncWeather(
+            this.skyWeatherSystem.getFogColor(),
+            this.skyWeatherSystem.getFogDensity(),
+            this.skyWeatherSystem.getSunDirection(),
+            this.skyWeatherSystem.getSunColor()
+          );
+        }
+
         if (gameCamera && this.composer && this.renderPass) {
           this.renderPass.camera = gameCamera;
           this.composer.render();
@@ -231,6 +264,17 @@ export class EditorEngine {
         // Update sky weather after camera update
         if (this.skyWeatherSystem) {
           this.skyWeatherSystem.update();
+        }
+
+        // Sync volumetric fog with weather and camera
+        if (this.volumetricFogPass && this.skyWeatherSystem) {
+          this.volumetricFogPass.updateCamera(this.camera);
+          this.volumetricFogPass.syncWeather(
+            this.skyWeatherSystem.getFogColor(),
+            this.skyWeatherSystem.getFogDensity(),
+            this.skyWeatherSystem.getSunDirection(),
+            this.skyWeatherSystem.getSunColor()
+          );
         }
 
         if (this.composer && this.renderPass) {
@@ -353,7 +397,17 @@ export class EditorEngine {
     const width = this.canvas.clientWidth;
     const height = this.canvas.clientHeight;
 
-    this.composer = new EffectComposer(this.renderer);
+    // Create render target with depth texture for volumetric fog
+    const renderTarget = new THREE.WebGLRenderTarget(width, height, {
+      depthTexture: new THREE.DepthTexture(width, height),
+      depthBuffer: true,
+    });
+    if (renderTarget.depthTexture) {
+      renderTarget.depthTexture.format = THREE.DepthFormat;
+      renderTarget.depthTexture.type = THREE.UnsignedIntType;
+    }
+
+    this.composer = new EffectComposer(this.renderer, renderTarget);
 
     // 1. Render pass
     this.renderPass = new RenderPass(this.scene, this.camera);
@@ -367,7 +421,19 @@ export class EditorEngine {
     ssaoPass.output = SSAOPass.OUTPUT.Default;
     this.composer.addPass(ssaoPass);
 
-    // 3. Bloom pass (subtle)
+    // 3. Volumetric fog pass (after SSAO, before Bloom)
+    this.volumetricFogPass = new VolumetricFogPass(
+      this.camera,
+      new THREE.Vector2(width, height)
+    );
+    this.volumetricFogPass.fogDensity = 0.015;
+    this.volumetricFogPass.fogHeightFalloff = 0.08;
+    this.volumetricFogPass.fogBaseHeight = 0.0;
+    this.volumetricFogPass.godRayIntensity = 0.25;
+    this.volumetricFogPass.steps = 16;
+    this.composer.addPass(this.volumetricFogPass);
+
+    // 4. Bloom pass (subtle)
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(width, height),
       0.3,   // strength
@@ -376,14 +442,14 @@ export class EditorEngine {
     );
     this.composer.addPass(bloomPass);
 
-    // 4. Output pass (tone mapping + color space)
+    // 5. Output pass (tone mapping + color space)
     const outputPass = new OutputPass();
     this.composer.addPass(outputPass);
 
     // OutputPass handles tone mapping, so disable on renderer
     this.renderer.toneMapping = THREE.NoToneMapping;
 
-    console.log("[EditorEngine] Post-processing pipeline initialized (SSAO + Bloom)");
+    console.log("[EditorEngine] Post-processing pipeline initialized (SSAO + VolumetricFog + Bloom)");
   }
 
   private setupGrid(): void {
@@ -589,6 +655,7 @@ export class EditorEngine {
     this.propManager = new PropManager(this.scene, this.heightmap);
     this.propManager.setTileSize(size);
     this.propManager.setCamera(this.camera);
+    this.propManager.setLightManager(this.lightManager);
 
     // Connect prop manager to weather system for fog/sun sync
     if (this.skyWeatherSystem) {
@@ -1467,6 +1534,128 @@ export class EditorEngine {
     return this.undoManager.canRedo;
   }
 
+  // ==================== Multi-Tile Grid Methods ====================
+
+  /**
+   * Get current editing tile grid coordinates
+   */
+  getCurrentGridPosition(): { gridX: number; gridZ: number } {
+    return { gridX: this.currentGridX, gridZ: this.currentGridZ };
+  }
+
+  /**
+   * Set current tile grid position
+   */
+  setCurrentGridPosition(gridX: number, gridZ: number): void {
+    this.currentGridX = gridX;
+    this.currentGridZ = gridZ;
+  }
+
+  /**
+   * Load a read-only neighbor tile mesh at the given grid position.
+   * Creates a simple terrain mesh offset by (gridX * tileSize, gridZ * tileSize).
+   */
+  loadNeighborTile(
+    gridX: number,
+    gridZ: number,
+    heightmapData: Float32Array,
+    resolution: number,
+    tileSize: number
+  ): void {
+    const key = `${gridX}_${gridZ}`;
+
+    // Skip if already loaded
+    if (this.neighborMeshes.has(key)) return;
+
+    // Create a simplified mesh (lower resolution for performance)
+    const step = Math.max(1, Math.floor(resolution / 64)); // Max 64x64 for neighbors
+    const segments = Math.floor(resolution / step);
+    const geometry = new THREE.PlaneGeometry(tileSize, tileSize, segments, segments);
+    geometry.rotateX(-Math.PI / 2);
+
+    // Apply heightmap to vertices
+    const pos = geometry.getAttribute("position");
+    const res = resolution + 1;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const z = pos.getZ(i);
+      // Map from geometry space (-tileSize/2..tileSize/2) to heightmap space (0..resolution)
+      const hx = Math.round(((x + tileSize / 2) / tileSize) * (res - 1));
+      const hz = Math.round(((z + tileSize / 2) / tileSize) * (res - 1));
+      const idx = Math.min(res - 1, Math.max(0, hz)) * res + Math.min(res - 1, Math.max(0, hx));
+      pos.setY(i, heightmapData[idx] || 0);
+    }
+    pos.needsUpdate = true;
+    geometry.computeVertexNormals();
+
+    // Simple semi-transparent material to distinguish from editable tile
+    const material = new THREE.MeshLambertMaterial({
+      color: 0x556655,
+      transparent: true,
+      opacity: 0.6,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+    // Offset: relative to current tile's position
+    const offsetX = (gridX - this.currentGridX) * tileSize + tileSize / 2;
+    const offsetZ = (gridZ - this.currentGridZ) * tileSize + tileSize / 2;
+    mesh.position.set(offsetX, 0, offsetZ);
+    mesh.receiveShadow = true;
+    mesh.name = `neighbor_${key}`;
+
+    this.scene.add(mesh);
+    this.neighborMeshes.set(key, mesh);
+  }
+
+  /**
+   * Unload all neighbor tile meshes
+   */
+  unloadAllNeighborTiles(): void {
+    for (const [key, mesh] of this.neighborMeshes) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+    }
+    this.neighborMeshes.clear();
+  }
+
+  /**
+   * Unload a specific neighbor tile mesh
+   */
+  unloadNeighborTile(gridX: number, gridZ: number): void {
+    const key = `${gridX}_${gridZ}`;
+    const mesh = this.neighborMeshes.get(key);
+    if (mesh) {
+      this.scene.remove(mesh);
+      mesh.geometry.dispose();
+      (mesh.material as THREE.Material).dispose();
+      this.neighborMeshes.delete(key);
+    }
+  }
+
+  // ==================== Light Manager Methods ====================
+
+  /**
+   * Get the light manager for adding/removing point lights
+   */
+  getLightManager(): LightManager {
+    return this.lightManager;
+  }
+
+  /**
+   * Add a point light at a world position
+   */
+  addPointLight(id: string, x: number, y: number, z: number, color: THREE.Color, intensity: number, range: number): void {
+    this.lightManager.setLight(id, new THREE.Vector3(x, y, z), color, intensity, range);
+  }
+
+  /**
+   * Remove a point light
+   */
+  removePointLight(id: string): void {
+    this.lightManager.removeLight(id);
+  }
+
   /**
    * Get renderer performance stats (FPS, draw calls, triangles)
    */
@@ -1763,6 +1952,9 @@ export class EditorEngine {
     if (this.composer) {
       this.composer.setSize(width, height);
     }
+    if (this.volumetricFogPass) {
+      this.volumetricFogPass.setSize(width, height);
+    }
   };
 
   // ============================================
@@ -1883,6 +2075,7 @@ export class EditorEngine {
     }
     this.propManager = new PropManager(this.scene, this.heightmap);
     this.propManager.setTileSize(this.heightmap.getScale());  // Set tile size for streaming grouping
+    this.propManager.setLightManager(this.lightManager);
 
     // Connect prop manager to weather system for fog/sun sync
     if (this.skyWeatherSystem) {
@@ -1937,6 +2130,10 @@ export class EditorEngine {
       this.assetPool.dispose();
       this.assetPool = null;
     }
+    if (this.volumetricFogPass) {
+      this.volumetricFogPass.dispose();
+      this.volumetricFogPass = null;
+    }
     if (this.composer) {
       this.composer.dispose();
       this.composer = null;
@@ -1946,6 +2143,7 @@ export class EditorEngine {
       this.skyWeatherSystem.dispose();
       this.skyWeatherSystem = null;
     }
+    this.unloadAllNeighborTiles();
     this.disposeWaterDirectionIndicator();
     if (this.brushPreview) {
       disposeMesh(this.scene, this.brushPreview);
