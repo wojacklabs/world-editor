@@ -62,6 +62,8 @@ void main() {
     vCameraDistance = length(cameraPosition - worldPos.xyz);
     vViewDirection = normalize(cameraPosition - worldPos.xyz);
 
+    vec3 transformedNormal = vNormal;
+    vec4 worldPosition = worldPos;
     #include <shadowmap_vertex>
 }
 `;
@@ -71,6 +73,7 @@ precision highp float;
 
 #include <common>
 #include <packing>
+#include <lights_pars_begin>
 #include <shadowmap_pars_fragment>
 
 uniform vec3 baseColor;
@@ -292,6 +295,8 @@ void main() {
     vViewDirection = normalize(cameraPosition - worldPos.xyz);
     vColor = color;
 
+    vec3 transformedNormal = vNormal;
+    vec4 worldPosition = worldPos;
     #include <shadowmap_vertex>
 }
 `;
@@ -301,6 +306,7 @@ precision highp float;
 
 #include <common>
 #include <packing>
+#include <lights_pars_begin>
 #include <shadowmap_pars_fragment>
 
 uniform vec3 baseColor;

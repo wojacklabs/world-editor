@@ -82,6 +82,9 @@ void main() {
     vec3 N = vNormal;
     vTBN = mat3(T, B, N);
 
+    // Required by Three.js shadow map includes
+    vec3 transformedNormal = normalize(normalMatrix * normal);
+
     // Shadow map coordinate computation
     #include <shadowmap_vertex>
 }
@@ -93,6 +96,7 @@ precision highp float;
 
 #include <common>
 #include <packing>
+#include <lights_pars_begin>
 #include <shadowmap_pars_fragment>
 
 // Uniforms
@@ -958,7 +962,7 @@ void main() {
     #endif
 
     // Point light contribution
-    vec3 pointLightContrib = calcPointLights(vPosition, finalNormal);
+    vec3 pointLightContrib = calcPointLights(vPosition, normal);
 
     // Final color composition (shadow affects diffuse and specular, not ambient)
     vec3 color = baseColor * ao * (uAmbientIntensity + diffuse * uSunColor * shadowFactor + pointLightContrib) + specular * uSunColor * shadowFactor + rim;

@@ -505,6 +505,7 @@ precision highp float;
 
 #include <common>
 #include <packing>
+#include <lights_pars_begin>
 #include <shadowmap_pars_fragment>
 
 varying vec3 vNormal;
@@ -611,6 +612,8 @@ void main() {
     gl_Position = projectionMatrix * viewMatrix * worldPos;
 
     // Shadow map coordinate computation
+    vec3 transformedNormal = vNormal;
+    vec4 worldPosition = worldPos;
     #include <shadowmap_vertex>
 }
 `;
