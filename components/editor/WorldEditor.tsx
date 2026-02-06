@@ -398,6 +398,22 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
 
       keysPressed.add(key);
 
+      // Undo/Redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y)
+      if ((e.ctrlKey || e.metaKey) && key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          engineRef.current?.applyRedo();
+        } else {
+          engineRef.current?.applyUndo();
+        }
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && key === "y") {
+        e.preventDefault();
+        engineRef.current?.applyRedo();
+        return;
+      }
+
       // ESC to cancel pending asset
       if (e.key === "Escape") {
         if (store.pendingAsset) {

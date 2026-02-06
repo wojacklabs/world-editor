@@ -1169,6 +1169,34 @@ export class PropManager {
   }
 
   /**
+   * Sync fog settings from SkyWeatherSystem to all shared materials
+   */
+  syncFogSettings(fogColor: THREE.Color, fogDensity: number): void {
+    for (const material of this.sharedMaterials.values()) {
+      if (material.uniforms.fogColor) {
+        material.uniforms.fogColor.value.copy(fogColor);
+      }
+      if (material.uniforms.fogDensity) {
+        material.uniforms.fogDensity.value = fogDensity;
+      }
+    }
+  }
+
+  /**
+   * Sync sun direction and ambient intensity from SkyWeatherSystem to all shared materials
+   */
+  syncSunDirection(sunDir: THREE.Vector3, sunColor: THREE.Color, ambientIntensity?: number): void {
+    for (const material of this.sharedMaterials.values()) {
+      if (material.uniforms.sunDirection) {
+        material.uniforms.sunDirection.value.copy(sunDir);
+      }
+      if (ambientIntensity !== undefined && material.uniforms.ambientIntensity) {
+        material.uniforms.ambientIntensity.value = ambientIntensity;
+      }
+    }
+  }
+
+  /**
    * Update per-frame uniforms (camera position, time).
    * Call this once per frame from the editor engine.
    */

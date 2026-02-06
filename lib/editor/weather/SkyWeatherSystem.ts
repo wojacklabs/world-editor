@@ -5,6 +5,7 @@ import { PrecipitationSystem, type PrecipitationType } from "./PrecipitationSyst
 import { LightningSystem } from "./LightningSystem";
 import type { WeatherState, WeatherPreset } from "../types/EditorTypes";
 import type { FoliageSystem } from "../foliage/FoliageSystem";
+import type { PropManager } from "../props/PropManager";
 
 // Weather preset configurations
 interface WeatherConfig {
@@ -82,6 +83,7 @@ export class SkyWeatherSystem {
   private terrainMaterial: THREE.ShaderMaterial | null = null;
   private waterMaterial: THREE.ShaderMaterial | null = null;
   private foliageSystem: FoliageSystem | null = null;
+  private propManager: PropManager | null = null;
   private directionalLight: THREE.DirectionalLight | null = null;
   private hemisphericLight: THREE.HemisphereLight | null = null;
 
@@ -237,6 +239,11 @@ export class SkyWeatherSystem {
 
   setFoliageSystem(system: FoliageSystem | null): void {
     this.foliageSystem = system;
+    this.shadersDirty = true;
+  }
+
+  setPropManager(manager: PropManager | null): void {
+    this.propManager = manager;
     this.shadersDirty = true;
   }
 
@@ -405,6 +412,12 @@ export class SkyWeatherSystem {
       this.foliageSystem.syncSunDirection(this.sunDirection, this.sunColor);
     }
 
+    // Update prop manager
+    if (this.propManager) {
+      this.propManager.syncFogSettings(this.fogColor, this.fogDensity);
+      this.propManager.syncSunDirection(this.sunDirection, this.sunColor, this.ambientIntensity);
+    }
+
     // Cloud system is now integrated into sky shader - disable ground-based clouds
     if (this.cloudSystem) {
       this.cloudSystem.setEnabled(false);
@@ -559,5 +572,6 @@ export class SkyWeatherSystem {
     this.terrainMaterial = null;
     this.waterMaterial = null;
     this.foliageSystem = null;
+    this.propManager = null;
   }
 }

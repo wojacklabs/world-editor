@@ -22,6 +22,12 @@ import { StreamingManager } from "../streaming/StreamingManager";
 import { AssetContainerPool } from "../streaming/AssetContainerPool";
 import { getManualTileManager } from "../tiles/ManualTileManager";
 import { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
+import { UndoManager } from "./UndoManager";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 export class EditorEngine {
   private canvas: HTMLCanvasElement;
@@ -73,6 +79,14 @@ export class EditorEngine {
 
   // Sky and weather system
   private skyWeatherSystem: SkyWeatherSystem | null = null;
+
+  // Undo/Redo
+  private undoManager = new UndoManager(20);
+  private snapshotPushedForStroke = false;
+
+  // Post-processing
+  private composer: EffectComposer | null = null;
+  private renderPass: RenderPass | null = null;
 
   // Callbacks
   private onModified: (() => void) | null = null;
@@ -204,7 +218,10 @@ export class EditorEngine {
         }
 
         const gameCamera = this.gamePreview.getCamera();
-        if (gameCamera) {
+        if (gameCamera && this.composer && this.renderPass) {
+          this.renderPass.camera = gameCamera;
+          this.composer.render();
+        } else if (gameCamera) {
           this.renderer.render(this.scene, gameCamera);
         }
       } else {
@@ -216,7 +233,12 @@ export class EditorEngine {
           this.skyWeatherSystem.update();
         }
 
-        this.renderer.render(this.scene, this.camera);
+        if (this.composer && this.renderPass) {
+          this.renderPass.camera = this.camera;
+          this.composer.render();
+        } else {
+          this.renderer.render(this.scene, this.camera);
+        }
       }
     };
     animate();
@@ -257,6 +279,10 @@ export class EditorEngine {
     if (this.foliageSystem) {
       this.skyWeatherSystem.setFoliageSystem(this.foliageSystem);
     }
+    // Connect prop manager
+    if (this.propManager) {
+      this.skyWeatherSystem.setPropManager(this.propManager);
+    }
     // Connect water system (BiomeDecorator manages water)
     if (this.biomeDecorator) {
       const waterSystem = this.biomeDecorator.getWaterSystem();
@@ -268,6 +294,9 @@ export class EditorEngine {
       }
     }
     console.log("[EditorEngine] Sky weather system initialized");
+
+    // Setup post-processing pipeline
+    this.setupPostProcessing();
 
     this.isInitialized = true;
   }
@@ -320,6 +349,43 @@ export class EditorEngine {
     this.scene.add(dirLight.target);
   }
 
+  private setupPostProcessing(): void {
+    const width = this.canvas.clientWidth;
+    const height = this.canvas.clientHeight;
+
+    this.composer = new EffectComposer(this.renderer);
+
+    // 1. Render pass
+    this.renderPass = new RenderPass(this.scene, this.camera);
+    this.composer.addPass(this.renderPass);
+
+    // 2. SSAO pass
+    const ssaoPass = new SSAOPass(this.scene, this.camera, width, height);
+    ssaoPass.kernelRadius = 8;
+    ssaoPass.minDistance = 0.001;
+    ssaoPass.maxDistance = 0.1;
+    ssaoPass.output = SSAOPass.OUTPUT.Default;
+    this.composer.addPass(ssaoPass);
+
+    // 3. Bloom pass (subtle)
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(width, height),
+      0.3,   // strength
+      0.4,   // radius
+      0.85   // threshold
+    );
+    this.composer.addPass(bloomPass);
+
+    // 4. Output pass (tone mapping + color space)
+    const outputPass = new OutputPass();
+    this.composer.addPass(outputPass);
+
+    // OutputPass handles tone mapping, so disable on renderer
+    this.renderer.toneMapping = THREE.NoToneMapping;
+
+    console.log("[EditorEngine] Post-processing pipeline initialized (SSAO + Bloom)");
+  }
+
   private setupGrid(): void {
     this.gridMesh = new THREE.GridHelper(256, 256, 0x666673, 0x4d4d59);
     // majorUnitFrequency=8 -> minor divisions with 256 total
@@ -339,6 +405,7 @@ export class EditorEngine {
     if (this.isGameMode) return;
     if (event.button === 0) {
       this.isPointerDown = true;
+      this.snapshotPushedForStroke = false;
     }
   };
 
@@ -523,6 +590,10 @@ export class EditorEngine {
     this.propManager.setTileSize(size);
     this.propManager.setCamera(this.camera);
 
+    // Connect prop manager to weather system for fog/sun sync
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setPropManager(this.propManager);
+    }
 
     // Update grid and camera to match terrain size
     if (this.gridMesh) {
@@ -550,6 +621,17 @@ export class EditorEngine {
     if (!this.currentPickPoint || !this.heightmap || !this.terrainMesh) return;
 
     const point = this.currentPickPoint;
+
+    // Save undo snapshot before first modification in this stroke
+    if (!this.snapshotPushedForStroke) {
+      const splatMap = this.terrainMesh.getSplatMap();
+      this.undoManager.pushSnapshot(
+        this.heightmap.getData(),
+        splatMap.getData(),
+        splatMap.getWaterMask()
+      );
+      this.snapshotPushedForStroke = true;
+    }
 
     const modified = this.heightmap.applyBrush(
       point.x,
@@ -632,6 +714,16 @@ export class EditorEngine {
     const point = this.currentPickPoint;
     const splatMap = this.terrainMesh.getSplatMap();
 
+    // Save undo snapshot before first modification in this stroke
+    if (!this.snapshotPushedForStroke) {
+      this.undoManager.pushSnapshot(
+        this.heightmap.getData(),
+        splatMap.getData(),
+        splatMap.getWaterMask()
+      );
+      this.snapshotPushedForStroke = true;
+    }
+
     // Convert world coordinates to splat map coordinates
     const scale = this.heightmap.getScale();
     const resolution = splatMap.getResolution();
@@ -666,6 +758,17 @@ export class EditorEngine {
 
     const point = this.currentPickPoint;
     const splatMap = this.terrainMesh.getSplatMap();
+
+    // Save undo snapshot before first modification in this stroke
+    if (!this.snapshotPushedForStroke) {
+      this.undoManager.pushSnapshot(
+        this.heightmap.getData(),
+        splatMap.getData(),
+        splatMap.getWaterMask()
+      );
+      this.snapshotPushedForStroke = true;
+    }
+
     const scale = this.heightmap.getScale();
     const resolution = splatMap.getResolution();
     const splatX = (point.x / scale) * (resolution - 1);
@@ -1289,6 +1392,82 @@ export class EditorEngine {
   }
 
   /**
+   * Undo the last terrain edit operation
+   */
+  applyUndo(): boolean {
+    if (!this.heightmap || !this.terrainMesh) return false;
+    const splatMap = this.terrainMesh.getSplatMap();
+
+    const snapshot = this.undoManager.undo(
+      this.heightmap.getData(),
+      splatMap.getData(),
+      splatMap.getWaterMask()
+    );
+    if (!snapshot) return false;
+
+    this.restoreSnapshot(snapshot.heightmap, snapshot.splatmap, snapshot.waterMask);
+    return true;
+  }
+
+  /**
+   * Redo a previously undone terrain edit operation
+   */
+  applyRedo(): boolean {
+    if (!this.heightmap || !this.terrainMesh) return false;
+    const splatMap = this.terrainMesh.getSplatMap();
+
+    const snapshot = this.undoManager.redo(
+      this.heightmap.getData(),
+      splatMap.getData(),
+      splatMap.getWaterMask()
+    );
+    if (!snapshot) return false;
+
+    this.restoreSnapshot(snapshot.heightmap, snapshot.splatmap, snapshot.waterMask);
+    return true;
+  }
+
+  /**
+   * Restore terrain state from a snapshot
+   */
+  private restoreSnapshot(heightmap: Float32Array, splatmap: Float32Array, waterMask: Float32Array): void {
+    if (!this.heightmap || !this.terrainMesh) return;
+
+    // Restore heightmap
+    this.heightmap.getData().set(heightmap);
+    this.terrainMesh.updateFromHeightmap();
+
+    // Restore splatmap and water mask
+    const splatMap = this.terrainMesh.getSplatMap();
+    const srcSplatRes = Math.round(Math.sqrt(splatmap.length / 4));
+    splatMap.loadFromData(splatmap, waterMask, srcSplatRes);
+    this.terrainMesh.updateSplatTexture();
+    this.terrainMesh.updateWaterMaskTexture();
+
+    // Rebuild dependent systems
+    if (this.foliageSystem) {
+      this.foliageSystem.generateAll();
+    }
+    if (this.biomeDecorator) {
+      this.biomeDecorator.rebuildAll();
+    }
+    if (this.propManager) {
+      this.propManager.updateAllHeights();
+      this.propManager.rebuildDirtyGroups();
+    }
+
+    this.onModified?.();
+  }
+
+  get canUndo(): boolean {
+    return this.undoManager.canUndo;
+  }
+
+  get canRedo(): boolean {
+    return this.undoManager.canRedo;
+  }
+
+  /**
    * Get renderer performance stats (FPS, draw calls, triangles)
    */
   getStats(): { fps: number; drawCalls: number; triangles: number } {
@@ -1579,6 +1758,11 @@ export class EditorEngine {
         gameCamera.updateProjectionMatrix();
       }
     }
+
+    // Update post-processing composer size
+    if (this.composer) {
+      this.composer.setSize(width, height);
+    }
   };
 
   // ============================================
@@ -1700,6 +1884,11 @@ export class EditorEngine {
     this.propManager = new PropManager(this.scene, this.heightmap);
     this.propManager.setTileSize(this.heightmap.getScale());  // Set tile size for streaming grouping
 
+    // Connect prop manager to weather system for fog/sun sync
+    if (this.skyWeatherSystem) {
+      this.skyWeatherSystem.setPropManager(this.propManager);
+    }
+
     console.log("[EditorEngine] Tile data loaded");
   }
 
@@ -1747,6 +1936,11 @@ export class EditorEngine {
     if (this.assetPool) {
       this.assetPool.dispose();
       this.assetPool = null;
+    }
+    if (this.composer) {
+      this.composer.dispose();
+      this.composer = null;
+      this.renderPass = null;
     }
     if (this.skyWeatherSystem) {
       this.skyWeatherSystem.dispose();
