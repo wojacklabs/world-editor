@@ -144,13 +144,22 @@ export function loadTextureWithFallbackSync(
   pathOrBase: string,
   options: TextureFallbackOptions = {}
 ): THREE.Texture {
-  const placeholder = new THREE.Texture();
+  // Create 1x1 pixel placeholder to avoid "no image data found" warning
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(0, 0, 1, 1);
+  }
+  const placeholder = new THREE.Texture(canvas);
   placeholder.wrapS = options.wrapS ?? THREE.RepeatWrapping;
   placeholder.wrapT = options.wrapT ?? THREE.RepeatWrapping;
 
   loadTextureWithFallback(pathOrBase, options).then(
     (loaded) => {
-      placeholder.image = loaded.image;
+      (placeholder as THREE.Texture).image = loaded.image;
       placeholder.format = loaded.format;
       placeholder.type = loaded.type;
       placeholder.flipY = loaded.flipY;
