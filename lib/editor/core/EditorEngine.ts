@@ -145,7 +145,6 @@ export class EditorEngine {
       canvas: this.canvas,
       antialias: true,
       stencil: true,
-      preserveDrawingBuffer: true,
     });
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.setSize(this.canvas.clientWidth, this.canvas.clientHeight);
@@ -716,7 +715,7 @@ export class EditorEngine {
     );
 
     if (modified) {
-      this.terrainMesh.updateFromHeightmap();
+      this.terrainMesh.updateFromHeightmapRegion(point.x, point.z, settings.size);
       this.foliageDirty = true;
       this.biomeDirty = true;
       this.propsDirty = true;
@@ -970,7 +969,11 @@ export class EditorEngine {
 
     if (modified) {
       // Update terrain mesh with new heights
-      this.terrainMesh.updateFromHeightmap();
+      this.terrainMesh.updateFromHeightmapRegion(
+        worldX,
+        worldZ,
+        outerRadius * cellSize
+      );
 
       // Update water system's heightmap texture for depth calculation
       const waterSystem = this.biomeDecorator?.getWaterSystem();

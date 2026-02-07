@@ -20,6 +20,7 @@ export class TerrainMesh {
   private simpleMaterial: THREE.MeshStandardMaterial | null = null;
   private splatTexture: THREE.DataTexture | null = null;
   private waterMaskTexture: THREE.DataTexture | null = null;
+  private waterMaskBuffer: Uint8Array | null = null;
   private useShader = true;
 
   // Displacement strength (GPU shader based)
@@ -215,9 +216,14 @@ export class TerrainMesh {
     }
 
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+    const positionAttr = new THREE.BufferAttribute(new Float32Array(positions), 3);
+    positionAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute('position', positionAttr);
     geometry.setIndex(indices);
     geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvs), 2));
+    const normalAttr = new THREE.BufferAttribute(new Float32Array(normals), 3);
+    normalAttr.setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute('normal', normalAttr);
 
     const material = this.useShader ? this.shaderMaterial : this.simpleMaterial;
     const mesh = new THREE.Mesh(geometry, material!);
@@ -238,11 +244,31 @@ export class TerrainMesh {
   /**
    * Calculate normals for a specific mesh
    */
-  private calculateNormalsForMesh(mesh: THREE.Mesh, resolution: number, cellSize: number, positions: number[]): void {
-    const normals: number[] = [];
+  private calculateNormalsForMesh(
+    mesh: THREE.Mesh,
+    resolution: number,
+    cellSize: number,
+    positions: ArrayLike<number>,
+    minX: number = 0,
+    maxX: number = resolution - 1,
+    minZ: number = 0,
+    maxZ: number = resolution - 1
+  ): void {
+    if (minX > maxX || minZ > maxZ) return;
 
-    for (let z = 0; z < resolution; z++) {
-      for (let x = 0; x < resolution; x++) {
+    const vertexCount = resolution * resolution;
+    const geometry = mesh.geometry;
+    let normalAttr = geometry.getAttribute("normal") as THREE.BufferAttribute | undefined;
+    if (!normalAttr || normalAttr.count !== vertexCount) {
+      normalAttr = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3);
+      normalAttr.setUsage(THREE.DynamicDrawUsage);
+      geometry.setAttribute("normal", normalAttr);
+    }
+
+    const normals = normalAttr.array as Float32Array;
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
         const idxL = (z * resolution + Math.max(0, x - 1)) * 3;
         const idxR = (z * resolution + Math.min(resolution - 1, x + 1)) * 3;
         const idxD = (Math.max(0, z - 1) * resolution + x) * 3;
@@ -256,13 +282,19 @@ export class TerrainMesh {
         const nx = (hL - hR) / (2 * cellSize);
         const nz = (hD - hU) / (2 * cellSize);
 
-        // Normalize without creating Vector3 object
         const len = Math.sqrt(nx * nx + 1 + nz * nz);
-        normals.push(nx / len, 1 / len, nz / len);
+        const outIdx = (z * resolution + x) * 3;
+        normals[outIdx] = nx / len;
+        normals[outIdx + 1] = 1 / len;
+        normals[outIdx + 2] = nz / len;
       }
     }
 
-    mesh.geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(normals), 3));
+    const updateStart = (minZ * resolution + minX) * 3;
+    const updateEnd = ((maxZ * resolution + maxX) + 1) * 3;
+    normalAttr.clearUpdateRanges();
+    normalAttr.addUpdateRange(updateStart, updateEnd - updateStart);
+    normalAttr.needsUpdate = true;
   }
 
   /**
@@ -394,6 +426,7 @@ export class TerrainMesh {
       uint8Data[i * 4 + 2] = value;  // B
       uint8Data[i * 4 + 3] = 255;    // A
     }
+    this.waterMaskBuffer = uint8Data;
 
     const texture = new THREE.DataTexture(
       uint8Data,
@@ -419,7 +452,11 @@ export class TerrainMesh {
 
     const resolution = this.splatMap.getResolution();
     const waterMask = this.splatMap.getWaterMask();
-    const uint8Data = new Uint8Array(resolution * resolution * 4);
+    const requiredLength = resolution * resolution * 4;
+    if (!this.waterMaskBuffer || this.waterMaskBuffer.length !== requiredLength) {
+      this.waterMaskBuffer = new Uint8Array(requiredLength);
+    }
+    const uint8Data = this.waterMaskBuffer;
 
     for (let i = 0; i < resolution * resolution; i++) {
       const value = Math.floor(waterMask[i] * 255);
@@ -429,7 +466,11 @@ export class TerrainMesh {
       uint8Data[i * 4 + 3] = 255;    // A
     }
 
-    this.waterMaskTexture.image = { data: uint8Data, width: resolution, height: resolution };
+    this.waterMaskTexture.image = {
+      data: uint8Data,
+      width: resolution,
+      height: resolution,
+    };
     this.waterMaskTexture.needsUpdate = true;
   }
 
@@ -450,22 +491,69 @@ export class TerrainMesh {
     }
   }
 
+  updateFromHeightmapRegion(worldX: number, worldZ: number, worldRadius: number): void {
+    const radius = Math.max(0, worldRadius);
+    for (const lod of this.lodLevels) {
+      if (!lod.mesh) continue;
+      this.updateMeshRegionFromHeightmap(
+        lod.mesh,
+        lod.resolution,
+        worldX,
+        worldZ,
+        radius
+      );
+    }
+  }
+
   /**
    * Update a specific mesh from heightmap
    */
   private updateMeshFromHeightmap(mesh: THREE.Mesh, targetResolution: number): void {
+    const scale = this.heightmap.getScale();
+    this.updateMeshRegionFromHeightmap(
+      mesh,
+      targetResolution,
+      scale * 0.5,
+      scale * 0.5,
+      scale
+    );
+
+    mesh.geometry.computeBoundingBox();
+    mesh.geometry.computeBoundingSphere();
+  }
+
+  private updateMeshRegionFromHeightmap(
+    mesh: THREE.Mesh,
+    targetResolution: number,
+    worldX: number,
+    worldZ: number,
+    worldRadius: number
+  ): void {
     const baseResolution = this.heightmap.getResolution();
     const scale = this.heightmap.getScale();
     const step = Math.max(1, Math.floor((baseResolution - 1) / (targetResolution - 1)));
     const actualResolution = Math.floor((baseResolution - 1) / step) + 1;
     const cellSize = scale / (actualResolution - 1);
 
-    const posAttr = mesh.geometry.getAttribute('position');
+    const posAttr = mesh.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
     if (!posAttr) return;
     const positions = posAttr.array as Float32Array;
 
-    for (let z = 0; z < actualResolution; z++) {
-      for (let x = 0; x < actualResolution; x++) {
+    const centerX = worldX / cellSize;
+    const centerZ = worldZ / cellSize;
+    const paddedRadius = worldRadius / cellSize + 2;
+
+    const minX = Math.max(0, Math.floor(centerX - paddedRadius));
+    const maxX = Math.min(actualResolution - 1, Math.ceil(centerX + paddedRadius));
+    const minZ = Math.max(0, Math.floor(centerZ - paddedRadius));
+    const maxZ = Math.min(actualResolution - 1, Math.ceil(centerZ + paddedRadius));
+
+    if (minX > maxX || minZ > maxZ) {
+      return;
+    }
+
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let x = minX; x <= maxX; x++) {
         const idx = (z * actualResolution + x) * 3;
         const hx = Math.min(x * step, baseResolution - 1);
         const hz = Math.min(z * step, baseResolution - 1);
@@ -473,10 +561,22 @@ export class TerrainMesh {
       }
     }
 
+    const posRangeStart = (minZ * actualResolution + minX) * 3;
+    const posRangeEnd = ((maxZ * actualResolution + maxX) + 1) * 3;
+    posAttr.clearUpdateRanges();
+    posAttr.addUpdateRange(posRangeStart, posRangeEnd - posRangeStart);
     posAttr.needsUpdate = true;
-    this.calculateNormalsForMesh(mesh, actualResolution, cellSize, Array.from(positions));
-    mesh.geometry.computeBoundingBox();
-    mesh.geometry.computeBoundingSphere();
+
+    this.calculateNormalsForMesh(
+      mesh,
+      actualResolution,
+      cellSize,
+      positions,
+      Math.max(0, minX - 1),
+      Math.min(actualResolution - 1, maxX + 1),
+      Math.max(0, minZ - 1),
+      Math.min(actualResolution - 1, maxZ + 1)
+    );
 
     // Refit BVH after vertex position changes (topology unchanged)
     if (mesh.geometry.boundsTree) {
@@ -685,6 +785,7 @@ export class TerrainMesh {
     if (this.waterMaskTexture) {
       this.waterMaskTexture.dispose();
       this.waterMaskTexture = null;
+      this.waterMaskBuffer = null;
     }
   }
 }

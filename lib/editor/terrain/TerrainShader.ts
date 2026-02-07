@@ -1157,10 +1157,22 @@ export function createSplatTexture(splatData: Float32Array, resolution: number):
 }
 
 export function updateSplatTexture(texture: THREE.DataTexture, splatData: Float32Array, resolution: number): void {
-  const uint8Data = new Uint8Array(resolution * resolution * 4);
+  const requiredLength = resolution * resolution * 4;
+  let uint8Data: Uint8Array | null = null;
+  const image = texture.image as
+    | { data?: Uint8Array; width?: number; height?: number }
+    | undefined;
+
+  if (image?.data instanceof Uint8Array && image.data.length === requiredLength) {
+    uint8Data = image.data;
+  } else {
+    uint8Data = new Uint8Array(requiredLength);
+  }
+
   for (let i = 0; i < resolution * resolution * 4; i++) {
     uint8Data[i] = Math.floor(splatData[i] * 255);
   }
+
   texture.image = { data: uint8Data, width: resolution, height: resolution };
   texture.needsUpdate = true;
 }
