@@ -5,10 +5,9 @@ import dynamic from "next/dynamic";
 import { EditorEngine } from "@/lib/editor/core/EditorEngine";
 import EditorToolbar from "@/components/editor/EditorToolbar";
 import EditorSidebar from "@/components/editor/EditorSidebar";
-import TilePanel from "@/components/editor/TilePanel";
+import EditorInspector from "@/components/editor/EditorInspector";
 import AssetChatPanel from "@/components/editor/AssetChatPanel";
 import AssetLibraryPanel from "@/components/editor/AssetLibraryPanel";
-import PlacedAssetPanel from "@/components/editor/PlacedAssetPanel";
 import { useEditorStore } from "@/lib/editor/store/editorStore";
 import { SavedAsset } from "@/lib/editor/assets/AssetLibrary";
 import { MeshData, createMeshFromData } from "@/lib/editor/assets/CustomMeshBuilder";
@@ -46,7 +45,7 @@ export default function EditorPage() {
   const [terrainSize, setTerrainSize] = useState(64);
   const [activeTileId, setActiveTileId] = useState<string | null>(null);
   const [tileDirty, setTileDirty] = useState(false);
-  const { setModified, resetState, weather, updateWeather } = useEditorStore();
+  const { setModified, resetState, weather } = useEditorStore();
 
   // Placed assets management
   const [placedAssets, setPlacedAssets] = useState<PlacedAsset[]>([]);
@@ -487,7 +486,7 @@ export default function EditorPage() {
       setSelectedAssetId(null);
     }
     setModified(true);
-  }, [selectedAssetId, setModified]);
+  }, [engine, selectedAssetId, setModified]);
 
   // Randomize rotation
   const handleRandomizeRotation = useCallback((assetId: string) => {
@@ -581,9 +580,6 @@ export default function EditorPage() {
     console.log("Asset saved:", asset.name);
   }, []);
 
-  // Get selected asset
-  const selectedAsset = placedAssets.find((a) => a.id === selectedAssetId);
-
   // Keyboard shortcut for game mode
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -630,30 +626,25 @@ export default function EditorPage() {
         </div>
 
         {!isGameMode && (
-          <div className="flex flex-col bg-zinc-950 overflow-y-auto">
-            <TilePanel
-              onSaveTile={handleSaveTile}
-              onLoadTile={handleLoadTile}
-              onCreateNewTile={handleCreateNewTile}
-              activeTileId={activeTileId}
-              isDirty={tileDirty}
-              dispStrength={dispStrength}
-              onDispStrengthChange={handleDispStrengthChange}
-              terrainResolution={terrainResolution}
-              onTerrainResolutionChange={handleTerrainResolutionChange}
-              terrainSize={terrainSize}
-              onTerrainSizeChange={handleTerrainSizeChange}
-            />
-            {/* Placed Asset Panel */}
-            <PlacedAssetPanel
-              assets={placedAssets}
-              selectedAssetId={selectedAssetId}
-              onSelectAsset={setSelectedAssetId}
-              onUpdateAsset={handleUpdateAsset}
-              onDeleteAsset={handleDeleteAsset}
-              onRandomizeRotation={handleRandomizeRotation}
-            />
-          </div>
+          <EditorInspector
+            onSaveTile={handleSaveTile}
+            onLoadTile={handleLoadTile}
+            onCreateNewTile={handleCreateNewTile}
+            activeTileId={activeTileId}
+            isDirty={tileDirty}
+            dispStrength={dispStrength}
+            onDispStrengthChange={handleDispStrengthChange}
+            terrainResolution={terrainResolution}
+            onTerrainResolutionChange={handleTerrainResolutionChange}
+            terrainSize={terrainSize}
+            onTerrainSizeChange={handleTerrainSizeChange}
+            assets={placedAssets}
+            selectedAssetId={selectedAssetId}
+            onSelectAsset={setSelectedAssetId}
+            onUpdateAsset={handleUpdateAsset}
+            onDeleteAsset={handleDeleteAsset}
+            onRandomizeRotation={handleRandomizeRotation}
+          />
         )}
       </div>
 

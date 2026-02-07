@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import {
   getManualTileManager,
   type TileRef,
@@ -12,6 +12,7 @@ import { useEditorStore } from "@/lib/editor/store/editorStore";
 // ============================================
 
 interface TilePanelProps {
+  variant?: "standalone" | "embedded";
   onSaveTile: (name: string, existingId?: string) => void;
   onLoadTile: (tileId: string) => void;
   onCreateNewTile: (name: string) => void;
@@ -369,6 +370,7 @@ function TerrainSettingsSection({
 // ============================================
 
 export default function TilePanel({
+  variant = "standalone",
   onSaveTile,
   onLoadTile,
   onCreateNewTile,
@@ -381,19 +383,14 @@ export default function TilePanel({
   terrainSize,
   onTerrainSizeChange,
 }: TilePanelProps) {
-  const [tiles, setTiles] = useState<TileRef[]>([]);
+  const tileManager = getManualTileManager();
+  const [tiles, setTiles] = useState<TileRef[]>(() => tileManager.getTileList());
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [newTileName, setNewTileName] = useState("");
 
-  const tileManager = getManualTileManager();
-
-  const refreshData = useCallback(() => {
+  const refreshData = () => {
     setTiles(tileManager.getTileList());
-  }, [tileManager]);
-
-  useEffect(() => {
-    refreshData();
-  }, [refreshData]);
+  };
 
   const activeTile = activeTileId ? tileManager.getTile(activeTileId) : null;
 
@@ -466,13 +463,18 @@ export default function TilePanel({
   };
 
   return (
-    <div className="w-56 bg-zinc-950 border-l border-zinc-800/50 flex flex-col h-full">
-      {/* Header */}
-      <div className="flex border-b border-zinc-800">
-        <div className="flex-1 py-2.5 text-xs font-medium text-zinc-200 border-b-2 border-zinc-200 text-center">
-          Properties
+    <div
+      className={`bg-zinc-950 flex flex-col h-full ${
+        variant === "standalone" ? "w-56 border-l border-zinc-800/50" : "w-full"
+      }`}
+    >
+      {variant === "standalone" && (
+        <div className="flex border-b border-zinc-800">
+          <div className="flex-1 py-2.5 text-xs font-medium text-zinc-200 border-b-2 border-zinc-200 text-center">
+            Properties
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
@@ -520,14 +522,15 @@ export default function TilePanel({
         </CollapsibleSection>
       </div>
 
-      {/* Shortcuts Footer */}
-      <section className="p-3 border-t border-zinc-800/50">
-        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-zinc-600">
-          <span>[ ]</span><span>Brush size</span>
-          <span>G</span><span>Grid</span>
-          <span>F</span><span>Wireframe</span>
-        </div>
-      </section>
+      {variant === "standalone" && (
+        <section className="p-3 border-t border-zinc-800/50">
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-zinc-600">
+            <span>[ ]</span><span>Brush size</span>
+            <span>G</span><span>Grid</span>
+            <span>F</span><span>Wireframe</span>
+          </div>
+        </section>
+      )}
 
       {/* Create Tile Dialog */}
       {showCreateDialog && (

@@ -3,6 +3,7 @@
 import { PlacedAsset } from "@/app/page";
 
 interface PlacedAssetPanelProps {
+  variant?: "standalone" | "embedded";
   assets: PlacedAsset[];
   selectedAssetId: string | null;
   onSelectAsset: (id: string | null) => void;
@@ -15,6 +16,7 @@ interface PlacedAssetPanelProps {
 }
 
 export default function PlacedAssetPanel({
+  variant = "standalone",
   assets,
   selectedAssetId,
   onSelectAsset,
@@ -23,15 +25,35 @@ export default function PlacedAssetPanel({
   onRandomizeRotation,
 }: PlacedAssetPanelProps) {
   const selectedAsset = assets.find((a) => a.id === selectedAssetId);
+  const headerClass = variant === "standalone"
+    ? "px-4 py-2.5 flex items-center justify-between"
+    : "px-4 py-3 flex items-center justify-between border-b border-zinc-800/60";
 
   if (assets.length === 0) {
+    if (variant === "embedded") {
+      return (
+        <div className="w-full bg-zinc-950 flex flex-col h-full">
+          <div className={headerClass}>
+            <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide">
+              Objects
+            </span>
+          </div>
+          <div className="flex-1 flex items-center justify-center px-4">
+            <div className="text-center">
+              <p className="text-xs text-zinc-500">No objects in scene</p>
+              <p className="text-[10px] text-zinc-600 mt-1">Add assets from Generate or Library</p>
+            </div>
+          </div>
+        </div>
+      );
+    }
     return null;
   }
 
   return (
-    <div className="w-56 bg-zinc-950 border-t border-zinc-800/50 flex flex-col max-h-80">
+    <div className={`bg-zinc-950 flex flex-col ${variant === "standalone" ? "w-56 border-t border-zinc-800/50 max-h-80" : "w-full h-full"}`}>
       {/* Header */}
-      <div className="px-4 py-2.5 flex items-center justify-between">
+      <div className={headerClass}>
         <span className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide">
           Objects ({assets.length})
         </span>
@@ -47,7 +69,7 @@ export default function PlacedAssetPanel({
 
       <div className="flex-1 overflow-y-auto">
         {/* Asset List */}
-        <div className="px-2 pb-2 space-y-px">
+        <div className={`px-2 space-y-px ${variant === "standalone" ? "pb-2" : "py-2"}`}>
           {assets.map((asset) => (
             <button
               key={asset.id}

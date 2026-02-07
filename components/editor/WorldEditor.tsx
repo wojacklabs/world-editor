@@ -30,11 +30,9 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     debugVisibility,
     debugRenderMode,
     setModified,
-    randomizeAssetSeed,
     waterType,
     waterFlowAngle,
     pendingAsset,
-    clearPendingAsset,
     weather,
   } = useEditorStore();
 
@@ -198,7 +196,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       // Hide preview when leaving props mode
       engineRef.current.setPropPreviewVisible(false);
     }
-  }, [engineReady, activeTool, selectedAssetType, assetSettings.seed]);
+  }, [engineReady, activeTool, selectedAssetType, assetSettings.seed, assetSettings.size]);
 
   // Update preview size separately (preserves position)
   useEffect(() => {
@@ -430,6 +428,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       if (e.key === "2") store.setActiveTool("heightmap");
       if (e.key === "3") store.setActiveTool("biome");
       if (e.key === "4") store.setActiveTool("props");
+      if (e.key === "5") store.setActiveTool("environment");
 
       // Heightmap tool shortcuts (Q, E, R, T - W is for camera)
       if (store.activeTool === "heightmap") {
@@ -499,12 +498,12 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       {/* Controls hint */}
       <div className="absolute bottom-4 left-4 text-xs text-zinc-500 bg-zinc-900/80 px-3 py-2 rounded-lg">
         <p>Drag: Rotate | Cmd+Scroll: Zoom | Shift+Drag: Pan | [ ]: Brush Size</p>
-        <p className="mt-1">1-4: Tools | Q/W/E/R: Height Brushes | G: Grid | F: Wireframe</p>
+        <p className="mt-1">1-5: Tools | Q/T/E/R: Height Brushes | G: Grid | F: Wireframe</p>
         {pendingAsset && (
           <p className="mt-1 text-green-400">Click on terrain to place &quot;{pendingAsset.name}&quot; | ESC: Cancel</p>
         )}
         {activeTool === "props" && !pendingAsset && (
-          <p className="mt-1 text-blue-400">Click to place | Scroll: Scale | R: Randomize</p>
+          <p className="mt-1 text-blue-400">Click to place | Scroll: Scale | Shift+R: Randomize</p>
         )}
       </div>
     </div>

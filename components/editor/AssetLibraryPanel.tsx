@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import {
   getAssetLibrary,
   SavedAsset,
@@ -22,45 +22,34 @@ export default function AssetLibraryPanel({
   onAssetSelect,
   onAssetDelete,
 }: AssetLibraryPanelProps) {
-  const [assets, setAssets] = useState<SavedAsset[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [filterType, setFilterType] = useState<FilterType>("all");
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [, setLibraryVersion] = useState(0);
 
   const library = getAssetLibrary();
   const { setPendingAsset } = useEditorStore();
 
-  useEffect(() => {
-    if (isOpen) {
-      loadAssets();
-    }
-  }, [isOpen]);
-
-  const loadAssets = () => {
-    let result = library.getAllAssets();
+  let assets: SavedAsset[] = [];
+  if (isOpen) {
+    assets = library.getAllAssets();
 
     if (filterType !== "all") {
-      result = result.filter((a) => a.type === filterType);
+      assets = assets.filter((a) => a.type === filterType);
     }
 
     if (searchQuery.trim()) {
-      result = library.searchAssets(searchQuery);
+      assets = library.searchAssets(searchQuery);
       if (filterType !== "all") {
-        result = result.filter((a) => a.type === filterType);
+        assets = assets.filter((a) => a.type === filterType);
       }
     }
-
-    setAssets(result);
-  };
-
-  useEffect(() => {
-    loadAssets();
-  }, [searchQuery, filterType]);
+  }
 
   const handleDelete = (id: string) => {
     if (confirm("Delete this asset?")) {
       library.deleteAsset(id);
-      loadAssets();
+      setLibraryVersion((prev) => prev + 1);
       onAssetDelete?.(id);
       if (selectedAssetId === id) {
         setSelectedAssetId(null);
@@ -69,6 +58,7 @@ export default function AssetLibraryPanel({
   };
 
   const handlePlaceAsset = (asset: SavedAsset) => {
+    onAssetSelect?.(asset);
     setPendingAsset({
       type: "library",
       glbPath: asset.glbPath,
@@ -98,7 +88,7 @@ export default function AssetLibraryPanel({
         try {
           const text = await file.text();
           library.importLibrary(text, true);
-          loadAssets();
+          setLibraryVersion((prev) => prev + 1);
         } catch {
           alert("Invalid file format");
         }
@@ -123,8 +113,13 @@ export default function AssetLibraryPanel({
   const selectedAsset = assets.find((a) => a.id === selectedAssetId);
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="w-[640px] max-h-[75vh] bg-zinc-950 rounded-xl border border-zinc-800/50 flex flex-col shadow-2xl">
+    <div className="fixed inset-0 z-50">
+      <button
+        onClick={onClose}
+        className="absolute inset-0 bg-black/45"
+        aria-label="Close asset library"
+      />
+      <div className="absolute right-0 top-0 h-full w-[620px] max-w-[92vw] bg-zinc-950 border-l border-zinc-800/60 flex flex-col shadow-2xl">
         {/* Header */}
         <header className="px-5 py-4 border-b border-zinc-800/50 flex justify-between items-center">
           <div>
