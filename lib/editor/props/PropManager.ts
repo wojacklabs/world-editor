@@ -6,6 +6,7 @@ import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from ".
 import { loadTextureWithFallbackSync } from "../../shared/rendering/TextureLoader.three";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
 import type { LightManager } from "../lighting/LightManager";
+import CustomShaderMaterial from "three-custom-shader-material/vanilla";
 // ============================================
 // LOD Configuration
 // ============================================
@@ -286,7 +287,9 @@ void main() {
     gl_Position = projectionMatrix * viewMatrix * worldPos;
 
     mat3 normalMat = mat3(modelMatrix) * mat3(instanceMatrix);
+    // Normals: leaf vertices have pre-baked sphere normals per bush cluster
     vNormal = normalize(normalMat * normal);
+
     vPosition = worldPos.xyz;
     vLocalPosition = position;
     vUV = uv;
@@ -487,6 +490,165 @@ void main() {
 }
 `;
 
+// ============================================
+// CSM shaders for tree/bush (MeshStandardMaterial extension)
+// Only handles wind displacement + sphere normals; PBR handles lighting/shadow/fog
+// ============================================
+const csmLeafVertexShader = `
+attribute vec4 color;
+varying vec4 vVertexColor;
+varying vec2 vUv;
+
+uniform float uTime;
+uniform vec2 uWindDirection;
+uniform float uWindStrength;
+uniform float uMinWindHeight;
+uniform float uMaxWindHeight;
+uniform float uPropsPrimarySpeed;
+uniform float uPropsSecondarySpeed;
+uniform float uPropsNoiseSpeed;
+
+float csm_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float csm_noise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = csm_hash(i);
+    float b = csm_hash(i + vec2(1.0, 0.0));
+    float c = csm_hash(i + vec2(0.0, 1.0));
+    float d = csm_hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main() {
+    vVertexColor = color;
+    vUv = uv;
+
+    // Wind displacement
+    vec3 worldPos = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xyz;
+
+    float heightAboveMin = max(0.0, position.y - uMinWindHeight);
+    float heightRange = max(0.01, uMaxWindHeight - uMinWindHeight);
+    float heightFactor = clamp(heightAboveMin / heightRange, 0.0, 1.0);
+    heightFactor = heightFactor * heightFactor * heightFactor;
+
+    vec2 worldPosXZ = worldPos.xz;
+    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
+    float primaryWave = sin(windPhase) * 0.5 + 0.5;
+    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * uPropsSecondarySpeed;
+    float secondaryWave = sin(secondaryPhase) * 0.3 + 0.5;
+    float noiseVal = csm_noise2D(worldPosXZ * 0.3 + uTime * uPropsNoiseSpeed);
+    float windAmount = (primaryWave * 0.7 + secondaryWave * 0.3 + noiseVal * 0.2) * heightFactor * uWindStrength;
+
+    vec3 displaced = position;
+    displaced.x += uWindDirection.x * windAmount * 0.2;
+    displaced.z += uWindDirection.y * windAmount * 0.2;
+    displaced.y -= windAmount * 0.04;
+    csm_Position = displaced;
+}
+`;
+
+// Fragment: bark/leaf branching via vertex color + fresnel for leaves
+const csmLeafFragmentShader = `
+varying vec4 vVertexColor;
+varying vec2 vUv;
+
+uniform float uFresnelPower;
+uniform float uFresnelStrength;
+uniform vec3 uFresnelColor;
+uniform vec3 uTrunkColor;
+uniform sampler2D uLeafAlpha;
+uniform float uAlphaCutoff;
+
+float bark_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main() {
+    // Vertex color: R>G = bark, G>R = leaf (set by setGeometryVertexColor)
+    float isBark = step(vVertexColor.g + 0.02, vVertexColor.r);
+
+    // Leaf alpha test (only for leaf vertices, bark always opaque)
+    if (isBark < 0.5) {
+        float alpha = texture2D(uLeafAlpha, vUv).g;
+        if (alpha < uAlphaCutoff) discard;
+    }
+
+    // Bark: shaded color with grooves
+    if (isBark > 0.5) {
+        vec3 N = normalize(vNormal);
+
+        // Wrapped Half-Lambert: directional light shading
+        vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
+        float wrap = 0.4;
+        float NdotL = clamp((dot(N, lightDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
+
+        // Hemisphere shading: top brighter, bottom darker
+        float hemi = N.y * 0.5 + 0.5;
+
+        // Combined shade factor (0.55 ~ 1.0)
+        float shade = mix(0.55, 1.0, NdotL * 0.6 + hemi * 0.4);
+
+        // Procedural bark grooves (vertical grain pattern)
+        float groove = bark_hash(vec2(vUv.x * 30.0, vUv.y * 5.0));
+        float grooveFactor = smoothstep(0.3, 0.7, groove);
+        shade *= mix(0.8, 1.05, grooveFactor);
+
+        csm_DiffuseColor.rgb = uTrunkColor * shade;
+    } else {
+        csm_DiffuseColor.rgb = csm_DiffuseColor.rgb;
+    }
+
+    // Leaf fresnel rim (skip for bark)
+    float leafMask = 1.0 - isBark;
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(vViewPosition);
+    float ndv = clamp(dot(N, V), 0.0, 1.0);
+    float fresnel = pow(1.0 - ndv, uFresnelPower) * uFresnelStrength * leafMask;
+    csm_DiffuseColor.rgb = mix(csm_DiffuseColor.rgb, uFresnelColor, clamp(fresnel, 0.0, 1.0));
+}
+`;
+
+const csmTrunkVertexShader = `
+uniform float uTime;
+uniform vec2 uWindDirection;
+uniform float uWindStrength;
+uniform float uMinWindHeight;
+uniform float uMaxWindHeight;
+uniform float uPropsPrimarySpeed;
+
+float csm_trunk_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main() {
+    // Trunk sway: subtle wind at upper portions only
+    vec3 worldPos = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xyz;
+
+    float heightAboveMin = max(0.0, position.y - uMinWindHeight);
+    float heightRange = max(0.01, uMaxWindHeight - uMinWindHeight);
+    float heightFactor = clamp(heightAboveMin / heightRange, 0.0, 1.0);
+    heightFactor = heightFactor * heightFactor;
+
+    float windPhase = dot(worldPos.xz, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
+    float windAmount = sin(windPhase) * heightFactor * uWindStrength * 0.3;
+
+    vec3 displaced = position;
+    displaced.x += uWindDirection.x * windAmount * 0.1;
+    displaced.z += uWindDirection.y * windAmount * 0.1;
+    csm_Position = displaced;
+}
+`;
+
+const csmTrunkFragmentShader = `
+void main() {
+    // Use base MeshStandardMaterial color as-is
+}
+`;
+
 // LOD level for props visibility
 export enum PropLOD {
   Near = 0,   // All props visible
@@ -600,6 +762,9 @@ export class PropManager {
   private lastFrustumUpdateFrame = -1;
   private frameCounter = 0;
   private referenceTemplates: Partial<Record<"tree" | "bush", THREE.BufferGeometry>> = {};
+  // GLB-extracted material data (for diagnostic purposes)
+  private glbLeafColor: THREE.Color | null = null;
+  private glbTrunkColor: THREE.Color | null = null;
 
   // Material start time for wind animation
   private materialStartTime = 0;
@@ -636,7 +801,7 @@ export class PropManager {
     return n - Math.floor(n);
   }
 
-  private setGeometryVertexColor(geometry: THREE.BufferGeometry, r: number, g: number, b: number): void {
+  private setGeometryVertexColor(geometry: THREE.BufferGeometry, r: number, g: number, b: number, a = 1.0): void {
     const posAttr = geometry.getAttribute("position");
     if (!posAttr) return;
 
@@ -646,7 +811,7 @@ export class PropManager {
       colors[i * 4] = r;
       colors[i * 4 + 1] = g;
       colors[i * 4 + 2] = b;
-      colors[i * 4 + 3] = 1.0;
+      colors[i * 4 + 3] = a;
     }
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
   }
@@ -668,6 +833,43 @@ export class PropManager {
     cloned.computeVertexNormals();
 
     return cloned;
+  }
+
+  /**
+   * Replace flat normals with sphere normals based on each bush cluster's centroid.
+   * This gives volume to leaf cards that would otherwise render as flat planes.
+   */
+  private bakeSphereNormals(geometry: THREE.BufferGeometry): void {
+    const posAttr = geometry.getAttribute("position");
+    const normalAttr = geometry.getAttribute("normal");
+    if (!posAttr || !normalAttr) return;
+
+    const positions = posAttr.array as Float32Array;
+    const normals = normalAttr.array as Float32Array;
+    const count = posAttr.count;
+
+    // Compute centroid of this bush cluster
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < count; i++) {
+      cx += positions[i * 3];
+      cy += positions[i * 3 + 1];
+      cz += positions[i * 3 + 2];
+    }
+    cx /= count;
+    cy /= count;
+    cz /= count;
+
+    // Replace normals with direction from centroid to vertex (sphere normal)
+    for (let i = 0; i < count; i++) {
+      const dx = positions[i * 3] - cx;
+      const dy = positions[i * 3 + 1] - cy;
+      const dz = positions[i * 3 + 2] - cz;
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      normals[i * 3] = dx / len;
+      normals[i * 3 + 1] = dy / len;
+      normals[i * 3 + 2] = dz / len;
+    }
+    normalAttr.needsUpdate = true;
   }
 
   private recenterGeometryToGround(geometry: THREE.BufferGeometry): void {
@@ -771,7 +973,9 @@ export class PropManager {
     }
 
     posAttr.needsUpdate = true;
-    geometry.computeVertexNormals();
+    // Don't call computeVertexNormals() — it would destroy per-cluster
+    // sphere normals baked for leaf vertices. Deformation is subtle enough
+    // that pre-baked normals remain valid.
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
   }
@@ -853,6 +1057,22 @@ export class PropManager {
         mesh.name.toLowerCase().startsWith("bush_")
       );
 
+      // Extract GLB original material colors (diagnostic — GLB uses white + no textures)
+      if (bushSources.length > 0) {
+        const mat = bushSources[0].material;
+        const stdMat = (Array.isArray(mat) ? mat[0] : mat) as THREE.MeshStandardMaterial;
+        if (stdMat?.color) {
+          this.glbLeafColor = stdMat.color.clone();
+        }
+      }
+      if (trunkSources.length > 0) {
+        const mat = trunkSources[0].material;
+        const stdMat = (Array.isArray(mat) ? mat[0] : mat) as THREE.MeshStandardMaterial;
+        if (stdMat?.color) {
+          this.glbTrunkColor = stdMat.color.clone();
+        }
+      }
+
       const buildMergedTemplate = (
         includeTrunk: boolean,
         _mergedName: string
@@ -863,7 +1083,7 @@ export class PropManager {
           for (let i = 0; i < trunkSources.length; i++) {
             const baked = this.bakeGeometryToWorld(trunkSources[i], `ref_trunk_${i}`);
             if (!baked) continue;
-            this.setGeometryVertexColor(baked, 0.44, 0.32, 0.18);
+            this.setGeometryVertexColor(baked, 0.6, 0.3, 0.15, 0.0);  // R>G = bark flag, alpha=0 → use baseColor
             ensureAttributes(baked);
             bakedParts.push(baked);
           }
@@ -872,8 +1092,10 @@ export class PropManager {
         for (let i = 0; i < bushSources.length; i++) {
           const baked = this.bakeGeometryToWorld(bushSources[i], `ref_bush_${i}`);
           if (!baked) continue;
-          this.setGeometryVertexColor(baked, 0.23, 0.48, 0.2);
+          this.setGeometryVertexColor(baked, 0.2, 0.8, 0.2, 0.0);  // G>R = leaf flag, alpha=0 → use baseColor
           ensureAttributes(baked);
+          // Bake sphere normals per bush cluster (centroid-based)
+          this.bakeSphereNormals(baked);
           bakedParts.push(baked);
         }
 
@@ -935,18 +1157,19 @@ export class PropManager {
     let meshCount = 0;
     const startTime = performance.now();
 
-    // Create shared materials first (fast, synchronous)
-    for (const assetType of assetTypes) {
-      const material = this.createSharedMaterial(assetType);
-      this.sharedMaterials.set(assetType, material);
-    }
-
     // Initialize empty maps for all asset types
     for (const assetType of assetTypes) {
       this.variationGeometries.set(assetType, new Map());
     }
 
+    // Load GLB first to extract original material colors for tree/bush
     await this.loadReferenceTemplatesIfAvailable();
+
+    // Create shared materials (after GLB load so tree/bush can use extracted colors)
+    for (const assetType of assetTypes) {
+      const material = this.createSharedMaterial(assetType);
+      this.sharedMaterials.set(assetType, material);
+    }
 
     // Create geometries progressively using requestAnimationFrame batching
     const batchSize = 4;  // Process 4 meshes per frame
@@ -989,7 +1212,8 @@ export class PropManager {
 
             const seed = variationIdx * 1001 + 8;
             const subdivision = LOD_SUBDIVISIONS[assetType][lod];
-            const useReference = false;
+            const useReference =
+              assetType === "tree" || assetType === "bush";
 
             let geometry: THREE.BufferGeometry | null = null;
             if (useReference) {
@@ -1107,34 +1331,66 @@ export class PropManager {
    * Create shared material for instanced props
    */
   private createSharedMaterial(assetType: AssetType): THREE.ShaderMaterial {
-    const needsWind = assetType !== "rock";
     const defaultParams = DEFAULT_ASSET_PARAMS[assetType];
 
-    let material: THREE.ShaderMaterial;
-
-    if (needsWind) {
-      // Wind settings
+    // Tree/Bush: use CustomShaderMaterial (MeshStandardMaterial extension)
+    // Wind + sphere normals are custom; lighting/shadow/fog handled by PBR
+    if (assetType === "tree" || assetType === "bush") {
       const windAngle = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians;
+      const windStrength = assetType === "tree"
+        ? DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength
+        : DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.bushStrength;
+      const minWindHeight = assetType === "tree" ? 1.2 : 0.0;
+      const maxWindHeight = assetType === "tree" ? 2.5 : 0.3;
 
-      let windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength;
-      let minWindHeight = 0.0;
-      let maxWindHeight = 0.8;
+      const leafAtlas = loadTextureWithFallbackSync(
+        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.leafAtlas,
+        {
+          preferredExtensions: ["png", "ktx2", "jpg"],
+          wrapS: THREE.ClampToEdgeWrapping,
+          wrapT: THREE.ClampToEdgeWrapping,
+        }
+      );
 
-      if (assetType === "grass_clump") {
-        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassClumpStrength;
-        minWindHeight = 0.0;
-        maxWindHeight = 0.7;
-      } else if (assetType === "bush") {
-        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.bushStrength;
-        minWindHeight = 0.0;
-        maxWindHeight = 0.3;
-      } else if (assetType === "tree") {
-        windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.treeStrength;
-        minWindHeight = 1.2;  // Only upper part moves (trunk stays still)
-        maxWindHeight = 2.5;
-      }
+      const csm = new CustomShaderMaterial({
+        baseMaterial: THREE.MeshStandardMaterial,
+        vertexShader: csmLeafVertexShader,
+        fragmentShader: csmLeafFragmentShader,
+        uniforms: {
+          uTime: { value: 0 },
+          uWindDirection: { value: new THREE.Vector2(Math.cos(windAngle), Math.sin(windAngle)) },
+          uWindStrength: { value: windStrength },
+          uMinWindHeight: { value: minWindHeight },
+          uMaxWindHeight: { value: maxWindHeight },
+          uPropsPrimarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed },
+          uPropsSecondarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed },
+          uPropsNoiseSpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed },
+          uFresnelPower: { value: 2.5 },
+          uFresnelStrength: { value: 0.15 },
+          uFresnelColor: { value: new THREE.Color("#90c020") },
+          uTrunkColor: { value: new THREE.Color("#8b6b4a") },
+          uLeafAlpha: { value: leafAtlas },
+          uAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
+        },
+        // MeshStandardMaterial properties
+        color: new THREE.Color("#6a9e18"),
+        transparent: false,
+        depthWrite: true,
+        side: THREE.DoubleSide,
+        roughness: 1.0,
+        metalness: 0.0,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
 
-      // Load textures
+      // Cast: CSM extends THREE.Material with .uniforms; compatible at runtime
+      return csm as unknown as THREE.ShaderMaterial;
+    }
+
+    // Grass clump: keep existing ShaderMaterial with wind
+    if (assetType === "grass_clump") {
+      const windAngle = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.directionRadians;
+      const windStrength = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.grassClumpStrength;
+
       const dirtTex = loadTextureWithFallbackSync(
         DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.dirt,
         {
@@ -1153,7 +1409,7 @@ export class PropManager {
         }
       );
 
-      material = new THREE.ShaderMaterial({
+      return new THREE.ShaderMaterial({
         vertexShader: propThinWindVertexShader,
         fragmentShader: propThinWindFragmentShader,
         uniforms: THREE.UniformsUtils.merge([
@@ -1163,8 +1419,8 @@ export class PropManager {
             uTime: { value: 0 },
             uWindDirection: { value: new THREE.Vector2(Math.cos(windAngle), Math.sin(windAngle)) },
             uWindStrength: { value: windStrength },
-            uMinWindHeight: { value: minWindHeight },
-            uMaxWindHeight: { value: maxWindHeight },
+            uMinWindHeight: { value: 0.0 },
+            uMaxWindHeight: { value: 0.7 },
             uPropsPrimarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed },
             uPropsSecondarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed },
             uPropsNoiseSpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed },
@@ -1180,12 +1436,11 @@ export class PropManager {
             uLeafAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
             uLeafFadeStart: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart },
             uLeafFadeEnd: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd },
-            uUseLeafAtlas: { value: assetType === "tree" || assetType === "bush" ? 1.0 : 0.0 },
+            uUseLeafAtlas: { value: 0.0 },
             uLeafMaskFromLuma: { value: 1.0 },
             uFresnelPower: { value: 3.0 },
             uFresnelStrength: { value: 0.4 },
             uFresnelColor: { value: new THREE.Color(0.8, 0.95, 0.7) },
-            // Point lights
             uPointLightPositions: { value: new Float32Array(8 * 3) },
             uPointLightColors: { value: new Float32Array(8 * 3) },
             uPointLightRanges: { value: new Float32Array(8) },
@@ -1194,46 +1449,44 @@ export class PropManager {
         ]),
         lights: true,
         side: THREE.DoubleSide,
-      });
-    } else {
-      // Rock uses instanced static shader with triplanar texture
-      const rockTex = loadTextureWithFallbackSync(
-        DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
-        {
-          preferredExtensions: ["ktx2", "jpg", "png"],
-          wrapS: THREE.RepeatWrapping,
-          wrapT: THREE.RepeatWrapping,
-        }
-      );
-
-      material = new THREE.ShaderMaterial({
-        vertexShader: propThinVertexShader,
-        fragmentShader: propThinFragmentShader,
-        uniforms: THREE.UniformsUtils.merge([
-          THREE.UniformsLib.lights,
-          {
-            cameraPosition: { value: new THREE.Vector3() },
-            baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
-            detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
-            sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
-            ambientIntensity: { value: 0.4 },
-            fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
-            fogDensity: { value: 0.008 },
-            rockTexture: { value: rockTex },
-            textureScale: { value: 1.0 },
-            // Point lights
-            uPointLightPositions: { value: new Float32Array(8 * 3) },
-            uPointLightColors: { value: new Float32Array(8 * 3) },
-            uPointLightRanges: { value: new Float32Array(8) },
-            uPointLightCount: { value: 0 },
-          },
-        ]),
-        lights: true,
-        side: THREE.DoubleSide,
+        alphaTest: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff,
       });
     }
 
-    return material;
+    // Rock: instanced static shader with triplanar texture
+    const rockTex = loadTextureWithFallbackSync(
+      DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
+      {
+        preferredExtensions: ["ktx2", "jpg", "png"],
+        wrapS: THREE.RepeatWrapping,
+        wrapT: THREE.RepeatWrapping,
+      }
+    );
+
+    return new THREE.ShaderMaterial({
+      vertexShader: propThinVertexShader,
+      fragmentShader: propThinFragmentShader,
+      uniforms: THREE.UniformsUtils.merge([
+        THREE.UniformsLib.lights,
+        {
+          cameraPosition: { value: new THREE.Vector3() },
+          baseColor: { value: new THREE.Color(defaultParams.colorBase.r, defaultParams.colorBase.g, defaultParams.colorBase.b) },
+          detailColor: { value: new THREE.Color(defaultParams.colorDetail.r, defaultParams.colorDetail.g, defaultParams.colorDetail.b) },
+          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+          ambientIntensity: { value: 0.4 },
+          fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+          fogDensity: { value: 0.008 },
+          rockTexture: { value: rockTex },
+          textureScale: { value: 1.0 },
+          uPointLightPositions: { value: new Float32Array(8 * 3) },
+          uPointLightColors: { value: new Float32Array(8 * 3) },
+          uPointLightRanges: { value: new Float32Array(8) },
+          uPointLightCount: { value: 0 },
+        },
+      ]),
+      lights: true,
+      side: THREE.DoubleSide,
+    });
   }
 
   /**
@@ -1278,15 +1531,18 @@ export class PropManager {
   update(camera?: { position: THREE.Vector3 }): void {
     if (!camera) return;
 
+    const elapsed = (performance.now() - this.materialStartTime) / 1000;
+
     for (const [assetType, material] of this.sharedMaterials) {
-      material.uniforms.cameraPosition.value.copy(camera.position);
-      const needsWind = assetType !== "rock";
-      if (needsWind) {
-        const elapsed = (performance.now() - this.materialStartTime) / 1000;
-        material.uniforms.uTime.value = elapsed;
+      const u = material.uniforms;
+      if (u.cameraPosition) {
+        u.cameraPosition.value.copy(camera.position);
       }
-      // Apply point light uniforms
-      if (this.lightManager) {
+      if (assetType !== "rock" && u.uTime) {
+        u.uTime.value = elapsed;
+      }
+      // Apply point light uniforms (only for raw ShaderMaterial, not CSM)
+      if (this.lightManager && u.uPointLightCount) {
         this.lightManager.applyToMaterial(material);
       }
     }
