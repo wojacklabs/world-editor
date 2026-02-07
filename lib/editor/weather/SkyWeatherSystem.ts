@@ -418,6 +418,12 @@ export class SkyWeatherSystem {
       this.propManager.syncSunDirection(this.sunDirection, this.sunColor, this.ambientIntensity);
     }
 
+    // Sync scene fog for PBR materials (CSM tree/bush)
+    if (this.scene.fog && (this.scene.fog as THREE.FogExp2).density !== undefined) {
+      (this.scene.fog as THREE.FogExp2).color.copy(this.fogColor);
+      (this.scene.fog as THREE.FogExp2).density = this.fogDensity;
+    }
+
     // Cloud system is now integrated into sky shader - disable ground-based clouds
     if (this.cloudSystem) {
       this.cloudSystem.setEnabled(false);

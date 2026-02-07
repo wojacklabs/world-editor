@@ -160,6 +160,8 @@ export class EditorEngine {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0.08, 0.08, 0.1);
+    // Scene fog for PBR materials (CSM tree/bush). Matches custom shader fog (color=0.6,0.75,0.9 density=0.008).
+    this.scene.fog = new THREE.FogExp2(new THREE.Color(0.6, 0.75, 0.9), 0.008);
 
     this.setupCamera();
     this.setupLighting();
@@ -366,10 +368,15 @@ export class EditorEngine {
   }
 
   private setupLighting(): void {
+    // Hemisphere light for non-PBR shaders (terrain, grass, rock use custom lighting)
     const hemiLight = new THREE.HemisphereLight(0xffffff, 0x4d4d59, 0.6);
     this.scene.add(hemiLight);
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    // Ambient light for PBR materials (CSM tree/bush) — uniform fill from all directions
+    const ambLight = new THREE.AmbientLight(0xffffff, 3.5);
+    this.scene.add(ambLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 4.5);
     dirLight.position.set(0.5, 1, 0.5);
 
     // Shadow configuration
@@ -413,13 +420,13 @@ export class EditorEngine {
     this.renderPass = new RenderPass(this.scene, this.camera);
     this.composer.addPass(this.renderPass);
 
-    // 2. SSAO pass
-    const ssaoPass = new SSAOPass(this.scene, this.camera, width, height);
-    ssaoPass.kernelRadius = 8;
-    ssaoPass.minDistance = 0.001;
-    ssaoPass.maxDistance = 0.1;
-    ssaoPass.output = SSAOPass.OUTPUT.Default;
-    this.composer.addPass(ssaoPass);
+    // 2. SSAO pass (disabled: leaf card geometry causes dark rectangular artifacts regardless of material type)
+    // const ssaoPass = new SSAOPass(this.scene, this.camera, width, height);
+    // ssaoPass.kernelRadius = 8;
+    // ssaoPass.minDistance = 0.001;
+    // ssaoPass.maxDistance = 0.1;
+    // ssaoPass.output = SSAOPass.OUTPUT.Default;
+    // this.composer.addPass(ssaoPass);
 
     // 3. Volumetric fog pass (after SSAO, before Bloom)
     this.volumetricFogPass = new VolumetricFogPass(
