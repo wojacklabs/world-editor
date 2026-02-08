@@ -724,9 +724,14 @@ export class EditorEngine {
   }
 
   // Prop placement and preview
-  createPropPreview(type: string, size: number, seed?: number): void {
+  createPropPreview(
+    type: string,
+    size: number,
+    seed?: number,
+    customSettings?: { length?: number; width?: number; height?: number; baySize?: number }
+  ): void {
     if (!this.propManager) return;
-    this.propManager.createPreview(type as any, size, seed);
+    this.propManager.createPreview(type as any, size, seed, customSettings);
   }
 
   randomizePropPreview(): number {
@@ -758,7 +763,14 @@ export class EditorEngine {
     propType: string,
     x: number,
     z: number,
-    settings?: { size?: number; seed?: number }
+    settings?: {
+      size?: number;
+      seed?: number;
+      length?: number;
+      width?: number;
+      height?: number;
+      baySize?: number;
+    }
   ): string | null {
     if (!this.propManager) return null;
     return this.propManager.placeProp(propType, x, z, settings);

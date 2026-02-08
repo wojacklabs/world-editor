@@ -7,7 +7,19 @@ import { useEditorStore } from "@/lib/editor/store/editorStore";
 interface WorldEditorProps {
   onEngineReady?: (engine: EditorEngine) => void;
   onLibraryAssetPlace?: (glbPath: string, name: string, position: { x: number; y: number; z: number }) => void;
-  onProceduralAssetPlace?: (assetType: string, name: string, position: { x: number; y: number; z: number }, scale: number, seed: number) => void;
+  onProceduralAssetPlace?: (
+    assetType: string,
+    name: string,
+    position: { x: number; y: number; z: number },
+    settings: {
+      size: number;
+      seed: number;
+      length: number;
+      width: number;
+      height: number;
+      baySize: number;
+    }
+  ) => void;
 }
 
 export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProceduralAssetPlace }: WorldEditorProps) {
@@ -189,14 +201,30 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       engineRef.current.createPropPreview(
         selectedAssetType,
         assetSettings.size,
-        assetSettings.seed
+        assetSettings.seed,
+        {
+          length: assetSettings.length,
+          width: assetSettings.width,
+          height: assetSettings.height,
+          baySize: assetSettings.baySize,
+        }
       );
       engineRef.current.setPropPreviewVisible(true);
     } else {
       // Hide preview when leaving props mode
       engineRef.current.setPropPreviewVisible(false);
     }
-  }, [engineReady, activeTool, selectedAssetType, assetSettings.seed, assetSettings.size]);
+  }, [
+    engineReady,
+    activeTool,
+    selectedAssetType,
+    assetSettings.seed,
+    assetSettings.size,
+    assetSettings.length,
+    assetSettings.width,
+    assetSettings.height,
+    assetSettings.baySize,
+  ]);
 
   // Update preview size separately (preserves position)
   useEffect(() => {
@@ -265,8 +293,14 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
               store.pendingAsset.assetType,
               store.pendingAsset.name,
               { x: pos.x, y: pos.y, z: pos.z },
-              store.assetSettings.size,
-              store.assetSettings.seed
+              {
+                size: store.assetSettings.size,
+                seed: store.assetSettings.seed,
+                length: store.assetSettings.length,
+                width: store.assetSettings.width,
+                height: store.assetSettings.height,
+                baySize: store.assetSettings.baySize,
+              }
             );
             store.clearPendingAsset();
             store.setModified(true);

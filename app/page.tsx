@@ -503,12 +503,18 @@ export default function EditorPage() {
     assetType: string,
     _name: string,
     position: { x: number; y: number; z: number },
-    scale: number,
-    seed: number
+    settings: {
+      size: number;
+      seed: number;
+      length: number;
+      width: number;
+      height: number;
+      baySize: number;
+    }
   ): { id: string; newSeed: number } | null => {
     if (!engine) return null;
 
-    const result = engine.placeProp(assetType, position.x, position.z, { size: scale, seed });
+    const result = engine.placeProp(assetType, position.x, position.z, settings);
     if (result) {
       setModified(true);
       // Generate new seed for next placement

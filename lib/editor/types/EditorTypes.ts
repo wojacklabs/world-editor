@@ -29,7 +29,16 @@ export const DEFAULT_WEATHER_STATE: WeatherState = {
 };
 
 // Procedural asset types
-export type ProceduralAssetType = "rock" | "tree" | "bush" | "grass_clump";
+export type ProceduralAssetType =
+  | "rock"
+  | "tree"
+  | "bush"
+  | "grass_clump"
+  | "hanok_giwa"
+  | "hanok_choga"
+  | "wall_fence_segment"
+  | "jangdokdae_set"
+  | "doghouse";
 
 export interface ProceduralAssetSettings {
   type: ProceduralAssetType;
@@ -38,6 +47,10 @@ export interface ProceduralAssetSettings {
   sizeVariation: number;
   noiseScale: number;
   noiseAmplitude: number;
+  length: number;
+  width: number;
+  height: number;
+  baySize: number;
 }
 
 // Brush settings
@@ -189,6 +202,10 @@ export const DEFAULT_ASSET_SETTINGS: ProceduralAssetSettings = {
   sizeVariation: 0.3,
   noiseScale: 3.0,
   noiseAmplitude: 0.2,
+  length: 10,
+  width: 6,
+  height: 2.6,
+  baySize: 2.4,
 };
 
 export const DEFAULT_DEBUG_VISIBILITY: DebugVisibility = {

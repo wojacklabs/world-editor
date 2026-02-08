@@ -38,6 +38,11 @@ const PROP_TYPES: { id: ProceduralAssetType; label: string }[] = [
   { id: "tree", label: "Tree" },
   { id: "bush", label: "Bush" },
   { id: "grass_clump", label: "Grass" },
+  { id: "hanok_giwa", label: "Giwa Hanok" },
+  { id: "hanok_choga", label: "Choga Hanok" },
+  { id: "wall_fence_segment", label: "Fence" },
+  { id: "jangdokdae_set", label: "Jangdokdae" },
+  { id: "doghouse", label: "Doghouse" },
 ];
 
 function SliderField({
@@ -111,11 +116,21 @@ export default function EditorSidebar() {
     setBrushSize,
     setBrushStrength,
     setAssetSize,
+    setAssetLength,
+    setAssetWidth,
+    setAssetHeight,
     setWaterType,
     setWaterFlowAngle,
     randomizeAssetSeed,
     clearPendingAsset,
   } = useEditorStore();
+
+  const isDimensionDrivenAsset =
+    selectedAssetType === "hanok_giwa" ||
+    selectedAssetType === "hanok_choga" ||
+    selectedAssetType === "wall_fence_segment" ||
+    selectedAssetType === "jangdokdae_set" ||
+    selectedAssetType === "doghouse";
 
   const activeToolMeta = TOOL_ITEMS.find((tool) => tool.id === activeTool);
 
@@ -313,6 +328,37 @@ export default function EditorSidebar() {
                   step={0.1}
                   onChange={setAssetSize}
                 />
+                {isDimensionDrivenAsset && (
+                  <>
+                    <SliderField
+                      label="Length"
+                      value={assetSettings.length}
+                      valueText={`${assetSettings.length.toFixed(1)}m`}
+                      min={0.5}
+                      max={40}
+                      step={0.1}
+                      onChange={setAssetLength}
+                    />
+                    <SliderField
+                      label="Width"
+                      value={assetSettings.width}
+                      valueText={`${assetSettings.width.toFixed(1)}m`}
+                      min={0.4}
+                      max={30}
+                      step={0.1}
+                      onChange={setAssetWidth}
+                    />
+                    <SliderField
+                      label="Height"
+                      value={assetSettings.height}
+                      valueText={`${assetSettings.height.toFixed(1)}m`}
+                      min={0.4}
+                      max={8}
+                      step={0.1}
+                      onChange={setAssetHeight}
+                    />
+                  </>
+                )}
                 <button
                   onClick={randomizeAssetSeed}
                   className="w-full py-2 text-[12px] rounded-lg border border-slate-700/50 bg-slate-900/45 text-slate-300 hover:text-white hover:border-slate-600"

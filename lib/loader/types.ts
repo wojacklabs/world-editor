@@ -242,7 +242,16 @@ export interface PropInstance {
  */
 export interface ProceduralPropInstance {
   id: string;
-  assetType: "rock" | "tree" | "bush" | "grass_clump";
+  assetType:
+    | "rock"
+    | "tree"
+    | "bush"
+    | "grass_clump"
+    | "hanok_giwa"
+    | "hanok_choga"
+    | "wall_fence_segment"
+    | "jangdokdae_set"
+    | "doghouse";
   params: {
     type: string;
     seed: number;
@@ -250,6 +259,10 @@ export interface ProceduralPropInstance {
     sizeVariation: number;
     noiseScale: number;
     noiseAmplitude: number;
+    length?: number;
+    width?: number;
+    height?: number;
+    baySize?: number;
     colorBase: { r: number; g: number; b: number };
     colorDetail: { r: number; g: number; b: number };
   };

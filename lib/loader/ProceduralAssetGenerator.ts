@@ -15,6 +15,12 @@ import {
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../shared/foliage/FoliageQualityProfile";
 import { createLeafCardGeometry } from "../shared/foliage/LeafCards.three";
 import { fbm3D, noise3D } from "../shared/math/NoiseUtils";
+import {
+  generateDoghouseGeometry,
+  generateFenceSegmentGeometry,
+  generateHanokHouseGeometry,
+  generateJangdokdaeGeometry,
+} from "../shared/procedural/HanokGenerator";
 
 const REFERENCE_TREE_URL = "/assets/references/infinite-terrain/tree.glb";
 
@@ -387,12 +393,83 @@ void main() {
 }
 `;
 
+const structureAssetVertexShader = `
+precision highp float;
+
+attribute vec4 color;
+
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vCameraDistance;
+varying vec3 vViewDirection;
+varying vec4 vColor;
+
+void main() {
+    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+
+    vNormal = normalize(mat3(modelMatrix) * normal);
+    vPosition = worldPos.xyz;
+    vCameraDistance = length(cameraPosition - worldPos.xyz);
+    vViewDirection = normalize(cameraPosition - worldPos.xyz);
+    vColor = color;
+}
+`;
+
+const structureAssetFragmentShader = `
+precision highp float;
+
+uniform vec3 sunDirection;
+uniform float ambientIntensity;
+uniform vec3 fogColor;
+uniform float fogDensity;
+
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vCameraDistance;
+varying vec3 vViewDirection;
+varying vec4 vColor;
+
+void main() {
+    vec3 normal = normalize(vNormal);
+    vec3 base = vColor.rgb;
+
+    float NdotL = max(dot(normal, sunDirection), 0.0);
+    float diffuse = NdotL * 0.65 + 0.35;
+    float ao = 0.55 + 0.45 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    float rim = pow(1.0 - max(dot(normal, vViewDirection), 0.0), 2.8) * 0.08;
+
+    vec3 color = base * (ambientIntensity * ao + diffuse) + vec3(rim);
+
+    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
+    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+    gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+}
+`;
+
 function calcSubdivision(size: number, base: number = 4, override?: number): number {
   if (override !== undefined) {
     return Math.max(1, Math.min(6, override));
   }
   const subdiv = Math.floor(base + Math.log2(Math.max(size, 0.25)));
   return Math.max(3, Math.min(6, subdiv));
+}
+
+function isWindAnimatedType(type: string): boolean {
+  return type === "grass_clump" || type === "bush" || type === "tree";
+}
+
+function isKoreanStructureType(type: string): boolean {
+  return (
+    type === "hanok_giwa" ||
+    type === "hanok_choga" ||
+    type === "wall_fence_segment" ||
+    type === "jangdokdae_set" ||
+    type === "doghouse"
+  );
 }
 
 // ============================================
@@ -805,6 +882,10 @@ export interface GeneratorParams {
   sizeVariation: number;
   noiseScale: number;
   noiseAmplitude: number;
+  length?: number;
+  width?: number;
+  height?: number;
+  baySize?: number;
   colorBase: { r: number; g: number; b: number };
   colorDetail: { r: number; g: number; b: number };
 }
@@ -1202,6 +1283,21 @@ export class ProceduralAssetGenerator {
       case "grass_clump":
         geometry = this.generateGrassClump(params);
         break;
+      case "hanok_giwa":
+        geometry = this.generateHanokGiwa(params);
+        break;
+      case "hanok_choga":
+        geometry = this.generateHanokChoga(params);
+        break;
+      case "wall_fence_segment":
+        geometry = this.generateFenceSegment(params);
+        break;
+      case "jangdokdae_set":
+        geometry = this.generateJangdokdaeSet(params);
+        break;
+      case "doghouse":
+        geometry = this.generateDoghouse(params);
+        break;
       default:
         console.warn(`[ProceduralAssetGenerator] Unknown type: ${params.type}`);
         return null;
@@ -1216,11 +1312,69 @@ export class ProceduralAssetGenerator {
     return mesh;
   }
 
+  private getStructureDimensions(
+    params: GeneratorParams,
+    defaults: { length: number; width: number; height: number; baySize?: number }
+  ): { lengthM: number; widthM: number; heightM: number; baySizeM?: number } {
+    const lengthM = Math.max(0.5, params.length ?? defaults.length);
+    const widthM = Math.max(0.4, params.width ?? defaults.width);
+    const heightM = Math.max(0.4, params.height ?? defaults.height);
+    const baySizeM = params.baySize ?? defaults.baySize;
+    return { lengthM, widthM, heightM, baySizeM };
+  }
+
+  private generateHanokGiwa(params: GeneratorParams): THREE.BufferGeometry {
+    const dimensions = this.getStructureDimensions(params, {
+      length: 10,
+      width: 6,
+      height: 2.6,
+      baySize: 2.4,
+    });
+    return generateHanokHouseGeometry("giwa", dimensions, params.seed);
+  }
+
+  private generateHanokChoga(params: GeneratorParams): THREE.BufferGeometry {
+    const dimensions = this.getStructureDimensions(params, {
+      length: 9,
+      width: 5.4,
+      height: 2.4,
+      baySize: 2.2,
+    });
+    return generateHanokHouseGeometry("choga", dimensions, params.seed);
+  }
+
+  private generateFenceSegment(params: GeneratorParams): THREE.BufferGeometry {
+    const dimensions = this.getStructureDimensions(params, {
+      length: 6,
+      width: 0.45,
+      height: 1.6,
+    });
+    return generateFenceSegmentGeometry(dimensions, params.seed);
+  }
+
+  private generateJangdokdaeSet(params: GeneratorParams): THREE.BufferGeometry {
+    const dimensions = this.getStructureDimensions(params, {
+      length: 3.2,
+      width: 2.2,
+      height: 0.8,
+    });
+    return generateJangdokdaeGeometry(dimensions, params.seed);
+  }
+
+  private generateDoghouse(params: GeneratorParams): THREE.BufferGeometry {
+    const dimensions = this.getStructureDimensions(params, {
+      length: 1.7,
+      width: 1.2,
+      height: 1.3,
+    });
+    return generateDoghouseGeometry(dimensions, params.seed);
+  }
+
   /**
    * Create material for the mesh
    */
   createMaterial(params: GeneratorParams): THREE.ShaderMaterial {
-    const needsWind = params.type === "grass_clump" || params.type === "bush" || params.type === "tree";
+    const needsWind = isWindAnimatedType(params.type);
 
     if (needsWind) {
       let windStr = DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.baseStrength, minHeight = 0.0, maxHeight = 0.8;
@@ -1285,6 +1439,18 @@ export class ProceduralAssetGenerator {
       });
 
       return material;
+    } else if (isKoreanStructureType(params.type)) {
+      return new THREE.ShaderMaterial({
+        vertexShader: structureAssetVertexShader,
+        fragmentShader: structureAssetFragmentShader,
+        side: THREE.DoubleSide,
+        uniforms: {
+          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+          ambientIntensity: { value: 0.42 },
+          fogColor: { value: this.fogColor.clone() },
+          fogDensity: { value: this.fogDensity },
+        },
+      });
     } else {
       // Rock shader with triplanar texture
       const rockTex = loadTextureWithFallbackSync(this.textureUrls.rock, {

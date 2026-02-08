@@ -128,30 +128,52 @@ export class ProceduralPropsRenderer {
    * Note: This mode uses shared base meshes, so individual params are not fully preserved.
    */
   private loadPropsInstanced(props: ProceduralPropInstance[]): void {
-    // Group by asset type
+    // Group by geometry signature so length/width/height-driven structures remain correct.
     const byType = new Map<string, ProceduralPropInstance[]>();
 
     for (const prop of props) {
-      const type = prop.assetType;
-      if (!byType.has(type)) {
-        byType.set(type, []);
+      const isStructureType =
+        prop.assetType === "hanok_giwa" ||
+        prop.assetType === "hanok_choga" ||
+        prop.assetType === "wall_fence_segment" ||
+        prop.assetType === "jangdokdae_set" ||
+        prop.assetType === "doghouse";
+
+      const key = isStructureType
+        ? [
+            prop.assetType,
+            prop.params.seed,
+            prop.params.length ?? 0,
+            prop.params.width ?? 0,
+            prop.params.height ?? 0,
+            prop.params.baySize ?? 0,
+          ].join("|")
+        : prop.assetType;
+
+      if (!byType.has(key)) {
+        byType.set(key, []);
       }
-      byType.get(type)!.push(prop);
+      byType.get(key)!.push(prop);
     }
 
     // Create InstancedMesh for each type
-    for (const [type, typeProps] of byType) {
+    for (const [groupKey, typeProps] of byType) {
       if (typeProps.length === 0) continue;
 
       // Create base mesh from first prop's params
       const firstProp = typeProps[0];
+      const type = firstProp.assetType;
       const params: GeneratorParams = {
-        type: firstProp.assetType,
+        type,
         seed: firstProp.params.seed,
         size: 1.0, // Base size, scale applied via matrix
         sizeVariation: firstProp.params.sizeVariation,
         noiseScale: firstProp.params.noiseScale,
         noiseAmplitude: firstProp.params.noiseAmplitude,
+        length: firstProp.params.length,
+        width: firstProp.params.width,
+        height: firstProp.params.height,
+        baySize: firstProp.params.baySize,
         colorBase: firstProp.params.colorBase,
         colorDetail: firstProp.params.colorDetail,
       };
@@ -166,7 +188,7 @@ export class ProceduralPropsRenderer {
         material,
         typeProps.length
       );
-      instancedMesh.name = `${type}_instances`;
+      instancedMesh.name = `${groupKey}_instances`;
 
       // Build instance matrices
       // Note: instance.scale already contains the final intended size
@@ -222,6 +244,10 @@ export class ProceduralPropsRenderer {
       sizeVariation: prop.params.sizeVariation,
       noiseScale: prop.params.noiseScale,
       noiseAmplitude: prop.params.noiseAmplitude,
+      length: prop.params.length,
+      width: prop.params.width,
+      height: prop.params.height,
+      baySize: prop.params.baySize,
       colorBase: prop.params.colorBase,
       colorDetail: prop.params.colorDetail,
     };

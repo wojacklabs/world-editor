@@ -23,6 +23,11 @@ const LOD_SUBDIVISIONS: Record<AssetType, Record<MeshLOD, number>> = {
   tree: { [MeshLOD.High]: 3, [MeshLOD.Medium]: 2, [MeshLOD.Low]: 2 },   // 1280/320/320 tri
   bush: { [MeshLOD.High]: 3, [MeshLOD.Medium]: 2, [MeshLOD.Low]: 2 },   // 1280/320/320 tri
   grass_clump: { [MeshLOD.High]: 0, [MeshLOD.Medium]: 0, [MeshLOD.Low]: 0 },  // Grass doesn't use subdivisions
+  hanok_giwa: { [MeshLOD.High]: 0, [MeshLOD.Medium]: 0, [MeshLOD.Low]: 0 },
+  hanok_choga: { [MeshLOD.High]: 0, [MeshLOD.Medium]: 0, [MeshLOD.Low]: 0 },
+  wall_fence_segment: { [MeshLOD.High]: 0, [MeshLOD.Medium]: 0, [MeshLOD.Low]: 0 },
+  jangdokdae_set: { [MeshLOD.High]: 0, [MeshLOD.Medium]: 0, [MeshLOD.Low]: 0 },
+  doghouse: { [MeshLOD.High]: 0, [MeshLOD.Medium]: 0, [MeshLOD.Low]: 0 },
 };
 
 // Distance thresholds for LOD switching (in world units)
@@ -209,6 +214,115 @@ void main() {
     color = color * (ambient + diffuse * shadowFactor + ptLight) + rim;
 
     // Fog
+    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
+    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+
+    gl_FragColor = vec4(color, 1.0);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+}
+`;
+
+const structureInstancedVertexShader = `
+precision highp float;
+
+#include <common>
+#include <shadowmap_pars_vertex>
+
+attribute vec4 color;
+
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vCameraDistance;
+varying vec3 vViewDirection;
+varying vec4 vColor;
+
+void main() {
+    vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * worldPos;
+
+    mat3 normalMat = mat3(modelMatrix) * mat3(instanceMatrix);
+    vNormal = normalize(normalMat * normal);
+    vPosition = worldPos.xyz;
+    vCameraDistance = length(cameraPosition - worldPos.xyz);
+    vViewDirection = normalize(cameraPosition - worldPos.xyz);
+    vColor = color;
+
+    vec3 transformedNormal = vNormal;
+    vec4 worldPosition = worldPos;
+    #include <shadowmap_vertex>
+}
+`;
+
+const structureInstancedFragmentShader = `
+precision highp float;
+
+#include <common>
+#include <packing>
+#include <lights_pars_begin>
+#include <shadowmap_pars_fragment>
+
+uniform vec3 sunDirection;
+uniform float ambientIntensity;
+uniform vec3 fogColor;
+uniform float fogDensity;
+
+// Point lights
+uniform vec3 uPointLightPositions[8];
+uniform vec3 uPointLightColors[8];
+uniform float uPointLightRanges[8];
+uniform int uPointLightCount;
+
+vec3 calcPointLights(vec3 worldPos, vec3 n) {
+    vec3 total = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        if (i >= uPointLightCount) break;
+        vec3 ld = uPointLightPositions[i] - worldPos;
+        float d = length(ld);
+        float r = uPointLightRanges[i];
+        if (d > r) continue;
+        ld /= d;
+        float nl = max(dot(n, ld), 0.0);
+        float att = 1.0 / (1.0 + d * d / (r * r));
+        float w = max(1.0 - pow(d / r, 4.0), 0.0);
+        total += uPointLightColors[i] * nl * att * w;
+    }
+    return total;
+}
+
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vCameraDistance;
+varying vec3 vViewDirection;
+varying vec4 vColor;
+
+void main() {
+    vec3 normal = normalize(vNormal);
+    vec3 color = vColor.rgb;
+
+    float NdotL = max(dot(normal, sunDirection), 0.0);
+    float diffuse = NdotL * 0.65 + 0.35;
+    float ao = 0.55 + 0.45 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+    float rim = pow(1.0 - max(dot(normal, vViewDirection), 0.0), 2.8) * 0.08;
+
+    float shadowFactor = 1.0;
+    #if NUM_DIR_LIGHT_SHADOWS > 0
+    {
+        DirectionalLightShadow dirShadow = directionalLightShadows[0];
+        shadowFactor = getShadow(
+            directionalShadowMap[0],
+            dirShadow.shadowMapSize,
+            dirShadow.shadowIntensity,
+            dirShadow.shadowBias,
+            dirShadow.shadowRadius,
+            vDirectionalShadowCoord[0]
+        );
+    }
+    #endif
+
+    vec3 pointLight = calcPointLights(vPosition, normal);
+    color = color * (ambientIntensity * ao + diffuse * shadowFactor + pointLight) + vec3(rim);
+
     float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
     color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
 
@@ -664,6 +778,7 @@ type InstanceGroupKey = string;
 
 export interface PropInstance {
   id: string;
+  groupKey: InstanceGroupKey;
   assetType: AssetType;
   variationIndex: number;  // Which variation mesh to use
   params: AssetParams;
@@ -704,6 +819,24 @@ function ensureAttributes(geometry: THREE.BufferGeometry): void {
   }
 }
 
+function isWindAnimatedAssetType(type: AssetType): boolean {
+  return type === "tree" || type === "bush" || type === "grass_clump";
+}
+
+function isKoreanStructureAssetType(type: AssetType): boolean {
+  return (
+    type === "hanok_giwa" ||
+    type === "hanok_choga" ||
+    type === "wall_fence_segment" ||
+    type === "jangdokdae_set" ||
+    type === "doghouse"
+  );
+}
+
+function quantizeNumber(value: number, precision: number = 100): number {
+  return Math.round(value * precision) / precision;
+}
+
 export class PropManager {
   private scene: THREE.Scene;
   private heightmap: Heightmap;
@@ -712,6 +845,8 @@ export class PropManager {
   // Instancing: base variation geometries per type, per LOD level
   // Key: AssetType -> LOD level -> THREE.BufferGeometry[]
   private variationGeometries: Map<AssetType, Map<MeshLOD, THREE.BufferGeometry[]>> = new Map();
+  // Parameterized structure geometry cache keyed by base group key
+  private customGroupGeometries: Map<InstanceGroupKey, Map<MeshLOD, THREE.BufferGeometry>> = new Map();
   // Instancing: shared materials per type
   private sharedMaterials: Map<AssetType, THREE.ShaderMaterial> = new Map();
   // Instancing: group meshes for InstancedMesh (per LOD)
@@ -1152,13 +1287,26 @@ export class PropManager {
    * Creates geometries for all LOD levels progressively to avoid blocking
    */
   private async initializeVariationsAsync(): Promise<void> {
-    const assetTypes: AssetType[] = ["rock", "tree", "bush", "grass_clump"];
+    const preGeneratedTypes: AssetType[] = [
+      "rock",
+      "tree",
+      "bush",
+      "grass_clump",
+    ];
+    const materialTypes: AssetType[] = [
+      ...preGeneratedTypes,
+      "hanok_giwa",
+      "hanok_choga",
+      "wall_fence_segment",
+      "jangdokdae_set",
+      "doghouse",
+    ];
     const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
     let meshCount = 0;
     const startTime = performance.now();
 
     // Initialize empty maps for all asset types
-    for (const assetType of assetTypes) {
+    for (const assetType of preGeneratedTypes) {
       this.variationGeometries.set(assetType, new Map());
     }
 
@@ -1166,7 +1314,7 @@ export class PropManager {
     await this.loadReferenceTemplatesIfAvailable();
 
     // Create shared materials (after GLB load so tree/bush can use extracted colors)
-    for (const assetType of assetTypes) {
+    for (const assetType of materialTypes) {
       const material = this.createSharedMaterial(assetType);
       this.sharedMaterials.set(assetType, material);
     }
@@ -1176,7 +1324,7 @@ export class PropManager {
     const currentBatch: Array<{ assetType: AssetType; lod: MeshLOD; variationIdx: number }> = [];
 
     // Build the full work queue
-    for (const assetType of assetTypes) {
+    for (const assetType of preGeneratedTypes) {
       for (const lod of lodLevels) {
         for (let i = 0; i < VARIATIONS_PER_TYPE; i++) {
           currentBatch.push({ assetType, lod, variationIdx: i });
@@ -1261,7 +1409,7 @@ export class PropManager {
 
     const elapsed = performance.now() - startTime;
     this.initializationComplete = true;
-    console.log(`[PropManager] Async init complete: ${meshCount} meshes (${assetTypes.length} types * ${lodLevels.length} LODs * ${VARIATIONS_PER_TYPE} variations) in ${elapsed.toFixed(0)}ms`);
+    console.log(`[PropManager] Async init complete: ${meshCount} meshes (${preGeneratedTypes.length} pre-generated types * ${lodLevels.length} LODs * ${VARIATIONS_PER_TYPE} variations, ${materialTypes.length} material types) in ${elapsed.toFixed(0)}ms`);
   }
 
   /**
@@ -1269,10 +1417,23 @@ export class PropManager {
    * Use initializeVariationsAsync() for non-blocking initialization
    */
   private initializeVariations(): void {
-    const assetTypes: AssetType[] = ["rock", "tree", "bush", "grass_clump"];
+    const preGeneratedTypes: AssetType[] = [
+      "rock",
+      "tree",
+      "bush",
+      "grass_clump",
+    ];
+    const materialTypes: AssetType[] = [
+      ...preGeneratedTypes,
+      "hanok_giwa",
+      "hanok_choga",
+      "wall_fence_segment",
+      "jangdokdae_set",
+      "doghouse",
+    ];
     const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
 
-    for (const assetType of assetTypes) {
+    for (const assetType of preGeneratedTypes) {
       const lodMap = new Map<MeshLOD, THREE.BufferGeometry[]>();
 
       for (const lod of lodLevels) {
@@ -1319,12 +1480,15 @@ export class PropManager {
       }
 
       this.variationGeometries.set(assetType, lodMap);
+    }
+
+    for (const assetType of materialTypes) {
       const material = this.createSharedMaterial(assetType);
       this.sharedMaterials.set(assetType, material);
     }
 
     this.initializationComplete = true;
-    console.log(`[PropManager] Initialized ${assetTypes.length} asset types with ${VARIATIONS_PER_TYPE} variations * 3 LOD levels each`);
+    console.log(`[PropManager] Initialized ${preGeneratedTypes.length} pre-generated asset types (${VARIATIONS_PER_TYPE} variations * 3 LOD each) and ${materialTypes.length} material types`);
   }
 
   /**
@@ -1453,6 +1617,29 @@ export class PropManager {
       });
     }
 
+    if (isKoreanStructureAssetType(assetType)) {
+      return new THREE.ShaderMaterial({
+        vertexShader: structureInstancedVertexShader,
+        fragmentShader: structureInstancedFragmentShader,
+        uniforms: THREE.UniformsUtils.merge([
+          THREE.UniformsLib.lights,
+          {
+            cameraPosition: { value: new THREE.Vector3() },
+            sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
+            ambientIntensity: { value: 0.42 },
+            fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+            fogDensity: { value: 0.008 },
+            uPointLightPositions: { value: new Float32Array(8 * 3) },
+            uPointLightColors: { value: new Float32Array(8 * 3) },
+            uPointLightRanges: { value: new Float32Array(8) },
+            uPointLightCount: { value: 0 },
+          },
+        ]),
+        lights: true,
+        side: THREE.DoubleSide,
+      });
+    }
+
     // Rock: instanced static shader with triplanar texture
     const rockTex = loadTextureWithFallbackSync(
       DEFAULT_FOLIAGE_QUALITY_PROFILE.textures.rock,
@@ -1538,7 +1725,7 @@ export class PropManager {
       if (u.cameraPosition) {
         u.cameraPosition.value.copy(camera.position);
       }
-      if (assetType !== "rock" && u.uTime) {
+      if (isWindAnimatedAssetType(assetType) && u.uTime) {
         u.uTime.value = elapsed;
       }
       // Apply point light uniforms (only for raw ShaderMaterial, not CSM)
@@ -1560,28 +1747,114 @@ export class PropManager {
   /**
    * Get base instance group key (without LOD)
    */
-  private getGroupKey(assetType: AssetType, variationIndex: number): InstanceGroupKey {
-    return `${assetType}|${variationIndex}`;
+  private getGroupKey(
+    assetType: AssetType,
+    variationIndex: number,
+    signature?: string
+  ): InstanceGroupKey {
+    return signature
+      ? `${assetType}|${variationIndex}|${signature}`
+      : `${assetType}|${variationIndex}`;
   }
 
   /**
    * Get instance group key with LOD level
    */
-  private getGroupKeyWithLOD(assetType: AssetType, variationIndex: number, lod: MeshLOD): InstanceGroupKey {
-    return `${assetType}|${variationIndex}|${lod}`;
+  private getGroupKeyWithLOD(baseGroupKey: InstanceGroupKey, lod: MeshLOD): InstanceGroupKey {
+    return `${baseGroupKey}|${lod}`;
+  }
+
+  private parseBaseGroupKey(baseGroupKey: InstanceGroupKey): {
+    assetType: AssetType;
+    variationIndex: number;
+    signature?: string;
+  } | null {
+    const parts = baseGroupKey.split("|");
+    if (parts.length < 2) return null;
+
+    const variationIndex = parseInt(parts[1], 10);
+    if (Number.isNaN(variationIndex)) return null;
+
+    return {
+      assetType: parts[0] as AssetType,
+      variationIndex,
+      signature: parts.length > 2 ? parts.slice(2).join("|") : undefined,
+    };
   }
 
   /**
    * Parse group key with LOD
    */
-  private parseGroupKeyWithLOD(groupKey: InstanceGroupKey): { assetType: AssetType; variationIndex: number; lod: MeshLOD } | null {
+  private parseGroupKeyWithLOD(groupKey: InstanceGroupKey): { baseGroupKey: InstanceGroupKey; lod: MeshLOD } | null {
     const parts = groupKey.split("|");
     if (parts.length < 3) return null;
+    const lod = parseInt(parts[parts.length - 1], 10);
+    if (Number.isNaN(lod)) return null;
     return {
-      assetType: parts[0] as AssetType,
-      variationIndex: parseInt(parts[1], 10),
-      lod: parseInt(parts[2], 10) as MeshLOD,
+      baseGroupKey: parts.slice(0, -1).join("|"),
+      lod: lod as MeshLOD,
     };
+  }
+
+  private getStructureSignature(params: AssetParams): string {
+    const defaults = DEFAULT_ASSET_PARAMS[params.type];
+    const length = quantizeNumber(params.length ?? defaults.length ?? 1, 100);
+    const width = quantizeNumber(params.width ?? defaults.width ?? 1, 100);
+    const height = quantizeNumber(params.height ?? defaults.height ?? 1, 100);
+    const baySize = quantizeNumber(params.baySize ?? defaults.baySize ?? 2.4, 100);
+    const seed = quantizeNumber(params.seed, 1000);
+    return `${length}_${width}_${height}_${baySize}_${seed}`;
+  }
+
+  private getOrCreateCustomLODGeometry(
+    baseGroupKey: InstanceGroupKey,
+    assetType: AssetType,
+    lod: MeshLOD,
+    sampleParams: AssetParams
+  ): THREE.BufferGeometry | null {
+    let lodMap = this.customGroupGeometries.get(baseGroupKey);
+    if (!lodMap) {
+      lodMap = new Map();
+      this.customGroupGeometries.set(baseGroupKey, lodMap);
+    }
+
+    const cached = lodMap.get(lod);
+    if (cached) return cached;
+
+    const subdivision = LOD_SUBDIVISIONS[assetType][lod];
+    const generationParams: AssetParams = {
+      ...DEFAULT_ASSET_PARAMS[assetType],
+      ...sampleParams,
+      type: assetType,
+      size: 1.0,
+      subdivisionOverride: subdivision > 0 ? subdivision : undefined,
+    };
+
+    const asset = new ProceduralAsset(null, generationParams);
+    const mesh = asset.generate() as THREE.Mesh | null;
+    if (!mesh) {
+      asset.dispose();
+      return null;
+    }
+
+    const baseGeometry = mesh.geometry.clone();
+    ensureAttributes(baseGeometry);
+    asset.dispose();
+
+    if (isKoreanStructureAssetType(assetType)) {
+      const lodLevels: MeshLOD[] = [MeshLOD.High, MeshLOD.Medium, MeshLOD.Low];
+      for (const level of lodLevels) {
+        if (level === lod) {
+          lodMap.set(level, baseGeometry);
+        } else {
+          lodMap.set(level, baseGeometry.clone());
+        }
+      }
+      return lodMap.get(lod) ?? null;
+    }
+
+    lodMap.set(lod, baseGeometry);
+    return baseGeometry;
   }
 
   /**
@@ -1723,7 +1996,7 @@ export class PropManager {
       const instance = this.instances.get(propId);
       if (instance) {
         // Unregister from instance group
-        const groupKey = this.getGroupKey(instance.assetType, instance.variationIndex);
+        const groupKey = instance.groupKey;
         const groupProps = this.propsByGroup.get(groupKey);
         if (groupProps) {
           groupProps.delete(propId);
@@ -1783,7 +2056,7 @@ export class PropManager {
 
       if (instance.visible !== shouldBeVisible) {
         instance.visible = shouldBeVisible;
-        const groupKey = this.getGroupKey(instance.assetType, instance.variationIndex);
+        const groupKey = instance.groupKey;
         affectedGroups.add(groupKey);
 
         if (shouldBeVisible) {
@@ -1859,8 +2132,7 @@ export class PropManager {
       const newY = this.heightmap.getInterpolatedHeight(instance.position.x, instance.position.z);
       if (instance.position.y !== newY) {
         instance.position.y = newY;
-        const groupKey = `${instance.assetType}|${instance.variationIndex}`;
-        this.markGroupDirty(groupKey);
+        this.markGroupDirty(instance.groupKey);
       }
     }
   }
@@ -1869,13 +2141,11 @@ export class PropManager {
    * Rebuild a single instance group with LOD and frustum culling support
    */
   private rebuildInstanceGroupWithLOD(baseGroupKey: InstanceGroupKey): void {
-    const propIds = this.propsByGroup.get(baseGroupKey);
-    const [assetType, variationIndexStr] = baseGroupKey.split("|") as [AssetType, string];
-    const variationIndex = parseInt(variationIndexStr, 10);
+    const parsed = this.parseBaseGroupKey(baseGroupKey);
+    if (!parsed) return;
 
-    // Get variation geometries for all LOD levels
-    const lodGeoMap = this.variationGeometries.get(assetType);
-    if (!lodGeoMap) return;
+    const { assetType, variationIndex } = parsed;
+    const propIds = this.propsByGroup.get(baseGroupKey);
 
     // Get camera position for LOD calculation
     const cameraPos = this.camera ? this.camera.position : new THREE.Vector3();
@@ -1890,14 +2160,23 @@ export class PropManager {
     }
 
     if (!propIds || propIds.size === 0) {
-      // No props - hide all LOD meshes for this group
+      // No props - dispose all LOD meshes for this group.
       for (const lod of lodLevels) {
-        const lodGroupKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
+        const lodGroupKey = this.getGroupKeyWithLOD(baseGroupKey, lod);
         const groupMesh = this.instanceGroups.get(lodGroupKey);
         if (groupMesh) {
-          groupMesh.visible = false;
-          groupMesh.count = 0;
+          this.scene.remove(groupMesh);
+          groupMesh.dispose();
+          this.instanceGroups.delete(lodGroupKey);
         }
+      }
+
+      const customLodMap = this.customGroupGeometries.get(baseGroupKey);
+      if (customLodMap) {
+        for (const geometry of customLodMap.values()) {
+          geometry.dispose();
+        }
+        this.customGroupGeometries.delete(baseGroupKey);
       }
       return;
     }
@@ -1930,7 +2209,7 @@ export class PropManager {
 
     // Apply to each LOD mesh
     for (const lod of lodLevels) {
-      const lodGroupKey = this.getGroupKeyWithLOD(assetType, variationIndex, lod);
+      const lodGroupKey = this.getGroupKeyWithLOD(baseGroupKey, lod);
       const instanceList = lodInstanceLists.get(lod)!;
       const count = instanceList.length;
 
@@ -1956,10 +2235,27 @@ export class PropManager {
       }
 
       if (!groupMesh) {
-        const lodGeometries = lodGeoMap.get(lod);
-        if (!lodGeometries || !lodGeometries[variationIndex]) continue;
+        let baseGeometry: THREE.BufferGeometry | null = null;
 
-        const baseGeometry = lodGeometries[variationIndex];
+        if (isKoreanStructureAssetType(assetType)) {
+          const firstInstanceId = propIds.values().next().value as string | undefined;
+          const firstInstance = firstInstanceId ? this.instances.get(firstInstanceId) : undefined;
+          if (!firstInstance) continue;
+          baseGeometry = this.getOrCreateCustomLODGeometry(
+            baseGroupKey,
+            assetType,
+            lod,
+            firstInstance.params
+          );
+        } else {
+          const lodGeoMap = this.variationGeometries.get(assetType);
+          const lodGeometries = lodGeoMap?.get(lod);
+          if (!lodGeometries || !lodGeometries[variationIndex]) continue;
+          baseGeometry = lodGeometries[variationIndex];
+        }
+
+        if (!baseGeometry) continue;
+
         // Allocate with extra capacity to avoid frequent re-creation
         const capacity = Math.max(count, 16) * 2;
         const material = this.sharedMaterials.get(assetType);
@@ -2115,26 +2411,38 @@ export class PropManager {
   }
 
   // Create or update the preview with given params
-  createPreview(type: AssetType, size: number, seed?: number): void {
+  createPreview(
+    type: AssetType,
+    size: number,
+    seed?: number,
+    customSettings?: { length?: number; width?: number; height?: number; baySize?: number }
+  ): void {
     this.disposePreviewResources();
 
     // Convert seed to variation seed pattern to match pre-generated variation meshes
     const rawSeed = seed ?? Math.random() * 10000;
-    const variationSeed = this.toVariationSeed(rawSeed);
-    const variationIndex = this.getVariationIndex(variationSeed);
+    const normalizedSeed = isKoreanStructureAssetType(type)
+      ? rawSeed
+      : this.toVariationSeed(rawSeed);
+    const variationIndex = this.getVariationIndex(normalizedSeed);
 
     // Create new preview params
     this.previewParams = {
       ...DEFAULT_ASSET_PARAMS[type],
       type,
       size,
-      seed: variationSeed,
+      seed: normalizedSeed,
+      length: customSettings?.length ?? DEFAULT_ASSET_PARAMS[type].length,
+      width: customSettings?.width ?? DEFAULT_ASSET_PARAMS[type].width,
+      height: customSettings?.height ?? DEFAULT_ASSET_PARAMS[type].height,
+      baySize: customSettings?.baySize ?? DEFAULT_ASSET_PARAMS[type].baySize,
     };
 
     this.previewScale = size;
     this.previewRotation.set(0, 0, 0);
 
-    const createdInstancedPreview = this.createInstancedPreviewFromVariation(type, variationIndex);
+    const useInstancedPreview = !isKoreanStructureAssetType(type);
+    const createdInstancedPreview = useInstancedPreview && this.createInstancedPreviewFromVariation(type, variationIndex);
     if (!createdInstancedPreview) {
       // Fallback path when async variation geometries are not ready yet.
       this.previewAsset = new ProceduralAsset(this.scene, this.previewParams);
@@ -2157,10 +2465,21 @@ export class PropManager {
   randomizePreview(): number {
     if (!this.previewParams) return 0;
 
-    // Pick random variation index and convert to variation seed
-    const randomVariationIndex = Math.floor(Math.random() * VARIATIONS_PER_TYPE);
-    const newSeed = randomVariationIndex * 1001 + 8;
-    this.createPreview(this.previewParams.type, this.previewParams.size, newSeed);
+    let newSeed: number;
+    if (isKoreanStructureAssetType(this.previewParams.type)) {
+      newSeed = Math.random() * 10000;
+    } else {
+      // Pick random variation index and convert to variation seed
+      const randomVariationIndex = Math.floor(Math.random() * VARIATIONS_PER_TYPE);
+      newSeed = randomVariationIndex * 1001 + 8;
+    }
+
+    this.createPreview(this.previewParams.type, this.previewParams.size, newSeed, {
+      length: this.previewParams.length,
+      width: this.previewParams.width,
+      height: this.previewParams.height,
+      baySize: this.previewParams.baySize,
+    });
     return newSeed;
   }
 
@@ -2194,6 +2513,10 @@ export class PropManager {
     noiseAmplitude: number;
     colorBase: THREE.Color;
     colorDetail: THREE.Color;
+    length?: number;
+    width?: number;
+    height?: number;
+    baySize?: number;
   }): void {
     this.disposePreviewResources();
 
@@ -2207,6 +2530,10 @@ export class PropManager {
       noiseAmplitude: params.noiseAmplitude,
       colorBase: params.colorBase,
       colorDetail: params.colorDetail,
+      length: params.length,
+      width: params.width,
+      height: params.height,
+      baySize: params.baySize,
     };
     this.previewScale = params.size;
     this.previewRotation.set(0, 0, 0);
@@ -2283,7 +2610,10 @@ export class PropManager {
     // Store params BEFORE randomizing
     const params = { ...this.previewParams };
     const variationIndex = this.getVariationIndex(params.seed);
-    const groupKey = this.getGroupKey(params.type, variationIndex);
+    const signature = isKoreanStructureAssetType(params.type)
+      ? this.getStructureSignature(params)
+      : undefined;
+    const groupKey = this.getGroupKey(params.type, variationIndex, signature);
 
     // Store instance (no mesh - managed by instancing)
     const rotation = this.previewInstancedMesh
@@ -2292,6 +2622,7 @@ export class PropManager {
 
     const instance: PropInstance = {
       id,
+      groupKey,
       assetType: params.type,
       variationIndex,
       params,
@@ -2334,7 +2665,14 @@ export class PropManager {
     assetType: string,
     x: number,
     z: number,
-    customSettings?: { size?: number; seed?: number }
+    customSettings?: {
+      size?: number;
+      seed?: number;
+      length?: number;
+      width?: number;
+      height?: number;
+      baySize?: number;
+    }
   ): string | null {
     const type = assetType as AssetType;
     if (!DEFAULT_ASSET_PARAMS[type]) return null;
@@ -2353,19 +2691,27 @@ export class PropManager {
     const seed = customSettings?.seed ?? Math.random() * 10000;
     const size = customSettings?.size ?? DEFAULT_ASSET_PARAMS[type].size;
     const variationIndex = this.getVariationIndex(seed);
-    const groupKey = this.getGroupKey(type, variationIndex);
 
     const params: AssetParams = {
       ...DEFAULT_ASSET_PARAMS[type],
       type,
       seed,
       size,
+      length: customSettings?.length ?? DEFAULT_ASSET_PARAMS[type].length,
+      width: customSettings?.width ?? DEFAULT_ASSET_PARAMS[type].width,
+      height: customSettings?.height ?? DEFAULT_ASSET_PARAMS[type].height,
+      baySize: customSettings?.baySize ?? DEFAULT_ASSET_PARAMS[type].baySize,
     };
+    const signature = isKoreanStructureAssetType(type)
+      ? this.getStructureSignature(params)
+      : undefined;
+    const groupKey = this.getGroupKey(type, variationIndex, signature);
 
     const rotationY = Math.random() * Math.PI * 2;
 
     const instance: PropInstance = {
       id,
+      groupKey,
       assetType: type,
       variationIndex,
       params,
@@ -2408,7 +2754,7 @@ export class PropManager {
     this.unregisterPropFromSpatialHash(id);
 
     // Unregister from instance group
-    const groupKey = this.getGroupKey(instance.assetType, instance.variationIndex);
+    const groupKey = instance.groupKey;
     const groupProps = this.propsByGroup.get(groupKey);
     if (groupProps) {
       groupProps.delete(id);
@@ -2441,6 +2787,13 @@ export class PropManager {
     this.dirtyGroups.clear();
     this.spatialHash.clear();
 
+    for (const lodMap of this.customGroupGeometries.values()) {
+      for (const geometry of lodMap.values()) {
+        geometry.dispose();
+      }
+    }
+    this.customGroupGeometries.clear();
+
     // Hide all instance group meshes
     for (const groupMesh of this.instanceGroups.values()) {
       groupMesh.visible = false;
@@ -2460,6 +2813,10 @@ export class PropManager {
         sizeVariation: inst.params.sizeVariation,
         noiseScale: inst.params.noiseScale,
         noiseAmplitude: inst.params.noiseAmplitude,
+        length: inst.params.length,
+        width: inst.params.width,
+        height: inst.params.height,
+        baySize: inst.params.baySize,
         colorBase: {
           r: inst.params.colorBase.r,
           g: inst.params.colorBase.g,
@@ -2492,6 +2849,10 @@ export class PropManager {
         sizeVariation: item.params.sizeVariation,
         noiseScale: item.params.noiseScale,
         noiseAmplitude: item.params.noiseAmplitude,
+        length: item.params.length,
+        width: item.params.width,
+        height: item.params.height,
+        baySize: item.params.baySize,
         colorBase: new THREE.Color(
           item.params.colorBase.r,
           item.params.colorBase.g,
@@ -2505,11 +2866,15 @@ export class PropManager {
       };
 
       const variationIndex = this.getVariationIndex(params.seed);
-      const groupKey = this.getGroupKey(params.type, variationIndex);
+      const signature = isKoreanStructureAssetType(params.type)
+        ? this.getStructureSignature(params)
+        : undefined;
+      const groupKey = this.getGroupKey(params.type, variationIndex, signature);
 
       const instance: PropInstance = {
         id: item.id,
-        assetType: item.assetType,
+        groupKey,
+        assetType: item.assetType as AssetType,
         variationIndex,
         params,
         position: new THREE.Vector3(item.position.x, item.position.y, item.position.z),
