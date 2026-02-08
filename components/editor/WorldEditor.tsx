@@ -489,16 +489,22 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
       />
 
       {/* FPS overlay */}
-      <div className="absolute top-4 right-4 text-xs text-zinc-400 bg-zinc-900/80 px-3 py-2 rounded-lg font-mono">
+      <div className="absolute top-3 right-3 sm:top-4 sm:right-4 text-[11px] sm:text-xs text-zinc-400 bg-zinc-900/80 px-2.5 sm:px-3 py-2 rounded-lg font-mono">
         <p>{stats.fps} FPS</p>
         <p>{stats.drawCalls} draws</p>
         <p>{(stats.triangles / 1000).toFixed(1)}K tris</p>
       </div>
 
       {/* Controls hint */}
-      <div className="absolute bottom-4 left-4 text-xs text-zinc-500 bg-zinc-900/80 px-3 py-2 rounded-lg">
-        <p>Drag: Rotate | Cmd+Scroll: Zoom | Shift+Drag: Pan | [ ]: Brush Size</p>
-        <p className="mt-1">1-5: Tools | Q/T/E/R: Height Brushes | G: Grid | F: Wireframe</p>
+      <div className="absolute bottom-3 left-3 right-3 sm:right-auto sm:bottom-4 sm:left-4 text-[10px] sm:text-xs text-zinc-500 bg-zinc-900/80 px-3 py-2 rounded-lg">
+        <div className="sm:hidden">
+          <p>Drag rotate | Scroll zoom</p>
+          <p className="mt-1">1-5 tools | [ ] brush | ESC cancel</p>
+        </div>
+        <div className="hidden sm:block">
+          <p>Drag: Rotate | Cmd+Scroll: Zoom | Shift+Drag: Pan | [ ]: Brush Size</p>
+          <p className="mt-1">1-5: Tools | Q/T/E/R: Height Brushes | G: Grid | F: Wireframe</p>
+        </div>
         {pendingAsset && (
           <p className="mt-1 text-green-400">Click on terrain to place &quot;{pendingAsset.name}&quot; | ESC: Cancel</p>
         )}

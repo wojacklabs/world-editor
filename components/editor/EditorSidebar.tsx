@@ -10,20 +10,12 @@ import type {
 } from "@/lib/editor/types/EditorTypes";
 import WeatherPanel from "./WeatherPanel";
 
-const BIOME_COLORS: Record<BiomeType, string> = {
-  grass: "#4a7c23",
-  dirt: "#8b6914",
-  rock: "#6b6b6b",
-  sand: "#c2a366",
-  water: "#2d6a8f",
-};
-
-const TOOL_ITEMS: { id: ToolType; label: string; short: string; key: string }[] = [
-  { id: "select", label: "Select", short: "S", key: "1" },
-  { id: "heightmap", label: "Terrain", short: "T", key: "2" },
-  { id: "biome", label: "Biome", short: "B", key: "3" },
-  { id: "props", label: "Props", short: "P", key: "4" },
-  { id: "environment", label: "Env", short: "E", key: "5" },
+const TOOL_ITEMS: { id: ToolType; label: string; description: string; key: string }[] = [
+  { id: "select", label: "Select", description: "오브젝트 선택/정리", key: "1" },
+  { id: "heightmap", label: "Terrain", description: "지형 높이 조형", key: "2" },
+  { id: "biome", label: "Biome", description: "재질/수면 페인팅", key: "3" },
+  { id: "props", label: "Props", description: "프롭 배치", key: "4" },
+  { id: "environment", label: "Environment", description: "시간/날씨", key: "5" },
 ];
 
 const HEIGHTMAP_TOOLS: { id: HeightmapTool; label: string; key: string }[] = [
@@ -33,42 +25,22 @@ const HEIGHTMAP_TOOLS: { id: HeightmapTool; label: string; key: string }[] = [
   { id: "smooth", label: "Smooth", key: "R" },
 ];
 
-const BIOMES: { id: BiomeType; label: string; description: string }[] = [
-  { id: "grass", label: "Grass", description: "풀밭" },
-  { id: "dirt", label: "Dirt", description: "흙길" },
-  { id: "rock", label: "Rock", description: "바위" },
-  { id: "sand", label: "Sand", description: "모래" },
-  { id: "water", label: "Water", description: "물" },
+const BIOMES: { id: BiomeType; label: string; color: string }[] = [
+  { id: "grass", label: "Grass", color: "#4a7c23" },
+  { id: "dirt", label: "Dirt", color: "#8b6914" },
+  { id: "rock", label: "Rock", color: "#6b6b6b" },
+  { id: "sand", label: "Sand", color: "#c2a366" },
+  { id: "water", label: "Water", color: "#2d6a8f" },
 ];
 
-const ASSET_TYPES: { id: ProceduralAssetType; label: string }[] = [
+const PROP_TYPES: { id: ProceduralAssetType; label: string }[] = [
   { id: "rock", label: "Rock" },
   { id: "tree", label: "Tree" },
   { id: "bush", label: "Bush" },
   { id: "grass_clump", label: "Grass" },
 ];
 
-function Section({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="space-y-3">
-      <div>
-        <h3 className="text-[11px] font-medium text-zinc-400 uppercase tracking-wide">{title}</h3>
-        {description && <p className="text-[10px] text-zinc-600 mt-1">{description}</p>}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function Slider({
+function SliderField({
   label,
   value,
   valueText,
@@ -86,8 +58,8 @@ function Slider({
   onChange: (value: number) => void;
 }) {
   return (
-    <div>
-      <div className="flex justify-between text-[11px] mb-2">
+    <label className="block">
+      <div className="flex items-center justify-between text-[11px] mb-1.5">
         <span className="text-zinc-500">{label}</span>
         <span className="text-zinc-400 tabular-nums">{valueText}</span>
       </div>
@@ -98,9 +70,26 @@ function Slider({
         step={step}
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer hover:[&::-webkit-slider-thumb]:bg-zinc-300"
+        className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-300 [&::-webkit-slider-thumb]:rounded-full hover:[&::-webkit-slider-thumb]:bg-white"
       />
-    </div>
+    </label>
+  );
+}
+
+function PanelSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="border border-zinc-800/70 rounded-xl bg-zinc-900/30">
+      <header className="px-3 py-2.5 border-b border-zinc-800/60">
+        <h3 className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">{title}</h3>
+      </header>
+      <div className="p-3">{children}</div>
+    </section>
   );
 }
 
@@ -110,107 +99,94 @@ export default function EditorSidebar() {
     activeHeightmapTool,
     selectedMaterial,
     selectedAssetType,
-    assetSettings,
     brushSettings,
+    assetSettings,
+    waterType,
+    waterFlowAngle,
     pendingAsset,
     setActiveTool,
     setActiveHeightmapTool,
     setSelectedMaterial,
     setSelectedAssetType,
-    setAssetSize,
     setBrushSize,
     setBrushStrength,
-    randomizeAssetSeed,
-    waterType,
-    waterFlowAngle,
+    setAssetSize,
     setWaterType,
     setWaterFlowAngle,
+    randomizeAssetSeed,
     clearPendingAsset,
   } = useEditorStore();
 
-  const activeToolLabel = TOOL_ITEMS.find((item) => item.id === activeTool)?.label ?? "Tool";
-
-  const handleAssetTypeClick = (type: ProceduralAssetType) => {
-    setSelectedAssetType(type);
-    clearPendingAsset();
-  };
-
   return (
-    <aside className="w-80 bg-zinc-950 border-r border-zinc-800/60 flex">
-      <div className="w-16 border-r border-zinc-800/60 px-2 py-3 flex flex-col items-center gap-2">
+    <aside className="w-72 h-full min-h-0 bg-zinc-950 border-r border-zinc-800/60 flex flex-col shrink-0">
+      <header className="p-3 border-b border-zinc-800/60">
+        <h2 className="text-sm font-medium text-zinc-200">Workflow</h2>
+        <p className="text-[11px] text-zinc-600 mt-1">모드를 먼저 선택하고 캔버스에서 바로 작업합니다.</p>
+      </header>
+
+      <div className="p-2 border-b border-zinc-800/60">
         {TOOL_ITEMS.map((tool) => (
           <button
             key={tool.id}
             onClick={() => setActiveTool(tool.id)}
-            className={`w-full aspect-square rounded-lg flex flex-col items-center justify-center transition-all ${
+            className={`w-full px-2.5 py-2 rounded-lg flex items-center gap-2 transition-all ${
               activeTool === tool.id
-                ? "bg-zinc-800 text-zinc-100 shadow-sm"
+                ? "bg-zinc-800 text-zinc-200"
                 : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900"
             }`}
-            title={`${tool.label} (${tool.key})`}
           >
-            <span className="text-xs font-medium leading-none">{tool.short}</span>
-            <span className="text-[9px] leading-none mt-1 text-zinc-500">{tool.key}</span>
+            <span className="w-5 text-[10px] text-zinc-600">{tool.key}</span>
+            <div className="flex-1 text-left min-w-0">
+              <div className="text-xs">{tool.label}</div>
+              <div className="text-[10px] text-zinc-600 truncate">{tool.description}</div>
+            </div>
           </button>
         ))}
-        <div className="mt-auto text-[9px] text-zinc-600 text-center leading-tight">
-          1-5
-          <br />
-          Mode
-        </div>
       </div>
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="px-4 py-3 border-b border-zinc-800/60">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-medium text-zinc-200">{activeToolLabel}</h2>
-            <span className="text-[10px] text-zinc-600">Context</span>
-          </div>
-        </header>
-
-        {pendingAsset && (
-          <div className="mx-4 mt-3 px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-lg">
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-                <span className="text-[11px] text-zinc-300 truncate">
-                  Placing: {pendingAsset.name}
-                </span>
-              </div>
-              <button
-                onClick={clearPendingAsset}
-                className="text-[10px] text-zinc-500 hover:text-zinc-300"
-              >
-                Cancel
-              </button>
+      {pendingAsset && (
+        <div className="mx-3 mt-3 px-2.5 py-2 bg-zinc-900 border border-zinc-800 rounded-lg">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="text-[11px] text-zinc-300 truncate">
+                Place: {pendingAsset.name}
+              </span>
             </div>
+            <button
+              onClick={clearPendingAsset}
+              className="text-[10px] text-zinc-500 hover:text-zinc-300"
+            >
+              Cancel
+            </button>
           </div>
-        )}
+        </div>
+      )}
 
-        <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6">
-          {activeTool === "heightmap" && (
-            <>
-              <Section title="Brush Mode" description="지형 편집 방식 선택">
-                <div className="grid grid-cols-2 gap-1.5">
-                  {HEIGHTMAP_TOOLS.map((tool) => (
-                    <button
-                      key={tool.id}
-                      onClick={() => setActiveHeightmapTool(tool.id)}
-                      className={`py-2 text-[11px] rounded-md transition-all ${
-                        activeHeightmapTool === tool.id
-                          ? "bg-zinc-800 text-zinc-200"
-                          : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900"
-                      }`}
-                    >
-                      {tool.label}
-                      <span className="ml-1 text-[10px] text-zinc-600">{tool.key}</span>
-                    </button>
-                  ))}
-                </div>
-              </Section>
-
-              <Section title="Brush Settings">
-                <Slider
+      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+        {activeTool === "heightmap" && (
+          <>
+            <PanelSection title="Brush Mode">
+              <div className="grid grid-cols-2 gap-1.5">
+                {HEIGHTMAP_TOOLS.map((tool) => (
+                  <button
+                    key={tool.id}
+                    onClick={() => setActiveHeightmapTool(tool.id)}
+                    className={`py-1.5 text-[11px] rounded-md transition-all ${
+                      activeHeightmapTool === tool.id
+                        ? "bg-zinc-800 text-zinc-200"
+                        : "bg-zinc-900 text-zinc-500 hover:text-zinc-300"
+                    }`}
+                  >
+                    {tool.label}
+                    <span className="ml-1 text-[10px] text-zinc-600">{tool.key}</span>
+                  </button>
+                ))}
+              </div>
+            </PanelSection>
+            <PanelSection title="Brush">
+              <div className="space-y-3">
+                <SliderField
                   label="Size"
                   value={brushSettings.size}
                   valueText={`${brushSettings.size}`}
@@ -218,7 +194,7 @@ export default function EditorSidebar() {
                   max={50}
                   onChange={setBrushSize}
                 />
-                <Slider
+                <SliderField
                   label="Strength"
                   value={brushSettings.strength}
                   valueText={`${Math.round(brushSettings.strength * 100)}%`}
@@ -227,53 +203,52 @@ export default function EditorSidebar() {
                   step={0.05}
                   onChange={setBrushStrength}
                 />
-              </Section>
-            </>
-          )}
+              </div>
+            </PanelSection>
+          </>
+        )}
 
-          {activeTool === "biome" && (
-            <>
-              <Section title="Biome" description="재질을 선택해 페인팅">
-                <div className="space-y-1">
-                  {BIOMES.map((biome) => (
-                    <button
-                      key={biome.id}
-                      onClick={() => setSelectedMaterial(biome.id)}
-                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-all ${
-                        selectedMaterial === biome.id ? "bg-zinc-800" : "hover:bg-zinc-900"
-                      }`}
-                    >
-                      <div className="w-4 h-4 rounded" style={{ backgroundColor: BIOME_COLORS[biome.id] }} />
-                      <div className="flex flex-col items-start min-w-0">
-                        <span className={`text-xs ${selectedMaterial === biome.id ? "text-zinc-200" : "text-zinc-500"}`}>
-                          {biome.label}
-                        </span>
-                        <span className="text-[10px] text-zinc-600">{biome.description}</span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              </Section>
+        {activeTool === "biome" && (
+          <>
+            <PanelSection title="Material">
+              <div className="space-y-1">
+                {BIOMES.map((biome) => (
+                  <button
+                    key={biome.id}
+                    onClick={() => setSelectedMaterial(biome.id)}
+                    className={`w-full px-2.5 py-2 rounded-md flex items-center gap-2 transition-all ${
+                      selectedMaterial === biome.id
+                        ? "bg-zinc-800 text-zinc-200"
+                        : "bg-zinc-900 text-zinc-500 hover:text-zinc-300"
+                    }`}
+                  >
+                    <span className="w-3 h-3 rounded" style={{ backgroundColor: biome.color }} />
+                    <span className="text-xs">{biome.label}</span>
+                  </button>
+                ))}
+              </div>
+            </PanelSection>
 
-              <Section title="Brush Settings">
-                <Slider
-                  label="Size"
-                  value={brushSettings.size}
-                  valueText={`${brushSettings.size}`}
-                  min={1}
-                  max={50}
-                  onChange={setBrushSize}
-                />
-              </Section>
+            <PanelSection title="Brush">
+              <SliderField
+                label="Size"
+                value={brushSettings.size}
+                valueText={`${brushSettings.size}`}
+                min={1}
+                max={50}
+                onChange={setBrushSize}
+              />
+            </PanelSection>
 
-              {selectedMaterial === "water" && (
-                <Section title="Water">
-                  <div className="flex gap-1">
+            {selectedMaterial === "water" && (
+              <PanelSection title="Water">
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-1.5">
                     {(["lake", "river"] as WaterType[]).map((type) => (
                       <button
                         key={type}
                         onClick={() => setWaterType(type)}
-                        className={`flex-1 py-2 text-[11px] rounded-md transition-all ${
+                        className={`py-1.5 text-xs rounded-md transition-all ${
                           waterType === type
                             ? "bg-zinc-800 text-zinc-100"
                             : "bg-zinc-900 text-zinc-500 hover:text-zinc-300"
@@ -283,9 +258,8 @@ export default function EditorSidebar() {
                       </button>
                     ))}
                   </div>
-
                   {waterType === "river" && (
-                    <Slider
+                    <SliderField
                       label="Direction"
                       value={waterFlowAngle}
                       valueText={`${Math.round(waterFlowAngle)}°`}
@@ -295,33 +269,37 @@ export default function EditorSidebar() {
                       onChange={setWaterFlowAngle}
                     />
                   )}
-                </Section>
-              )}
-            </>
-          )}
-
-          {activeTool === "props" && (
-            <>
-              <Section title="Asset Type" description="클릭으로 즉시 배치">
-                <div className="grid grid-cols-2 gap-1.5">
-                  {ASSET_TYPES.map((asset) => (
-                    <button
-                      key={asset.id}
-                      onClick={() => handleAssetTypeClick(asset.id)}
-                      className={`py-3 text-xs rounded-lg transition-all ${
-                        selectedAssetType === asset.id
-                          ? "bg-zinc-800 text-zinc-200"
-                          : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900"
-                      }`}
-                    >
-                      {asset.label}
-                    </button>
-                  ))}
                 </div>
-              </Section>
+              </PanelSection>
+            )}
+          </>
+        )}
 
-              <Section title="Placement">
-                <Slider
+        {activeTool === "props" && (
+          <>
+            <PanelSection title="Asset">
+              <div className="grid grid-cols-2 gap-1.5">
+                {PROP_TYPES.map((type) => (
+                  <button
+                    key={type.id}
+                    onClick={() => {
+                      setSelectedAssetType(type.id);
+                      clearPendingAsset();
+                    }}
+                    className={`py-2 text-xs rounded-md transition-all ${
+                      selectedAssetType === type.id
+                        ? "bg-zinc-800 text-zinc-200"
+                        : "bg-zinc-900 text-zinc-500 hover:text-zinc-300"
+                    }`}
+                  >
+                    {type.label}
+                  </button>
+                ))}
+              </div>
+            </PanelSection>
+            <PanelSection title="Placement">
+              <div className="space-y-3">
+                <SliderField
                   label="Scale"
                   value={assetSettings.size}
                   valueText={`${assetSettings.size.toFixed(1)}x`}
@@ -330,32 +308,29 @@ export default function EditorSidebar() {
                   step={0.1}
                   onChange={setAssetSize}
                 />
-
                 <button
                   onClick={randomizeAssetSeed}
-                  className="w-full py-2 text-xs text-zinc-400 border border-zinc-800 rounded-lg hover:border-zinc-700 hover:text-zinc-300 transition-colors"
+                  className="w-full py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-md text-zinc-400 hover:text-zinc-300 hover:border-zinc-700"
                 >
                   Randomize Seed (Shift+R)
                 </button>
-              </Section>
-            </>
-          )}
-
-          {activeTool === "select" && (
-            <Section title="Selection">
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-3">
-                <p className="text-xs text-zinc-400">캔버스에서 오브젝트를 클릭해 선택하세요.</p>
-                <p className="text-[10px] text-zinc-600 mt-2">Delete: 제거 / Esc: 해제</p>
               </div>
-            </Section>
-          )}
+            </PanelSection>
+          </>
+        )}
 
-          {activeTool === "environment" && <WeatherPanel />}
-        </div>
+        {activeTool === "select" && (
+          <PanelSection title="Selection">
+            <p className="text-xs text-zinc-400">오브젝트를 선택해서 우측 패널에서 수정하세요.</p>
+            <p className="text-[10px] text-zinc-600 mt-1.5">Delete: 제거 / Esc: 선택 해제</p>
+          </PanelSection>
+        )}
 
-        <footer className="px-4 py-2 border-t border-zinc-800/60">
-          <span className="text-[10px] text-zinc-600">Canvas-first editing</span>
-        </footer>
+        {activeTool === "environment" && (
+          <PanelSection title="Environment">
+            <WeatherPanel />
+          </PanelSection>
+        )}
       </div>
     </aside>
   );

@@ -36,6 +36,8 @@ export interface PlacedAsset {
 export default function EditorPage() {
   const [engine, setEngine] = useState<EditorEngine | null>(null);
   const [isGameMode, setIsGameMode] = useState(false);
+  const [leftPanelVisible, setLeftPanelVisible] = useState(true);
+  const [rightPanelVisible, setRightPanelVisible] = useState(true);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isLibraryOpen, setIsLibraryOpen] = useState(false);
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
@@ -605,17 +607,25 @@ export default function EditorPage() {
       <EditorToolbar
         engine={engine}
         isGameMode={isGameMode}
+        leftPanelVisible={leftPanelVisible}
+        rightPanelVisible={rightPanelVisible}
         onNewProject={handleNewProject}
         onSave={handleSave}
         onExportGLB={handleExportGLB}
         onExportHeightmap={handleExportHeightmap}
         onToggleGameMode={handleToggleGameMode}
+        onToggleLeftPanel={() => setLeftPanelVisible((prev) => !prev)}
+        onToggleRightPanel={() => setRightPanelVisible((prev) => !prev)}
         onOpenAIChat={() => setIsChatOpen(true)}
         onOpenLibrary={() => setIsLibraryOpen(true)}
       />
 
       <div className="flex flex-1 overflow-hidden">
-        {!isGameMode && <EditorSidebar />}
+        {!isGameMode && leftPanelVisible && (
+          <div className="hidden lg:flex h-full">
+            <EditorSidebar />
+          </div>
+        )}
 
         <div className="flex-1">
           <WorldEditor
@@ -625,26 +635,28 @@ export default function EditorPage() {
           />
         </div>
 
-        {!isGameMode && (
-          <EditorInspector
-            onSaveTile={handleSaveTile}
-            onLoadTile={handleLoadTile}
-            onCreateNewTile={handleCreateNewTile}
-            activeTileId={activeTileId}
-            isDirty={tileDirty}
-            dispStrength={dispStrength}
-            onDispStrengthChange={handleDispStrengthChange}
-            terrainResolution={terrainResolution}
-            onTerrainResolutionChange={handleTerrainResolutionChange}
-            terrainSize={terrainSize}
-            onTerrainSizeChange={handleTerrainSizeChange}
-            assets={placedAssets}
-            selectedAssetId={selectedAssetId}
-            onSelectAsset={setSelectedAssetId}
-            onUpdateAsset={handleUpdateAsset}
-            onDeleteAsset={handleDeleteAsset}
-            onRandomizeRotation={handleRandomizeRotation}
-          />
+        {!isGameMode && rightPanelVisible && (
+          <div className="hidden xl:flex h-full">
+            <EditorInspector
+              onSaveTile={handleSaveTile}
+              onLoadTile={handleLoadTile}
+              onCreateNewTile={handleCreateNewTile}
+              activeTileId={activeTileId}
+              isDirty={tileDirty}
+              dispStrength={dispStrength}
+              onDispStrengthChange={handleDispStrengthChange}
+              terrainResolution={terrainResolution}
+              onTerrainResolutionChange={handleTerrainResolutionChange}
+              terrainSize={terrainSize}
+              onTerrainSizeChange={handleTerrainSizeChange}
+              assets={placedAssets}
+              selectedAssetId={selectedAssetId}
+              onSelectAsset={setSelectedAssetId}
+              onUpdateAsset={handleUpdateAsset}
+              onDeleteAsset={handleDeleteAsset}
+              onRandomizeRotation={handleRandomizeRotation}
+            />
+          </div>
         )}
       </div>
 
