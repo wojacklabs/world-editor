@@ -50,12 +50,9 @@ export class BiomeDecorator {
     // Currently no-op: biome textures are handled per-tile by terrain shader
     // Water is a global feature managed by buildWater()
     // This method is a placeholder for future cell-based decorations
-
-    // Calculate cell bounds for future use
-    const _cellWorldStartX = cellX * cellSize;
-    const _cellWorldStartZ = cellZ * cellSize;
-    const _cellWorldEndX = _cellWorldStartX + cellSize;
-    const _cellWorldEndZ = _cellWorldStartZ + cellSize;
+    void cellX;
+    void cellZ;
+    void cellSize;
 
     // Future: Generate grass clumps, flowers, etc. within cell bounds
     // console.log(`[BiomeDecorator] rebuildCell(${cellX},${cellZ}) - placeholder`);
@@ -65,7 +62,7 @@ export class BiomeDecorator {
    * Check if a cell needs biome decoration rebuild
    * Currently always returns false since biome textures are per-tile
    */
-  cellNeedsRebuild(_cellX: number, _cellZ: number): boolean {
+  cellNeedsRebuild(): boolean {
     // Biome textures are handled by terrain shader per-tile
     // Water is global and doesn't need per-cell rebuilds
     return false;
@@ -251,6 +248,7 @@ export class BiomeDecorator {
    * Note: Water visibility is handled separately via setWaterVisible
    */
   setVisible(visible: boolean): void {
+    void visible;
     // Currently BiomeDecorator doesn't create visible meshes other than water
     // Water is controlled separately via EditorEngine.setWaterVisible
     // This method is for future decoration meshes (grass clumps, etc.)

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import {
   getAssetLibrary,
   SavedAsset,
@@ -204,7 +205,14 @@ export default function AssetLibraryPanel({
                   >
                     <div className="aspect-square bg-zinc-800 rounded-md mb-2 flex items-center justify-center overflow-hidden">
                       {asset.thumbnail ? (
-                        <img src={asset.thumbnail} alt={asset.name} className="w-full h-full object-cover" />
+                        <Image
+                          src={asset.thumbnail}
+                          alt={asset.name}
+                          width={256}
+                          height={256}
+                          unoptimized
+                          className="w-full h-full object-cover"
+                        />
                       ) : (
                         <span className="text-[10px] text-zinc-600">{getTypeLabel(asset.type)}</span>
                       )}
@@ -225,7 +233,14 @@ export default function AssetLibraryPanel({
               <div className="flex-1">
                 <div className="aspect-square bg-zinc-900 rounded-lg mb-3 flex items-center justify-center overflow-hidden">
                   {selectedAsset.thumbnail ? (
-                    <img src={selectedAsset.thumbnail} alt={selectedAsset.name} className="w-full h-full object-cover" />
+                    <Image
+                      src={selectedAsset.thumbnail}
+                      alt={selectedAsset.name}
+                      width={256}
+                      height={256}
+                      unoptimized
+                      className="w-full h-full object-cover"
+                    />
                   ) : (
                     <span className="text-xs text-zinc-600">{getTypeLabel(selectedAsset.type)}</span>
                   )}

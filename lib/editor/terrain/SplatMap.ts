@@ -186,7 +186,6 @@ export class SplatMap {
     const maxZ = Math.min(this.resolution - 1, Math.ceil(centerZ + radius));
 
     let modified = false;
-    let paintedCount = 0;
 
     // Handle water separately using water mask
     if (material === "water") {
@@ -204,7 +203,6 @@ export class SplatMap {
             const maskIdx = z * this.resolution + x;
             this.waterMask[maskIdx] = Math.min(1, this.waterMask[maskIdx] + paintStrength);
             modified = true;
-            paintedCount++;
           }
         }
       }
@@ -377,7 +375,7 @@ export class SplatMap {
     this.dissolveBiomeBoundaries();
 
     // Process water mask - special handling with noisy boundaries
-    this.makeWaterMaskSeamless(this.waterMask, res, blendWidth);
+    this.makeWaterMaskSeamless(this.waterMask, res);
 
     // Process wetness mask
     this.makeMaskSeamless(this.wetnessMask, res, blendWidth);
@@ -395,8 +393,6 @@ export class SplatMap {
     const channels = 4;
     const noiseScale = 0.08; // Smaller = larger noise features
     const dissolveStrength = 0.4; // How much to shift boundaries
-    const edgeThreshold = 0.15; // Detect biome boundaries
-
     const newData = new Float32Array(this.data);
 
     for (let z = 1; z < res - 1; z++) {
@@ -713,8 +709,7 @@ export class SplatMap {
    */
   private makeWaterMaskSeamless(
     mask: Float32Array,
-    res: number,
-    blendWidth: number
+    res: number
   ): void {
     // Simply average the edges and ensure they match
     // Left-Right edges

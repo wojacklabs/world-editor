@@ -1,6 +1,5 @@
 import * as THREE from "three";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
-import { disposeMesh } from "../../shared/rendering/threeHelpers";
 import { Heightmap } from "../terrain/Heightmap";
 import { SplatMap } from "../terrain/SplatMap";
 import { DataCodec } from "../../loader";
@@ -24,47 +23,6 @@ function setGeometryVertexColor(geometry: THREE.BufferGeometry, r: number, g: nu
   }
 
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
-}
-
-// Compute normals from positions and indices (equivalent to VertexData.ComputeNormals)
-function computeNormals(positions: ArrayLike<number>, indices: ArrayLike<number>, normals: number[] | Float32Array): void {
-  for (let i = 0; i < normals.length; i++) normals[i] = 0;
-
-  const v1 = new THREE.Vector3();
-  const v2 = new THREE.Vector3();
-  const v3 = new THREE.Vector3();
-  const edge1 = new THREE.Vector3();
-  const edge2 = new THREE.Vector3();
-  const faceNormal = new THREE.Vector3();
-
-  for (let i = 0; i < indices.length; i += 3) {
-    const i0 = indices[i];
-    const i1 = indices[i + 1];
-    const i2 = indices[i + 2];
-
-    v1.set(positions[i0 * 3], positions[i0 * 3 + 1], positions[i0 * 3 + 2]);
-    v2.set(positions[i1 * 3], positions[i1 * 3 + 1], positions[i1 * 3 + 2]);
-    v3.set(positions[i2 * 3], positions[i2 * 3 + 1], positions[i2 * 3 + 2]);
-
-    edge1.subVectors(v2, v1);
-    edge2.subVectors(v3, v1);
-    faceNormal.crossVectors(edge1, edge2);
-
-    for (const idx of [i0, i1, i2]) {
-      normals[idx * 3] += faceNormal.x;
-      normals[idx * 3 + 1] += faceNormal.y;
-      normals[idx * 3 + 2] += faceNormal.z;
-    }
-  }
-
-  // Normalize
-  const n = new THREE.Vector3();
-  for (let i = 0; i < normals.length; i += 3) {
-    n.set(normals[i], normals[i + 1], normals[i + 2]).normalize();
-    normals[i] = n.x;
-    normals[i + 1] = n.y;
-    normals[i + 2] = n.z;
-  }
 }
 
 // Foliage type configuration
@@ -481,22 +439,6 @@ void main() {
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
-}
-`;
-
-const rockVertexShader = `
-precision highp float;
-
-// Three.js InstancedMesh auto-injects instanceMatrix, position, normal
-
-void main() {
-    mat4 worldMatrix = instanceMatrix;
-    vec4 worldPos = worldMatrix * vec4(position, 1.0);
-
-    vWorldPosition = worldPos.xyz;
-    vNormal = normalize(mat3(worldMatrix) * normal);
-
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
 }
 `;
 
@@ -1189,7 +1131,6 @@ export class FoliageSystem {
   private createGrassBladeGeometry(): THREE.BufferGeometry {
     const segments = 4;
     const vertexCount = (segments + 1) * 2;
-    const totalVertices = vertexCount * 2;
 
     const positions: number[] = [];
     const normals: number[] = [];
@@ -1463,7 +1404,8 @@ export class FoliageSystem {
    * (Three.js auto-injects cameraPosition for ShaderMaterial, but we keep this
    *  for any custom usage and impostor materials)
    */
-  updateCameraPosition(_cameraPosition: THREE.Vector3): void {
+  updateCameraPosition(cameraPosition: THREE.Vector3): void {
+    void cameraPosition;
     // Three.js automatically provides cameraPosition uniform to ShaderMaterial.
     // No manual setting needed.
   }
@@ -1813,8 +1755,8 @@ export class FoliageSystem {
       if (slope > config.slopeMax) continue;
 
       // Consume random values to maintain seed consistency
-      const _unusedScaleBase = config.minScale + this.seededRandom() * (config.maxScale - config.minScale);
-      const _unusedSuppressionScale = 1.0 - stoneInfluence * (DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression * 0.55);
+      void (config.minScale + this.seededRandom() * (config.maxScale - config.minScale));
+      void (1.0 - stoneInfluence * (DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.stoneSuppression * 0.55));
       this.seededRandom(); // was scale variation
       this.seededRandom(); // was rotationY
 
@@ -2006,7 +1948,7 @@ export class FoliageSystem {
 
     this.updateFrustumPlanes();
 
-    for (const [key, chunk] of this.chunks) {
+    for (const [, chunk] of this.chunks) {
       const chunkCenterX = (chunk.x + 0.5) * this.chunkSize;
       const chunkCenterZ = (chunk.z + 0.5) * this.chunkSize;
       const chunkCenterY = cameraPosition.y * 0.5;

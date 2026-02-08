@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { TerrainTile, TileType, TileConfig, TILE_COLORS } from "./TerrainTile";
+import { TerrainTile, TileType, TileConfig } from "./TerrainTile";
 
 export interface TileGridConfig {
   rows: number;

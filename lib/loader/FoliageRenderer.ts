@@ -541,7 +541,7 @@ export class FoliageRenderer {
     const sphere = new THREE.Sphere();
     const radius = chunkSize * 0.7071;
 
-    for (const [_key, chunk] of this.chunks) {
+    for (const [, chunk] of this.chunks) {
       const cx = (chunk.x + 0.5) * chunkSize;
       const cz = (chunk.z + 0.5) * chunkSize;
       const cy = camera.position.y * 0.5;

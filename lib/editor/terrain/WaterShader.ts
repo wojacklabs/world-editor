@@ -577,7 +577,7 @@ export class WaterSystem {
   /**
    * Public update method - call from render loop
    */
-  update(time: number, cameraPosition: THREE.Vector3): void {
+  update(time: number): void {
     if (!this.waterMaterial) return;
 
     const elapsed = time - this.startTime;

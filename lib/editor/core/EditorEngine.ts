@@ -18,8 +18,6 @@ import type {
 } from "../types/EditorTypes";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
-import { createTerrainMaterial, createSplatTexture } from "../terrain/TerrainShader";
-import { SplatMap } from "../terrain/SplatMap";
 import { BiomeDecorator } from "../terrain/BiomeDecorator";
 import { GamePreview } from "./GamePreview";
 import { PropManager } from "../props/PropManager";
@@ -29,14 +27,12 @@ import { ImpostorSystem } from "../foliage/ImpostorSystem";
 import { initializeKTX2Support } from "./KTX2Setup";
 import { StreamingManager } from "../streaming/StreamingManager";
 import { AssetContainerPool } from "../streaming/AssetContainerPool";
-import { getManualTileManager } from "../tiles/ManualTileManager";
 import { SkyWeatherSystem } from "../weather/SkyWeatherSystem";
 import { UndoManager } from "./UndoManager";
 import { LightManager } from "../lighting/LightManager";
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
-import { SSAOPass } from "three/addons/postprocessing/SSAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { VolumetricFogPass } from "../weather/VolumetricFogPass";
 
@@ -234,7 +230,7 @@ export class EditorEngine {
       // Update water animation
       const waterSystem = this.biomeDecorator?.getWaterSystem();
       if (waterSystem) {
-        waterSystem.update(performance.now() / 1000, this.camera.position);
+        waterSystem.update(performance.now() / 1000);
       }
 
       // Game mode: update GamePreview and render with its camera
@@ -583,6 +579,7 @@ export class EditorEngine {
   }
 
   private handleKeyDown(event: KeyboardEvent): void {
+    void event;
     // Bracket keys for brush size - handled by React
   }
 
@@ -1642,7 +1639,7 @@ export class EditorEngine {
    * Unload all neighbor tile meshes
    */
   unloadAllNeighborTiles(): void {
-    for (const [key, mesh] of this.neighborMeshes) {
+    for (const [, mesh] of this.neighborMeshes) {
       this.scene.remove(mesh);
       mesh.geometry.dispose();
       (mesh.material as THREE.Material).dispose();

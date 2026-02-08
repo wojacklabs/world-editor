@@ -37,6 +37,7 @@ export async function initializeKTX2Support(): Promise<boolean> {
 export function initializeKTX2SupportSelfHosted(
   basePath: string = "/ktx2"
 ): void {
+  void basePath;
   setKTX2Enabled(true);
   console.log("[KTX2Setup] KTX2 texture support initialized (self-hosted)");
 }

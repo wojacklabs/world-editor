@@ -19,7 +19,7 @@ function init() {
       const data = JSON.parse(fs.readFileSync(REQUESTS_FILE, 'utf-8'));
       data.forEach(req => lastProcessedIds.add(req.id));
     }
-  } catch (e) {
+  } catch {
     // ignore
   }
   console.log('[Watcher] 에셋 요청 감시 시작...');
@@ -43,7 +43,7 @@ function checkRequests() {
         console.log('========================================\n');
       }
     }
-  } catch (e) {
+  } catch {
     // ignore parse errors
   }
 }

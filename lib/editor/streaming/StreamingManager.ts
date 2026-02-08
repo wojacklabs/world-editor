@@ -366,7 +366,7 @@ export class StreamingManager {
     this.currentCellZ = cellZ;
 
     // Clear existing cells
-    for (const [key, cell] of this.cells) {
+    for (const [, cell] of this.cells) {
       if (cell.state === CellState.Loaded && this.onUnloadCell) {
         this.onUnloadCell(cell.x, cell.z);
       }

@@ -726,43 +726,6 @@ void main() {
 }
 `;
 
-const csmTrunkVertexShader = `
-uniform float uTime;
-uniform vec2 uWindDirection;
-uniform float uWindStrength;
-uniform float uMinWindHeight;
-uniform float uMaxWindHeight;
-uniform float uPropsPrimarySpeed;
-
-float csm_trunk_hash(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
-void main() {
-    // Trunk sway: subtle wind at upper portions only
-    vec3 worldPos = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xyz;
-
-    float heightAboveMin = max(0.0, position.y - uMinWindHeight);
-    float heightRange = max(0.01, uMaxWindHeight - uMinWindHeight);
-    float heightFactor = clamp(heightAboveMin / heightRange, 0.0, 1.0);
-    heightFactor = heightFactor * heightFactor;
-
-    float windPhase = dot(worldPos.xz, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
-    float windAmount = sin(windPhase) * heightFactor * uWindStrength * 0.3;
-
-    vec3 displaced = position;
-    displaced.x += uWindDirection.x * windAmount * 0.1;
-    displaced.z += uWindDirection.y * windAmount * 0.1;
-    csm_Position = displaced;
-}
-`;
-
-const csmTrunkFragmentShader = `
-void main() {
-    // Use base MeshStandardMaterial color as-is
-}
-`;
-
 // LOD level for props visibility
 export enum PropLOD {
   Near = 0,   // All props visible
@@ -987,7 +950,7 @@ export class PropManager {
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
   }
 
-  private bakeGeometryToWorld(source: THREE.Mesh, _name: string): THREE.BufferGeometry | null {
+  private bakeGeometryToWorld(source: THREE.Mesh): THREE.BufferGeometry | null {
     const geometry = source.geometry;
     if (!geometry) return null;
 
@@ -1245,14 +1208,13 @@ export class PropManager {
       }
 
       const buildMergedTemplate = (
-        includeTrunk: boolean,
-        _mergedName: string
+        includeTrunk: boolean
       ): THREE.BufferGeometry | null => {
         const bakedParts: THREE.BufferGeometry[] = [];
 
         if (includeTrunk) {
           for (let i = 0; i < trunkSources.length; i++) {
-            const baked = this.bakeGeometryToWorld(trunkSources[i], `ref_trunk_${i}`);
+            const baked = this.bakeGeometryToWorld(trunkSources[i]);
             if (!baked) continue;
             this.setGeometryVertexColor(baked, 0.6, 0.3, 0.15, 0.0);  // R>G = bark flag, alpha=0 → use baseColor
             ensureAttributes(baked);
@@ -1261,7 +1223,7 @@ export class PropManager {
         }
 
         for (let i = 0; i < bushSources.length; i++) {
-          const baked = this.bakeGeometryToWorld(bushSources[i], `ref_bush_${i}`);
+          const baked = this.bakeGeometryToWorld(bushSources[i]);
           if (!baked) continue;
           this.setGeometryVertexColor(baked, 0.2, 0.8, 0.2, 0.0);  // G>R = leaf flag, alpha=0 → use baseColor
           ensureAttributes(baked);
@@ -1283,8 +1245,8 @@ export class PropManager {
         return merged;
       };
 
-      const bushTemplate = buildMergedTemplate(false, "ref_bush_template");
-      const treeTemplate = buildMergedTemplate(true, "ref_tree_template");
+      const bushTemplate = buildMergedTemplate(false);
+      const treeTemplate = buildMergedTemplate(true);
 
       if (bushTemplate) {
         this.referenceTemplates.bush = bushTemplate;

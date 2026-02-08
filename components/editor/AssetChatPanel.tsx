@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import Image from "next/image";
 import {
   getAssetLibrary,
   SavedAsset,
@@ -448,10 +449,13 @@ export default function AssetChatPanel({
             >
               <p className="whitespace-pre-wrap">{msg.content}</p>
               {msg.assetPreview && (
-                <img
+                <Image
                   src={msg.assetPreview}
                   alt="Preview"
-                  className="mt-2 rounded max-w-full"
+                  width={512}
+                  height={512}
+                  unoptimized
+                  className="mt-2 rounded max-w-full h-auto"
                 />
               )}
             </div>

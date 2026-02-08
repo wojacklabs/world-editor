@@ -635,88 +635,6 @@ function setBarkVertexColors(geometry: THREE.BufferGeometry, seed: number, isBra
   geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
 }
 
-function setBushVertexColors(geometry: THREE.BufferGeometry, seed: number): void {
-  const positions = getPositions(geometry);
-  if (!positions) return;
-
-  const vertexCount = positions.length / 3;
-  const colors = new Float32Array(vertexCount * 4);
-
-  const sunBush = { r: 0.38, g: 0.55, b: 0.22 };
-  const shadeBush = { r: 0.15, g: 0.32, b: 0.10 };
-  const midBush = { r: 0.28, g: 0.45, b: 0.16 };
-  const yellowTint = { r: 0.42, g: 0.52, b: 0.18 };
-
-  let minY = Infinity, maxY = -Infinity;
-  let minX = Infinity, maxX = -Infinity;
-  let minZ = Infinity, maxZ = -Infinity;
-  for (let i = 0; i < positions.length; i += 3) {
-    const x = positions[i], y = positions[i + 1], z = positions[i + 2];
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (z < minZ) minZ = z;
-    if (z > maxZ) maxZ = z;
-  }
-  const heightRange = maxY - minY || 1;
-  const xRange = maxX - minX || 1;
-  const zRange = maxZ - minZ || 1;
-
-  for (let i = 0; i < vertexCount; i++) {
-    const x = positions[i * 3];
-    const y = positions[i * 3 + 1];
-    const z = positions[i * 3 + 2];
-
-    const heightT = (y - minY) / heightRange;
-    const xT = (x - minX) / xRange;
-    const zT = (z - minZ) / zRange;
-
-    const centerDistX = Math.abs(xT - 0.5) * 2;
-    const centerDistZ = Math.abs(zT - 0.5) * 2;
-    const edgeFactor = Math.max(centerDistX, centerDistZ);
-
-    const bushNoise = noise3D(x * 15 + seed, y * 15, z * 15 + seed * 0.7) * 0.5 + 0.5;
-    const varNoise = fbm3D(x * 6 + seed * 2, y * 6, z * 6, 2) * 0.5 + 0.5;
-
-    const sunExposure = (heightT * 0.6 + edgeFactor * 0.3 + varNoise * 0.2);
-
-    let r, g, b;
-    if (sunExposure > 0.6) {
-      const t = (sunExposure - 0.6) / 0.4;
-      r = midBush.r * (1 - t) + sunBush.r * t;
-      g = midBush.g * (1 - t) + sunBush.g * t;
-      b = midBush.b * (1 - t) + sunBush.b * t;
-    } else if (sunExposure > 0.3) {
-      const t = (sunExposure - 0.3) / 0.3;
-      r = shadeBush.r * (1 - t) + midBush.r * t;
-      g = shadeBush.g * (1 - t) + midBush.g * t;
-      b = shadeBush.b * (1 - t) + midBush.b * t;
-    } else {
-      r = shadeBush.r;
-      g = shadeBush.g;
-      b = shadeBush.b;
-    }
-
-    const yellowFactor = bushNoise * bushNoise * 0.2;
-    r = r * (1 - yellowFactor) + yellowTint.r * yellowFactor;
-    g = g * (1 - yellowFactor) + yellowTint.g * yellowFactor;
-    b = b * (1 - yellowFactor) + yellowTint.b * yellowFactor;
-
-    const microVar = (bushNoise - 0.5) * 0.06;
-    r = Math.max(0, Math.min(1, r + microVar * 0.5));
-    g = Math.max(0, Math.min(1, g + microVar));
-    b = Math.max(0, Math.min(1, b + microVar * 0.3));
-
-    colors[i * 4] = r;
-    colors[i * 4 + 1] = g;
-    colors[i * 4 + 2] = b;
-    colors[i * 4 + 3] = 1.0;
-  }
-
-  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
-}
-
 function setLeafVertexColors(geometry: THREE.BufferGeometry, seed: number, isTop: boolean = false): void {
   const positions = getPositions(geometry);
   if (!positions) return;
@@ -790,59 +708,6 @@ function setLeafVertexColors(geometry: THREE.BufferGeometry, seed: number, isTop
 // ============================================
 // Geometry Transform Helpers
 // ============================================
-
-/**
- * Compute normals from positions and indices.
- */
-function computeNormals(
-  positions: Float32Array | number[],
-  indices: number[] | Uint16Array | Uint32Array,
-  normals: Float32Array | number[]
-): void {
-  for (let i = 0; i < normals.length; i++) normals[i] = 0;
-
-  for (let i = 0; i < indices.length; i += 3) {
-    const i0 = indices[i];
-    const i1 = indices[i + 1];
-    const i2 = indices[i + 2];
-
-    const ax = positions[i0 * 3], ay = positions[i0 * 3 + 1], az = positions[i0 * 3 + 2];
-    const bx = positions[i1 * 3], by = positions[i1 * 3 + 1], bz = positions[i1 * 3 + 2];
-    const cx = positions[i2 * 3], cy = positions[i2 * 3 + 1], cz = positions[i2 * 3 + 2];
-
-    const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
-    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
-
-    const nx = e1y * e2z - e1z * e2y;
-    const ny = e1z * e2x - e1x * e2z;
-    const nz = e1x * e2y - e1y * e2x;
-
-    for (const idx of [i0, i1, i2]) {
-      normals[idx * 3] += nx;
-      normals[idx * 3 + 1] += ny;
-      normals[idx * 3 + 2] += nz;
-    }
-  }
-
-  for (let i = 0; i < normals.length; i += 3) {
-    const nx = normals[i], ny = normals[i + 1], nz = normals[i + 2];
-    const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-    normals[i] = nx / len;
-    normals[i + 1] = ny / len;
-    normals[i + 2] = nz / len;
-  }
-}
-
-/**
- * Apply a matrix transform to geometry positions and normals in-place,
- * then bake into the attribute buffers. Used before merging geometries.
- */
-function applyTransformToGeometry(
-  geometry: THREE.BufferGeometry,
-  matrix: THREE.Matrix4
-): void {
-  geometry.applyMatrix4(matrix);
-}
 
 /**
  * Ensure a geometry has all required attributes for merging (position, normal, uv, color).
@@ -933,7 +798,7 @@ export class ProceduralAssetGenerator {
     return n - Math.floor(n);
   }
 
-  private bakeMeshToWorld(mesh: THREE.Mesh, _name: string): THREE.BufferGeometry | null {
+  private bakeMeshToWorld(mesh: THREE.Mesh): THREE.BufferGeometry | null {
     const geometry = mesh.geometry;
     if (!geometry) return null;
     const positions = geometry.getAttribute("position");
@@ -1061,8 +926,7 @@ export class ProceduralAssetGenerator {
 
   private createReferenceVariationGeometry(
     assetType: "tree" | "bush",
-    seed: number,
-    _size: number
+    seed: number
   ): THREE.BufferGeometry | null {
     const template = this.referenceTemplates[assetType];
     if (!template) {
@@ -1155,7 +1019,7 @@ export class ProceduralAssetGenerator {
 
         if (includeTrunk) {
           for (let i = 0; i < trunkSources.length; i++) {
-            const baked = this.bakeMeshToWorld(trunkSources[i], `loader_ref_trunk_${i}`);
+            const baked = this.bakeMeshToWorld(trunkSources[i]);
             if (!baked) continue;
             setGeometryVertexColor(baked, 0.44, 0.32, 0.18);
             ensureAttributes(baked);
@@ -1164,7 +1028,7 @@ export class ProceduralAssetGenerator {
         }
 
         for (let i = 0; i < bushSources.length; i++) {
-          const baked = this.bakeMeshToWorld(bushSources[i], `loader_ref_bush_${i}`);
+          const baked = this.bakeMeshToWorld(bushSources[i]);
           if (!baked) continue;
           setGeometryVertexColor(baked, 0.23, 0.48, 0.2);
           ensureAttributes(baked);
@@ -1270,14 +1134,14 @@ export class ProceduralAssetGenerator {
       case "rock":
         geometry = this.generateRock(params);
         break;
-      case "tree":
+          case "tree":
         geometry =
-          this.createReferenceVariationGeometry("tree", params.seed, params.size) ??
+          this.createReferenceVariationGeometry("tree", params.seed) ??
           this.generateTree(params);
         break;
       case "bush":
         geometry =
-          this.createReferenceVariationGeometry("bush", params.seed, params.size) ??
+          this.createReferenceVariationGeometry("bush", params.seed) ??
           this.generateBush(params);
         break;
       case "grass_clump":
