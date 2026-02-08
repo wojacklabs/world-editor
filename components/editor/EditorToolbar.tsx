@@ -46,24 +46,24 @@ export default function EditorToolbar({
   };
 
   const buttonBase = "px-3 py-1.5 text-[12px] rounded-md transition-all";
-  const buttonDefault = `${buttonBase} text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800`;
+  const buttonDefault = `${buttonBase} text-slate-300 hover:text-white hover:bg-slate-800/70`;
   const buttonDisabled = "opacity-40 pointer-events-none";
 
   return (
-    <header className="h-12 bg-zinc-950 border-b border-zinc-800/60 flex items-center px-2 sm:px-3 gap-1.5 sm:gap-2">
+    <header className="h-14 editor-surface border-0 border-b border-slate-700/40 flex items-center px-2.5 sm:px-3.5 gap-1.5 sm:gap-2">
       <div className="flex items-center gap-2 min-w-0">
-        <span className="hidden md:block text-sm font-medium text-zinc-200">World Editor</span>
-        <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 whitespace-nowrap">
+        <span className="hidden md:block text-[14px] font-semibold tracking-tight text-slate-100">World Editor</span>
+        <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800/80 text-slate-300 whitespace-nowrap border border-slate-700/60">
           {TOOL_LABEL[activeTool]}
         </span>
       </div>
 
-      <div className="hidden lg:flex items-center gap-1 border border-zinc-800/70 rounded-lg p-0.5">
+      <div className="hidden lg:flex items-center gap-1 bg-slate-900/70 border border-slate-700/60 rounded-xl p-0.5">
         <button
           onClick={onToggleLeftPanel}
           disabled={isGameMode}
           className={`px-2.5 py-1.5 text-[11px] rounded-md transition-all ${
-            leftPanelVisible ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-300"
+            leftPanelVisible ? "bg-slate-700/80 text-slate-100" : "text-slate-400 hover:text-slate-200"
           } ${isGameMode ? buttonDisabled : ""}`}
         >
           Tools
@@ -72,14 +72,14 @@ export default function EditorToolbar({
           onClick={onToggleRightPanel}
           disabled={isGameMode}
           className={`px-2.5 py-1.5 text-[11px] rounded-md transition-all ${
-            rightPanelVisible ? "bg-zinc-800 text-zinc-200" : "text-zinc-500 hover:text-zinc-300"
+            rightPanelVisible ? "bg-slate-700/80 text-slate-100" : "text-slate-400 hover:text-slate-200"
           } ${isGameMode ? buttonDisabled : ""}`}
         >
           Inspector
         </button>
       </div>
 
-      <div className="hidden lg:block w-px h-5 bg-zinc-800/70" />
+      <div className="hidden lg:block w-px h-5 bg-slate-700/70" />
 
       <div className="flex items-center gap-1">
         <button
@@ -145,10 +145,10 @@ export default function EditorToolbar({
 
       <button
         onClick={onToggleGameMode}
-        className={`px-3 sm:px-4 py-1.5 text-[12px] rounded-md transition-all ${
+        className={`px-3 sm:px-4 py-1.5 text-[12px] rounded-md transition-all border ${
           isGameMode
-            ? "bg-zinc-100 text-zinc-900 hover:bg-white"
-            : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-white"
+            ? "bg-sky-200 text-slate-950 border-sky-100 hover:bg-sky-100"
+            : "bg-slate-800 text-slate-100 border-slate-700 hover:bg-slate-700"
         }`}
       >
         {isGameMode ? "Exit" : "Play"}

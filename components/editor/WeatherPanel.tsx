@@ -84,16 +84,16 @@ export default function WeatherPanel() {
   } = useEditorStore();
 
   return (
-    <section className="p-3 space-y-4">
+    <section className="space-y-4">
       {/* Time of Day */}
       <div>
-        <h3 className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide mb-3">
+        <h3 className="text-[11px] font-medium text-slate-400 tracking-[0.04em] mb-3">
           Time of Day
         </h3>
         <div className="space-y-2">
-          <div className="flex justify-between text-[11px]">
-            <span className="text-zinc-400">{formatTime(weather.timeOfDay)}</span>
-            <span className="text-zinc-500">{getTimeLabel(weather.timeOfDay)}</span>
+          <div className="flex justify-between text-xs">
+            <span className="text-slate-200">{formatTime(weather.timeOfDay)}</span>
+            <span className="text-slate-400">{getTimeLabel(weather.timeOfDay)}</span>
           </div>
           <input
             type="range"
@@ -102,9 +102,9 @@ export default function WeatherPanel() {
             step="0.1"
             value={weather.timeOfDay}
             onChange={(e) => setTimeOfDay(parseFloat(e.target.value))}
-            className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-zinc-300"
+            className="w-full h-1.5 bg-slate-800/90 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:bg-slate-200 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-white"
           />
-          <div className="flex justify-between text-[9px] text-zinc-600">
+          <div className="flex justify-between text-[10px] text-slate-500">
             <span>00:00</span>
             <span>06:00</span>
             <span>12:00</span>
@@ -116,18 +116,18 @@ export default function WeatherPanel() {
 
       {/* Weather Presets */}
       <div>
-        <h3 className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide mb-2">
+        <h3 className="text-[11px] font-medium text-slate-400 tracking-[0.04em] mb-2">
           Weather
         </h3>
         <div className="grid grid-cols-5 gap-1">
           {WEATHER_PRESETS.map((preset) => (
             <button
-              key={preset.id}
-              onClick={() => setWeatherPreset(preset.id)}
-              className={`flex flex-col items-center gap-1 py-2 rounded-lg transition-all ${
+            key={preset.id}
+            onClick={() => setWeatherPreset(preset.id)}
+              className={`flex flex-col items-center gap-1 py-2 rounded-lg border transition-all ${
                 weather.weatherPreset === preset.id
-                  ? "bg-zinc-800 text-zinc-200"
-                  : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-900"
+                  ? "bg-slate-700/75 border-slate-600 text-slate-100"
+                  : "bg-slate-900/45 border-slate-700/50 text-slate-400 hover:text-slate-200"
               }`}
               title={preset.label}
             >
@@ -140,9 +140,9 @@ export default function WeatherPanel() {
 
       {/* Cloud Coverage */}
       <div>
-        <div className="flex justify-between text-[11px] mb-2">
-          <span className="text-zinc-500">Cloud Coverage</span>
-          <span className="text-zinc-400 tabular-nums">{Math.round(weather.cloudCoverage * 100)}%</span>
+        <div className="flex justify-between text-xs mb-2">
+          <span className="text-slate-400">Cloud Coverage</span>
+          <span className="text-slate-200 tabular-nums">{Math.round(weather.cloudCoverage * 100)}%</span>
         </div>
         <input
           type="range"
@@ -151,20 +151,20 @@ export default function WeatherPanel() {
           step="0.05"
           value={weather.cloudCoverage}
           onChange={(e) => setCloudCoverage(parseFloat(e.target.value))}
-          className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-zinc-300"
+          className="w-full h-1.5 bg-slate-800/90 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:bg-slate-200 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-white"
         />
       </div>
 
       {/* Wind Controls */}
       <div>
-        <h3 className="text-[11px] font-medium text-zinc-500 uppercase tracking-wide mb-3">
+        <h3 className="text-[11px] font-medium text-slate-400 tracking-[0.04em] mb-3">
           Wind
         </h3>
         <div className="space-y-3">
           <div>
-            <div className="flex justify-between text-[11px] mb-2">
-              <span className="text-zinc-500">Speed</span>
-              <span className="text-zinc-400 tabular-nums">{Math.round(weather.windSpeed * 100)}%</span>
+            <div className="flex justify-between text-xs mb-2">
+              <span className="text-slate-400">Speed</span>
+              <span className="text-slate-200 tabular-nums">{Math.round(weather.windSpeed * 100)}%</span>
             </div>
             <input
               type="range"
@@ -173,13 +173,13 @@ export default function WeatherPanel() {
               step="0.05"
               value={weather.windSpeed}
               onChange={(e) => setWindSpeed(parseFloat(e.target.value))}
-              className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-zinc-300"
+              className="w-full h-1.5 bg-slate-800/90 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:bg-slate-200 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-white"
             />
           </div>
           <div>
-            <div className="flex justify-between text-[11px] mb-2">
-              <span className="text-zinc-500">Direction</span>
-              <span className="text-zinc-400 tabular-nums">{Math.round(weather.windDirection)}&deg;</span>
+            <div className="flex justify-between text-xs mb-2">
+              <span className="text-slate-400">Direction</span>
+              <span className="text-slate-200 tabular-nums">{Math.round(weather.windDirection)}&deg;</span>
             </div>
             <input
               type="range"
@@ -188,7 +188,7 @@ export default function WeatherPanel() {
               step="5"
               value={weather.windDirection}
               onChange={(e) => setWindDirection(parseInt(e.target.value))}
-              className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-zinc-300"
+              className="w-full h-1.5 bg-slate-800/90 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:bg-slate-200 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-white"
             />
           </div>
         </div>
@@ -196,9 +196,9 @@ export default function WeatherPanel() {
 
       {/* Fog Density */}
       <div>
-        <div className="flex justify-between text-[11px] mb-2">
-          <span className="text-zinc-500">Fog Density</span>
-          <span className="text-zinc-400 tabular-nums">{(weather.fogDensity * 1000).toFixed(1)}</span>
+        <div className="flex justify-between text-xs mb-2">
+          <span className="text-slate-400">Fog Density</span>
+          <span className="text-slate-200 tabular-nums">{(weather.fogDensity * 1000).toFixed(1)}</span>
         </div>
         <input
           type="range"
@@ -207,7 +207,7 @@ export default function WeatherPanel() {
           step="0.001"
           value={weather.fogDensity}
           onChange={(e) => setFogDensity(parseFloat(e.target.value))}
-          className="w-full h-1 bg-zinc-800 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-zinc-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-zinc-300"
+          className="w-full h-1.5 bg-slate-800/90 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:bg-slate-200 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:hover:bg-white"
         />
       </div>
     </section>

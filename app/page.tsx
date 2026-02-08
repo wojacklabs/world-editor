@@ -603,7 +603,7 @@ export default function EditorPage() {
   }, [handleToggleGameMode, isGameMode, selectedAssetId, handleDeleteAsset]);
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden">
+    <div className="editor-shell flex flex-col h-screen w-screen overflow-hidden">
       <EditorToolbar
         engine={engine}
         isGameMode={isGameMode}

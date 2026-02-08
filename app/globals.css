@@ -1,8 +1,19 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #090c13;
+  --foreground: #e5e7eb;
+  --editor-surface: rgba(12, 16, 24, 0.86);
+  --editor-surface-strong: rgba(17, 23, 34, 0.92);
+  --editor-surface-soft: rgba(20, 28, 42, 0.62);
+  --editor-border: rgba(148, 163, 184, 0.22);
+  --editor-border-soft: rgba(148, 163, 184, 0.12);
+  --editor-text: #e2e8f0;
+  --editor-text-dim: #94a3b8;
+  --editor-text-muted: #64748b;
+  --editor-accent: #7dd3fc;
+  --editor-accent-ink: #082f49;
+  --editor-accent-soft: rgba(125, 211, 252, 0.18);
 }
 
 @theme inline {
@@ -14,13 +25,56 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: #090c13;
+    --foreground: #e5e7eb;
   }
 }
 
 body {
-  background: var(--background);
+  background:
+    radial-gradient(1200px 700px at 50% -20%, rgba(56, 189, 248, 0.08), transparent 55%),
+    radial-gradient(1000px 700px at 110% 120%, rgba(59, 130, 246, 0.07), transparent 55%),
+    var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), "IBM Plex Sans", "Manrope", "Inter", sans-serif;
+  letter-spacing: 0.01em;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+.editor-shell {
+  background: linear-gradient(180deg, rgba(9, 12, 19, 0.96) 0%, rgba(7, 10, 16, 0.96) 100%);
+}
+
+.editor-surface {
+  background: var(--editor-surface);
+  border: 1px solid var(--editor-border-soft);
+  backdrop-filter: blur(12px);
+}
+
+.editor-card {
+  background: var(--editor-surface-soft);
+  border: 1px solid var(--editor-border-soft);
+  border-radius: 12px;
+}
+
+.editor-label {
+  color: var(--editor-text-dim);
+  font-size: 11px;
+}
+
+.editor-input {
+  background: rgba(15, 23, 36, 0.72);
+  border: 1px solid var(--editor-border-soft);
+  color: var(--editor-text);
+  border-radius: 9px;
+}
+
+.editor-input:focus {
+  outline: none;
+  border-color: rgba(125, 211, 252, 0.45);
+  box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.22);
 }
