@@ -1252,8 +1252,8 @@ export class FoliageSystem {
         let value = 0;
         let amplitude = 0.5;
         let frequency = 1;
-        let px = nx * 4;
-        let py = ny * 4;
+        const px = nx * 4;
+        const py = ny * 4;
 
         for (let i = 0; i < 3; i++) {
           const noiseVal = this.tileableNoise2D(px * frequency, py * frequency, 4);

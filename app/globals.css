@@ -3,6 +3,8 @@
 :root {
   --background: #090c13;
   --foreground: #e5e7eb;
+  --font-geist-sans: "IBM Plex Sans", "Manrope", "Inter", sans-serif;
+  --font-geist-mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --editor-surface: rgba(12, 16, 24, 0.86);
   --editor-surface-strong: rgba(17, 23, 34, 0.92);
   --editor-surface-soft: rgba(20, 28, 42, 0.62);

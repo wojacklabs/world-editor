@@ -7,7 +7,15 @@ import { disposeMesh } from "../../shared/rendering/threeHelpers";
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
-import type { BrushSettings, ToolType, HeightmapTool, MaterialType, WaterType, WeatherState, WeatherPreset } from "../types/EditorTypes";
+import type {
+  BrushSettings,
+  HeightmapTool,
+  MaterialType,
+  ProceduralAssetType,
+  WaterType,
+  WeatherPreset,
+  WeatherState,
+} from "../types/EditorTypes";
 import { Heightmap } from "../terrain/Heightmap";
 import { TerrainMesh } from "../terrain/TerrainMesh";
 import { createTerrainMaterial, createSplatTexture } from "../terrain/TerrainShader";
@@ -15,6 +23,7 @@ import { SplatMap } from "../terrain/SplatMap";
 import { BiomeDecorator } from "../terrain/BiomeDecorator";
 import { GamePreview } from "./GamePreview";
 import { PropManager } from "../props/PropManager";
+import type { SerializedProceduralPropInstance } from "../props/PropManager";
 import { FoliageSystem } from "../foliage/FoliageSystem";
 import { ImpostorSystem } from "../foliage/ImpostorSystem";
 import { initializeKTX2Support } from "./KTX2Setup";
@@ -725,13 +734,13 @@ export class EditorEngine {
 
   // Prop placement and preview
   createPropPreview(
-    type: string,
+    type: ProceduralAssetType,
     size: number,
     seed?: number,
     customSettings?: { length?: number; width?: number; height?: number; baySize?: number }
   ): void {
     if (!this.propManager) return;
-    this.propManager.createPreview(type as any, size, seed, customSettings);
+    this.propManager.createPreview(type, size, seed, customSettings);
   }
 
   randomizePropPreview(): number {
@@ -1355,7 +1364,7 @@ export class EditorEngine {
   /**
    * Export procedural props data for saving
    */
-  exportProceduralProps(): any[] | null {
+  exportProceduralProps(): SerializedProceduralPropInstance[] | null {
     if (!this.propManager) return null;
     return this.propManager.exportInstances();
   }
@@ -1363,7 +1372,7 @@ export class EditorEngine {
   /**
    * Import procedural props data from save
    */
-  importProceduralProps(data: any[]): void {
+  importProceduralProps(data: SerializedProceduralPropInstance[]): void {
     if (!this.propManager) return;
     this.propManager.importInstances(data);
   }
@@ -1963,7 +1972,7 @@ export class EditorEngine {
 
     // Update game camera if in game mode
     if (this.isGameMode && this.gamePreview) {
-      const gameCamera = this.gamePreview.getCamera() as THREE.PerspectiveCamera | null;
+      const gameCamera = this.gamePreview.getCamera();
       if (gameCamera) {
         gameCamera.aspect = width / height;
         gameCamera.updateProjectionMatrix();

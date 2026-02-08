@@ -17,6 +17,8 @@ interface WeatherConfig {
   sunIntensityMultiplier: number;
 }
 
+type SyncedUniformValue = number | THREE.Color | THREE.Vector3;
+
 const WEATHER_PRESETS: Record<WeatherPreset, WeatherConfig> = {
   clear: {
     cloudCoverage: 0.2,
@@ -350,13 +352,18 @@ export class SkyWeatherSystem {
   /**
    * Sync uniforms to an external Three.js ShaderMaterial.
    */
-  private syncExternalMaterial(material: THREE.ShaderMaterial, uniforms: Record<string, any>): void {
+  private syncExternalMaterial(
+    material: THREE.ShaderMaterial,
+    uniforms: Record<string, SyncedUniformValue>
+  ): void {
     for (const [key, val] of Object.entries(uniforms)) {
       const u = material.uniforms[key];
       if (!u) continue;
       if (typeof val === "number") {
         u.value = val;
-      } else if (val && typeof val.clone === "function") {
+      } else if (u.value instanceof THREE.Color && val instanceof THREE.Color) {
+        u.value.copy(val);
+      } else if (u.value instanceof THREE.Vector3 && val instanceof THREE.Vector3) {
         u.value.copy(val);
       }
     }
@@ -499,15 +506,15 @@ export class SkyWeatherSystem {
     return { ...this.state };
   }
 
-  getSunDirection(): any {
+  getSunDirection(): THREE.Vector3 {
     return this.sunDirection.clone();
   }
 
-  getSunColor(): any {
+  getSunColor(): THREE.Color {
     return this.sunColor.clone();
   }
 
-  getFogColor(): any {
+  getFogColor(): THREE.Color {
     return this.fogColor.clone();
   }
 
@@ -523,11 +530,11 @@ export class SkyWeatherSystem {
     return this.nightFactor;
   }
 
-  getSkyHorizonColor(): any {
+  getSkyHorizonColor(): THREE.Color {
     return this.skyShader?.getHorizonColor() || this.fogColor;
   }
 
-  getSkyZenithColor(): any {
+  getSkyZenithColor(): THREE.Color {
     return this.skyShader?.getZenithColor() || new THREE.Color(0.35, 0.55, 0.9);
   }
 

@@ -127,21 +127,13 @@ export class GamePreview {
     } else {
       // Fallback: manual sync if no weather system
       // Sync terrain shader fog with scene fog (same color = seamless blend)
-      if (this.originalMesh && this.originalMesh.material) {
-        const material = this.originalMesh.material as any;
-        if (material.uniforms) {
-          if (material.uniforms.uFogDensity) material.uniforms.uFogDensity.value = fogDensity;
-          if (material.uniforms.uFogColor) material.uniforms.uFogColor.value.set(skyColor.r, skyColor.g, skyColor.b);
-        }
+      if (this.originalMesh) {
+        this.applyFogUniforms(this.originalMesh.material, fogDensity, skyColor);
       }
 
       // Also apply to terrainMeshRef if available
       if (this.terrainMeshRef) {
-        const material = this.terrainMeshRef.getMaterial() as any;
-        if (material?.uniforms) {
-          if (material.uniforms.uFogDensity) material.uniforms.uFogDensity.value = fogDensity;
-          if (material.uniforms.uFogColor) material.uniforms.uFogColor.value.set(skyColor.r, skyColor.g, skyColor.b);
-        }
+        this.applyFogUniforms(this.terrainMeshRef.getMaterial(), fogDensity, skyColor);
       }
 
       // Sync foliage system fog with scene fog for consistent blending
@@ -189,12 +181,8 @@ export class GamePreview {
     // Re-enable terrain LOD and restore shader fog settings
     if (this.terrainMeshRef) {
       this.terrainMeshRef.setLODEnabled(true);
-      const material = this.terrainMeshRef.getMaterial() as any;
-      if (material?.uniforms) {
-        // Restore original fog values from TerrainShader.ts
-        if (material.uniforms.uFogDensity) material.uniforms.uFogDensity.value = 0.008;
-        if (material.uniforms.uFogColor) material.uniforms.uFogColor.value.set(0.6, 0.75, 0.9);
-      }
+      // Restore original fog values from TerrainShader.ts
+      this.applyFogUniforms(this.terrainMeshRef.getMaterial(), 0.008, new THREE.Color(0.6, 0.75, 0.9));
     }
 
     // Remove unified water and restore original
@@ -408,7 +396,34 @@ export class GamePreview {
     }
   }
 
-  getCamera(): any {
+  private getShaderMaterial(
+    material: THREE.Material | THREE.Material[] | null | undefined
+  ): THREE.ShaderMaterial | null {
+    if (!material || Array.isArray(material)) return null;
+    if (!(material instanceof THREE.ShaderMaterial)) return null;
+    return material;
+  }
+
+  private applyFogUniforms(
+    material: THREE.Material | THREE.Material[] | null | undefined,
+    fogDensity: number,
+    fogColor: THREE.Color
+  ): void {
+    const shaderMaterial = this.getShaderMaterial(material);
+    if (!shaderMaterial?.uniforms) return;
+
+    const fogDensityUniform = shaderMaterial.uniforms.uFogDensity as THREE.IUniform<number> | undefined;
+    if (fogDensityUniform) {
+      fogDensityUniform.value = fogDensity;
+    }
+
+    const fogColorUniform = shaderMaterial.uniforms.uFogColor as THREE.IUniform<THREE.Color> | undefined;
+    if (fogColorUniform?.value instanceof THREE.Color) {
+      fogColorUniform.value.copy(fogColor);
+    }
+  }
+
+  getCamera(): THREE.PerspectiveCamera | null {
     return this.camera;
   }
 }

@@ -788,6 +788,42 @@ export interface PropInstance {
   visible: boolean;  // For LOD-based visibility
 }
 
+interface SerializedVector3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+interface SerializedColor {
+  r: number;
+  g: number;
+  b: number;
+}
+
+export interface SerializedProceduralPropParams {
+  type: AssetType;
+  seed: number;
+  size: number;
+  sizeVariation: number;
+  noiseScale: number;
+  noiseAmplitude: number;
+  length?: number;
+  width?: number;
+  height?: number;
+  baySize?: number;
+  colorBase: SerializedColor;
+  colorDetail: SerializedColor;
+}
+
+export interface SerializedProceduralPropInstance {
+  id: string;
+  assetType: AssetType;
+  params: SerializedProceduralPropParams;
+  position: SerializedVector3;
+  rotation: SerializedVector3;
+  scale: SerializedVector3;
+}
+
 /**
  * Ensure a geometry has all required attributes for instanced rendering.
  * Adds missing color attribute if absent.
@@ -2802,7 +2838,7 @@ export class PropManager {
   }
 
   // Export instances for saving
-  exportInstances(): any[] {
+  exportInstances(): SerializedProceduralPropInstance[] {
     return Array.from(this.instances.values()).map((inst) => ({
       id: inst.id,
       assetType: inst.assetType,
@@ -2835,7 +2871,7 @@ export class PropManager {
   }
 
   // Import instances from saved data
-  importInstances(data: any[]): void {
+  importInstances(data: SerializedProceduralPropInstance[]): void {
     // Clear existing
     this.clearAll();
 
@@ -2874,7 +2910,7 @@ export class PropManager {
       const instance: PropInstance = {
         id: item.id,
         groupKey,
-        assetType: item.assetType as AssetType,
+        assetType: item.assetType,
         variationIndex,
         params,
         position: new THREE.Vector3(item.position.x, item.position.y, item.position.z),

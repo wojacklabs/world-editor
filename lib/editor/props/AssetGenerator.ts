@@ -19,7 +19,7 @@ export class AssetGenerator {
   }
 
   // Generate/regenerate the asset
-  generate(): any {
+  generate(): THREE.Mesh {
     if (this.currentAsset) {
       this.currentAsset.dispose();
     }
@@ -33,13 +33,13 @@ export class AssetGenerator {
   }
 
   // Randomize seed (dice button)
-  randomize(): any {
+  randomize(): THREE.Mesh {
     this.params.seed = Math.random() * 10000;
     return this.generate();
   }
 
   // Set asset type
-  setType(type: AssetType): any {
+  setType(type: AssetType): THREE.Mesh {
     // Keep some params, reset type-specific ones
     const currentSize = this.params.size;
     this.params = { ...DEFAULT_ASSET_PARAMS[type] };
@@ -49,37 +49,37 @@ export class AssetGenerator {
   }
 
   // Set size
-  setSize(size: number): any {
+  setSize(size: number): THREE.Mesh {
     this.params.size = Math.max(0.1, Math.min(10, size));
     return this.generate();
   }
 
   // Set size variation
-  setSizeVariation(variation: number): any {
+  setSizeVariation(variation: number): THREE.Mesh {
     this.params.sizeVariation = Math.max(0, Math.min(1, variation));
     return this.generate();
   }
 
   // Set noise scale
-  setNoiseScale(scale: number): any {
+  setNoiseScale(scale: number): THREE.Mesh {
     this.params.noiseScale = Math.max(0.5, Math.min(10, scale));
     return this.generate();
   }
 
   // Set noise amplitude
-  setNoiseAmplitude(amplitude: number): any {
+  setNoiseAmplitude(amplitude: number): THREE.Mesh {
     this.params.noiseAmplitude = Math.max(0, Math.min(0.5, amplitude));
     return this.generate();
   }
 
   // Set base color
-  setColorBase(color: THREE.Color): any {
+  setColorBase(color: THREE.Color): THREE.Mesh {
     this.params.colorBase = color;
     return this.generate();
   }
 
   // Set detail color
-  setColorDetail(color: THREE.Color): any {
+  setColorDetail(color: THREE.Color): THREE.Mesh {
     this.params.colorDetail = color;
     return this.generate();
   }
@@ -90,7 +90,7 @@ export class AssetGenerator {
   }
 
   // Set all params at once
-  setParams(params: Partial<AssetParams>): any {
+  setParams(params: Partial<AssetParams>): THREE.Mesh {
     this.params = { ...this.params, ...params };
     return this.generate();
   }
@@ -101,7 +101,7 @@ export class AssetGenerator {
   }
 
   // Get current mesh
-  getMesh(): any {
+  getMesh(): THREE.Mesh | null {
     return this.currentMesh;
   }
 

@@ -967,7 +967,7 @@ export class ProceduralAsset {
     this.params = { ...params };
   }
 
-  generate(): any {
+  generate(): THREE.Mesh {
     this.dispose();
 
     let geometry: THREE.BufferGeometry | null = null;
@@ -1790,7 +1790,7 @@ export class ProceduralAsset {
     }
   }
 
-  getMesh(): any {
+  getMesh(): THREE.Mesh | null {
     return this.mesh;
   }
 
