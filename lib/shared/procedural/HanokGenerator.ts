@@ -31,6 +31,15 @@ interface NormalizedDimensions {
 }
 
 type PlanCell = "ondol" | "daecheong" | "kitchen" | "storage";
+type HanokWingRole = "main" | "auxiliary";
+
+interface HanokLinearOptions {
+  wingRole?: HanokWingRole;
+  includeKitchen?: boolean;
+  includeChimney?: boolean;
+  includeFrontMaru?: boolean;
+  includeRearWindows?: boolean;
+}
 
 const COLORS = {
   foundation: new THREE.Color(0.40, 0.37, 0.33),
@@ -269,29 +278,42 @@ function normalizeHouseDimensions(input: StructureDimensions): NormalizedDimensi
   };
 }
 
-function buildPlanGrid(xBays: number, zBays: number, seed: number): PlanCell[][] {
+function buildPlanGrid(
+  xBays: number,
+  zBays: number,
+  seed: number,
+  wingRole: HanokWingRole
+): PlanCell[][] {
   const grid: PlanCell[][] = Array.from({ length: xBays }, () =>
     Array<PlanCell>(zBays).fill("ondol")
   );
 
-  grid[0][0] = "kitchen";
+  if (wingRole === "main") {
+    grid[0][0] = "kitchen";
+  } else {
+    grid[0][0] = "storage";
+  }
 
-  const daeSpan = xBays >= 6 ? 2 : 1;
+  const daeSpan = wingRole === "main" && xBays >= 6 ? 2 : 1;
   const daeStart = clamp(Math.floor((xBays - daeSpan) / 2), 1, xBays - daeSpan - 1);
-  const daeDepth = zBays >= 3 ? 2 : 1;
+  const daeDepth = wingRole === "main" && zBays >= 3 ? 2 : 1;
   for (let x = daeStart; x < daeStart + daeSpan; x++) {
     for (let z = 0; z < daeDepth; z++) {
       grid[x][z] = "daecheong";
     }
   }
 
-  if (xBays >= 4) {
+  if (wingRole === "main" && xBays >= 4) {
     grid[xBays - 1][0] = "storage";
   }
 
   if (xBays >= 5 && zBays >= 3) {
     const extraX = 1 + Math.floor(seeded01(seed + 19.7) * Math.max(1, xBays - 3));
     grid[extraX][zBays - 1] = "storage";
+  }
+
+  if (wingRole === "auxiliary" && xBays >= 3) {
+    grid[xBays - 1][zBays - 1] = "storage";
   }
 
   return grid;
@@ -301,10 +323,223 @@ function isStructureType(cell: PlanCell): boolean {
   return cell === "ondol" || cell === "storage" || cell === "kitchen";
 }
 
+function pushGiwaRoof(
+  geometries: THREE.BufferGeometry[],
+  length: number,
+  width: number,
+  foundationHeight: number,
+  wallHeight: number,
+  baySize: number,
+  seed: number,
+  wingRole: HanokWingRole
+): void {
+  const isMainWing = wingRole === "main";
+  const eave = isMainWing
+    ? clamp(0.78 + baySize * 0.08, 0.75, 1.28)
+    : clamp(0.62 + baySize * 0.06, 0.55, 1.02);
+  const roofLength = length + eave * 2;
+  const roofSpan = width + eave * 2;
+  const roofBaseY = foundationHeight + wallHeight + 0.02;
+  const roofRise = wallHeight * (isMainWing ? 0.72 : 0.60) + seeded01(seed + 4.4) * 0.18;
+  const slopeAngle = Math.atan2(roofRise, roofSpan * 0.5);
+
+  const ridgeLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY + roofRise, 0);
+  const ridgeRight = new THREE.Vector3(roofLength * 0.5, roofBaseY + roofRise, 0);
+  const frontLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
+  const frontRight = new THREE.Vector3(roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
+  const backLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, roofSpan * 0.5);
+  const backRight = new THREE.Vector3(roofLength * 0.5, roofBaseY, roofSpan * 0.5);
+
+  geometries.push(createQuad(ridgeLeft, ridgeRight, frontRight, frontLeft, COLORS.giwaRoof));
+  geometries.push(createQuad(ridgeLeft, ridgeRight, backRight, backLeft, COLORS.giwaRoof));
+  geometries.push(createTriangle(frontLeft, ridgeLeft, backLeft, COLORS.giwaRoof));
+  geometries.push(createTriangle(frontRight, ridgeRight, backRight, COLORS.giwaRoof));
+
+  const tileRows = Math.max(8, Math.round((roofSpan * 0.5) / (isMainWing ? 0.16 : 0.20)));
+  for (let side = -1; side <= 1; side += 2) {
+    for (let i = 0; i < tileRows; i++) {
+      const t = (i + 0.45) / tileRows;
+      const eaveLift = Math.pow(1 - t, 1.45);
+      const y = roofBaseY + roofRise * (1 - t) + eaveLift * 0.12;
+      const z = side * (roofSpan * 0.5 * t);
+      const pitch = (side < 0 ? -1 : 1) * slopeAngle * (0.76 + t * 0.3);
+      const tileThickness = 0.042 + eaveLift * 0.016;
+      geometries.push(
+        createBox(
+          roofLength * 0.987,
+          tileThickness,
+          0.115,
+          new THREE.Vector3(0, y, z),
+          COLORS.giwaTile,
+          new THREE.Euler(pitch, 0, 0)
+        )
+      );
+    }
+  }
+
+  geometries.push(
+    createCylinder(
+      isMainWing ? 0.11 : 0.09,
+      isMainWing ? 0.11 : 0.09,
+      roofLength * 1.01,
+      12,
+      new THREE.Vector3(0, roofBaseY + roofRise + 0.05, 0),
+      COLORS.giwaTile,
+      new THREE.Euler(0, 0, Math.PI * 0.5)
+    )
+  );
+
+  const eaveRodRadius = isMainWing ? 0.045 : 0.036;
+  geometries.push(
+    createCylinder(
+      eaveRodRadius,
+      eaveRodRadius,
+      roofLength * 0.985,
+      10,
+      new THREE.Vector3(0, roofBaseY + 0.02, -roofSpan * 0.5),
+      COLORS.giwaTile,
+      new THREE.Euler(0, 0, Math.PI * 0.5)
+    )
+  );
+  geometries.push(
+    createCylinder(
+      eaveRodRadius,
+      eaveRodRadius,
+      roofLength * 0.985,
+      10,
+      new THREE.Vector3(0, roofBaseY + 0.02, roofSpan * 0.5),
+      COLORS.giwaTile,
+      new THREE.Euler(0, 0, Math.PI * 0.5)
+    )
+  );
+}
+
+function pushChogaRoof(
+  geometries: THREE.BufferGeometry[],
+  length: number,
+  width: number,
+  foundationHeight: number,
+  wallHeight: number,
+  baySize: number,
+  seed: number,
+  wingRole: HanokWingRole
+): void {
+  const isMainWing = wingRole === "main";
+  const eave = isMainWing
+    ? clamp(0.66 + baySize * 0.07, 0.60, 1.04)
+    : clamp(0.56 + baySize * 0.06, 0.50, 0.90);
+  const roofLength = length + eave * 2;
+  const roofSpan = width + eave * 2;
+  const roofBaseY = foundationHeight + wallHeight + 0.02;
+  const roofRise = wallHeight * (isMainWing ? 0.94 : 0.82) + seeded01(seed + 5.1) * 0.20;
+  const slopeAngle = Math.atan2(roofRise, roofSpan * 0.5);
+
+  const ridgeLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY + roofRise, 0);
+  const ridgeRight = new THREE.Vector3(roofLength * 0.5, roofBaseY + roofRise, 0);
+  const frontLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
+  const frontRight = new THREE.Vector3(roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
+  const backLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, roofSpan * 0.5);
+  const backRight = new THREE.Vector3(roofLength * 0.5, roofBaseY, roofSpan * 0.5);
+
+  geometries.push(createQuad(ridgeLeft, ridgeRight, frontRight, frontLeft, COLORS.chogaRoof));
+  geometries.push(createQuad(ridgeLeft, ridgeRight, backRight, backLeft, COLORS.chogaRoof));
+  geometries.push(createTriangle(frontLeft, ridgeLeft, backLeft, COLORS.chogaRoof));
+  geometries.push(createTriangle(frontRight, ridgeRight, backRight, COLORS.chogaRoof));
+
+  const bundleRows = Math.max(10, Math.round((roofSpan * 0.5) / 0.15));
+  for (let side = -1; side <= 1; side += 2) {
+    for (let i = 0; i < bundleRows; i++) {
+      const t = (i + 0.5) / bundleRows;
+      const profile = 1 - Math.pow(t, 0.82);
+      const sag = Math.sin(t * Math.PI) * 0.06;
+      const y = roofBaseY + roofRise * profile - sag * 0.38;
+      const z = side * (roofSpan * 0.5 * t);
+      const tint = 0.83 + seeded01(seed + i * 7.1 + side * 3.7) * 0.22;
+      const straw = new THREE.Color(
+        COLORS.chogaRoof.r * tint,
+        COLORS.chogaRoof.g * tint,
+        COLORS.chogaRoof.b * tint
+      );
+      const depth = 0.14 + (1 - t) * 0.05;
+      geometries.push(
+        createBox(
+          roofLength * 0.984,
+          0.068,
+          depth,
+          new THREE.Vector3(0, y, z),
+          straw,
+          new THREE.Euler((side < 0 ? -1 : 1) * slopeAngle * (0.78 + t * 0.28), 0, 0)
+        )
+      );
+    }
+  }
+
+  geometries.push(
+    createCylinder(
+      isMainWing ? 0.12 : 0.10,
+      isMainWing ? 0.12 : 0.10,
+      roofLength * 0.99,
+      14,
+      new THREE.Vector3(0, roofBaseY + roofRise + 0.05, 0),
+      COLORS.chogaBundle,
+      new THREE.Euler(0, 0, Math.PI * 0.5)
+    )
+  );
+
+  geometries.push(
+    createCylinder(
+      0.08,
+      0.08,
+      roofLength * 0.96,
+      10,
+      new THREE.Vector3(0, roofBaseY + 0.03, -roofSpan * 0.5),
+      COLORS.chogaBundle,
+      new THREE.Euler(0, 0, Math.PI * 0.5)
+    )
+  );
+  geometries.push(
+    createCylinder(
+      0.08,
+      0.08,
+      roofLength * 0.96,
+      10,
+      new THREE.Vector3(0, roofBaseY + 0.03, roofSpan * 0.5),
+      COLORS.chogaBundle,
+      new THREE.Euler(0, 0, Math.PI * 0.5)
+    )
+  );
+
+  const ropeCount = Math.max(2, Math.floor(length / (baySize * 1.45)) + 1);
+  const ropeSpacing = roofLength / ropeCount;
+  for (let i = 0; i < ropeCount; i++) {
+    const x = -roofLength * 0.5 + (i + 0.5) * ropeSpacing;
+    for (let side = -1; side <= 1; side += 2) {
+      const ropeDepth = 0.09;
+      const t = 0.60;
+      const profile = 1 - Math.pow(t, 0.82);
+      const sag = Math.sin(t * Math.PI) * 0.06;
+      const z = side * (roofSpan * 0.5 * t);
+      const y = roofBaseY + roofRise * profile - sag * 0.38;
+      const pitch = (side < 0 ? -1 : 1) * slopeAngle * (0.78 + t * 0.28);
+      geometries.push(
+        createBox(
+          ropeSpacing * 0.62,
+          0.024,
+          ropeDepth,
+          new THREE.Vector3(x, y + 0.016, z),
+          COLORS.woodMid,
+          new THREE.Euler(pitch, 0, 0)
+        )
+      );
+    }
+  }
+}
+
 function generateHanokLinearHouseGeometry(
   style: "giwa" | "choga",
   dimensions: StructureDimensions,
-  seed: number
+  seed: number,
+  options: HanokLinearOptions = {}
 ): THREE.BufferGeometry {
   const normalized = normalizeHouseDimensions(dimensions);
   const baySize = normalized.baySizeM;
@@ -314,7 +549,13 @@ function generateHanokLinearHouseGeometry(
   const width = normalized.widthM;
   const wallHeight = normalized.heightM;
 
-  const plan = buildPlanGrid(xBays, zBays, seed);
+  const wingRole = options.wingRole ?? "main";
+  const includeKitchen = options.includeKitchen ?? wingRole === "main";
+  const includeChimney = options.includeChimney ?? includeKitchen;
+  const includeFrontMaru = options.includeFrontMaru ?? wingRole === "main";
+  const includeRearWindows = options.includeRearWindows ?? true;
+
+  const plan = buildPlanGrid(xBays, zBays, seed, includeKitchen ? "main" : "auxiliary");
   const geometries: THREE.BufferGeometry[] = [];
 
   const foundationHeight = style === "giwa" ? 0.5 : 0.34;
@@ -368,7 +609,7 @@ function generateHanokLinearHouseGeometry(
   const maruEndX = length * 0.5 - baySize * 0.18;
   const maruLength = Math.max(0, maruEndX - maruStartX);
 
-  if (maruLength > baySize * 0.75) {
+  if (includeFrontMaru && maruLength > baySize * 0.75) {
     const maruCenterX = (maruStartX + maruEndX) * 0.5;
     const maruCenterZ = -width * 0.5 - maruDepth * 0.5 - wallThickness * 0.15;
 
@@ -522,7 +763,7 @@ function generateHanokLinearHouseGeometry(
       )
     );
 
-    const addRearWindow = seeded01(seed + x * 1.73 + 19.0) > 0.56;
+    const addRearWindow = includeRearWindows && seeded01(seed + x * 1.73 + 19.0) > 0.56;
     if (addRearWindow) {
       const rearWindowWidth = baySize * 0.42;
       const rearWindowHeight = wallHeight * 0.34;
@@ -561,7 +802,7 @@ function generateHanokLinearHouseGeometry(
     const cz = -width * 0.5 + (z + 0.5) * baySize;
     const leftCell = plan[0][z];
 
-    if (z === 0 && leftCell === "kitchen") {
+    if (z === 0 && leftCell === "kitchen" && includeKitchen) {
       const openingWidth = baySize * 0.52;
       const sideWidth = Math.max(0.08, (baySize * 0.94 - openingWidth) * 0.5);
       const sillHeight = 0.38;
@@ -721,157 +962,47 @@ function generateHanokLinearHouseGeometry(
     }
   }
 
-  // Kitchen hearth + chimney
-  const kitchenX = -length * 0.5 + baySize * 0.5;
-  const kitchenZ = -width * 0.5 + baySize * 0.5;
-  geometries.push(
-    createBox(
-      baySize * 0.44,
-      0.58,
-      baySize * 0.34,
-      new THREE.Vector3(kitchenX - baySize * 0.18, foundationHeight + 0.29, kitchenZ + baySize * 0.03),
-      COLORS.foundation
-    )
-  );
-  geometries.push(
-    createBox(
-      baySize * 0.18,
-      0.23,
-      baySize * 0.16,
-      new THREE.Vector3(kitchenX - baySize * 0.36, foundationHeight + 0.11, kitchenZ + baySize * 0.10),
-      COLORS.firebox
-    )
-  );
-
-  const chimneyHeight = style === "giwa" ? wallHeight * 0.95 : wallHeight * 0.82;
-  geometries.push(
-    createBox(
-      0.36,
-      chimneyHeight,
-      0.36,
-      new THREE.Vector3(-length * 0.5 - 0.32, foundationHeight + chimneyHeight * 0.5, kitchenZ + baySize * 0.18),
-      COLORS.chimney
-    )
-  );
-
-  // Roof system
-  const eave = style === "giwa"
-    ? clamp(0.75 + baySize * 0.08, 0.7, 1.2)
-    : clamp(0.60 + baySize * 0.08, 0.55, 0.95);
-
-  const roofLength = length + eave * 2;
-  const roofSpan = width + eave * 2;
-  const roofBaseY = foundationHeight + wallHeight + 0.02;
-  const roofRise = style === "giwa"
-    ? wallHeight * (0.58 + seeded01(seed + 4.4) * 0.22)
-    : wallHeight * (0.78 + seeded01(seed + 5.1) * 0.26);
-  const slopeAngle = Math.atan2(roofRise, roofSpan * 0.5);
-
-  const roofColor = style === "giwa" ? COLORS.giwaRoof : COLORS.chogaRoof;
-  const ridgeColor = style === "giwa" ? COLORS.giwaTile : COLORS.chogaBundle;
-
-  const ridgeLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY + roofRise, 0);
-  const ridgeRight = new THREE.Vector3(roofLength * 0.5, roofBaseY + roofRise, 0);
-  const frontLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
-  const frontRight = new THREE.Vector3(roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
-  const backLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, roofSpan * 0.5);
-  const backRight = new THREE.Vector3(roofLength * 0.5, roofBaseY, roofSpan * 0.5);
-
-  geometries.push(createQuad(ridgeLeft, ridgeRight, frontRight, frontLeft, roofColor));
-  geometries.push(createQuad(ridgeLeft, ridgeRight, backRight, backLeft, roofColor));
-  geometries.push(createTriangle(frontLeft, ridgeLeft, backLeft, roofColor));
-  geometries.push(createTriangle(frontRight, ridgeRight, backRight, roofColor));
-
-  if (style === "giwa") {
-    const tileRows = Math.max(7, Math.round((roofSpan * 0.5) / 0.18));
-    for (let side = -1; side <= 1; side += 2) {
-      for (let i = 0; i < tileRows; i++) {
-        const t = (i + 0.5) / tileRows;
-        const y = roofBaseY + roofRise * (1 - t);
-        const z = side * (roofSpan * 0.5 * t);
-        geometries.push(
-          createBox(
-            roofLength * 0.985,
-            0.045,
-            0.12,
-            new THREE.Vector3(0, y, z),
-            COLORS.giwaTile,
-            new THREE.Euler(side < 0 ? -slopeAngle : slopeAngle, 0, 0)
-          )
-        );
-      }
-    }
-
+  if (includeKitchen) {
+    // Kitchen hearth + stove body
+    const kitchenX = -length * 0.5 + baySize * 0.5;
+    const kitchenZ = -width * 0.5 + baySize * 0.5;
     geometries.push(
       createBox(
-        roofLength * 1.01,
-        0.11,
-        0.20,
-        new THREE.Vector3(0, roofBaseY + roofRise + 0.06, 0),
-        COLORS.giwaTile
+        baySize * 0.44,
+        0.58,
+        baySize * 0.34,
+        new THREE.Vector3(kitchenX - baySize * 0.18, foundationHeight + 0.29, kitchenZ + baySize * 0.03),
+        COLORS.foundation
       )
     );
-  } else {
-    const bundleRows = Math.max(8, Math.round((roofSpan * 0.5) / 0.17));
-    for (let side = -1; side <= 1; side += 2) {
-      for (let i = 0; i < bundleRows; i++) {
-        const t = (i + 0.5) / bundleRows;
-        const y = roofBaseY + roofRise * (1 - Math.pow(t, 0.86));
-        const z = side * (roofSpan * 0.5 * t);
-        const tint = 0.84 + seeded01(seed + i * 7.3 + side * 4.1) * 0.16;
-        const straw = new THREE.Color(
-          COLORS.chogaRoof.r * tint,
-          COLORS.chogaRoof.g * tint,
-          COLORS.chogaRoof.b * tint
-        );
+    geometries.push(
+      createBox(
+        baySize * 0.18,
+        0.23,
+        baySize * 0.16,
+        new THREE.Vector3(kitchenX - baySize * 0.36, foundationHeight + 0.11, kitchenZ + baySize * 0.10),
+        COLORS.firebox
+      )
+    );
 
-        geometries.push(
-          createBox(
-            roofLength * 0.98,
-            0.06,
-            0.14,
-            new THREE.Vector3(0, y, z),
-            straw,
-            new THREE.Euler(side < 0 ? -slopeAngle : slopeAngle, 0, 0)
-          )
-        );
-      }
+    if (includeChimney) {
+      const chimneyHeight = style === "giwa" ? wallHeight * 0.95 : wallHeight * 0.82;
+      geometries.push(
+        createBox(
+          0.36,
+          chimneyHeight,
+          0.36,
+          new THREE.Vector3(-length * 0.5 - 0.32, foundationHeight + chimneyHeight * 0.5, kitchenZ + baySize * 0.18),
+          COLORS.chimney
+        )
+      );
     }
+  }
 
-    geometries.push(
-      createCylinder(
-        0.09,
-        0.09,
-        roofLength * 0.98,
-        12,
-        new THREE.Vector3(0, roofBaseY + roofRise + 0.04, 0),
-        ridgeColor,
-        new THREE.Euler(0, 0, Math.PI * 0.5)
-      )
-    );
-
-    geometries.push(
-      createCylinder(
-        0.07,
-        0.07,
-        roofLength * 0.95,
-        10,
-        new THREE.Vector3(0, roofBaseY + 0.03, -roofSpan * 0.5),
-        COLORS.chogaBundle,
-        new THREE.Euler(0, 0, Math.PI * 0.5)
-      )
-    );
-    geometries.push(
-      createCylinder(
-        0.07,
-        0.07,
-        roofLength * 0.95,
-        10,
-        new THREE.Vector3(0, roofBaseY + 0.03, roofSpan * 0.5),
-        COLORS.chogaBundle,
-        new THREE.Euler(0, 0, Math.PI * 0.5)
-      )
-    );
+  if (style === "giwa") {
+    pushGiwaRoof(geometries, length, width, foundationHeight, wallHeight, baySize, seed, wingRole);
+  } else {
+    pushChogaRoof(geometries, length, width, foundationHeight, wallHeight, baySize, seed, wingRole);
   }
 
   return mergeGeometries(geometries);
@@ -927,7 +1058,8 @@ function generateCompoundHanokHouseGeometry(
     centerX: number,
     centerZ: number,
     rotationY: number,
-    wingSeed: number
+    wingSeed: number,
+    wingRole: HanokWingRole
   ): void => {
     const wingGeometry = generateHanokLinearHouseGeometry(
       style,
@@ -938,7 +1070,14 @@ function generateCompoundHanokHouseGeometry(
         baySizeM: baySize,
         planPreset: "linear",
       },
-      wingSeed
+      wingSeed,
+      {
+        wingRole,
+        includeKitchen: wingRole === "main",
+        includeChimney: wingRole === "main",
+        includeFrontMaru: wingRole === "main",
+        includeRearWindows: true,
+      }
     );
     wingGeometry.rotateY(rotationY);
     wingGeometry.translate(centerX, 0, centerZ);
@@ -952,20 +1091,36 @@ function generateCompoundHanokHouseGeometry(
     const frontCenterZ = -((zBays - frontDepthBays) * baySize * 0.5);
     const sideCenterX = -((xBays - sideLengthBays) * baySize * 0.5);
 
-    pushWing(xBays, frontDepthBays, 0, frontCenterZ, 0, seed + 11.3);
-    pushWing(sideLengthBays, zBays, sideCenterX, 0, 0, seed + 23.9);
+    pushWing(xBays, frontDepthBays, 0, frontCenterZ, 0, seed + 11.3, "main");
+    pushWing(sideLengthBays, zBays, sideCenterX, 0, 0, seed + 23.9, "auxiliary");
   } else if (preset === "u_shape") {
     const sideWidthBays = Math.max(2, Math.round(xBays * 0.30));
     const sideLengthBays = Math.max(3, Math.round(zBays * 0.78));
     const rearDepthBays = Math.max(2, Math.round(zBays * 0.34));
 
     const rearCenterZ = (zBays - rearDepthBays) * baySize * 0.5;
-    pushWing(xBays, rearDepthBays, 0, rearCenterZ, 0, seed + 13.2);
+    pushWing(xBays, rearDepthBays, 0, rearCenterZ, 0, seed + 13.2, "main");
 
     const sideCenterZ = -((zBays - sideLengthBays) * baySize * 0.5);
     const sideOffsetX = (xBays - sideWidthBays) * baySize * 0.5;
-    pushWing(sideLengthBays, sideWidthBays, -sideOffsetX, sideCenterZ, Math.PI * 0.5, seed + 31.8);
-    pushWing(sideLengthBays, sideWidthBays, sideOffsetX, sideCenterZ, Math.PI * 0.5, seed + 47.1);
+    pushWing(
+      sideLengthBays,
+      sideWidthBays,
+      -sideOffsetX,
+      sideCenterZ,
+      Math.PI * 0.5,
+      seed + 31.8,
+      "auxiliary"
+    );
+    pushWing(
+      sideLengthBays,
+      sideWidthBays,
+      sideOffsetX,
+      sideCenterZ,
+      Math.PI * 0.5,
+      seed + 47.1,
+      "auxiliary"
+    );
   } else {
     const ringBays = Math.max(2, Math.round(Math.min(xBays, zBays) * 0.28));
     const innerXBays = xBays - ringBays * 2;
@@ -979,10 +1134,10 @@ function generateCompoundHanokHouseGeometry(
     const backCenterZ = (zBays - ringBays) * baySize * 0.5;
     const sideOffsetX = (xBays - ringBays) * baySize * 0.5;
 
-    pushWing(xBays, ringBays, 0, frontCenterZ, 0, seed + 17.9);
-    pushWing(xBays, ringBays, 0, backCenterZ, 0, seed + 29.4);
-    pushWing(innerZBays, ringBays, -sideOffsetX, 0, Math.PI * 0.5, seed + 41.7);
-    pushWing(innerZBays, ringBays, sideOffsetX, 0, Math.PI * 0.5, seed + 53.8);
+    pushWing(xBays, ringBays, 0, frontCenterZ, 0, seed + 17.9, "auxiliary");
+    pushWing(xBays, ringBays, 0, backCenterZ, 0, seed + 29.4, "main");
+    pushWing(innerZBays, ringBays, -sideOffsetX, 0, Math.PI * 0.5, seed + 41.7, "auxiliary");
+    pushWing(innerZBays, ringBays, sideOffsetX, 0, Math.PI * 0.5, seed + 53.8, "auxiliary");
   }
 
   const merged = mergeGeometries(wings);
