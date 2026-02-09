@@ -554,68 +554,80 @@ function pushChogaRoof(
   geometries.push(createTriangle(frontRight, ridgeRight, backRight, COLORS.chogaRoof));
 
   const halfRoofLength = roofLength * 0.5;
-  const trackSpacing = isMainWing ? 0.22 : 0.25;
-  const trackCount = Math.max(26, Math.round(roofLength / trackSpacing));
-  const slopeSegments = Math.max(9, Math.round((roofSpan * 0.5) / 0.32));
+  const makeStrawColor = (s: number, warmthBias: number = 0): THREE.Color => {
+    const tint = 0.86 + seeded01(s + 1.4) * 0.24;
+    const warm = (seeded01(s + 2.8) - 0.5) * (0.07 + warmthBias * 0.04);
+    return new THREE.Color(
+      clamp(COLORS.chogaBundle.r * tint + warm * 0.70, 0, 1),
+      clamp(COLORS.chogaBundle.g * tint + warm * 0.45, 0, 1),
+      clamp(COLORS.chogaBundle.b * tint - warm * 0.22, 0, 1)
+    );
+  };
+
+  // Layered thatch mats: overlap rows from ridge to eave so the roof reads as bundles, not sticks.
+  const layerRows = Math.max(10, Math.round((roofSpan * 0.5) / 0.18));
+  const rowStep = 0.86 / layerRows;
+  const laneCount = Math.max(11, Math.round(roofLength / 0.34));
+  const laneWidth = roofLength / laneCount;
   for (let side = -1; side <= 1; side += 2) {
-    for (let track = 0; track < trackCount; track++) {
-      const xT = trackCount === 1 ? 0.5 : track / (trackCount - 1);
-      const baseX = -halfRoofLength + xT * roofLength;
-      const edgeFactor = halfRoofLength > 0.001 ? Math.abs(baseX) / halfRoofLength : 0;
-      const edgeDamp = clamp(1 - edgeFactor * 0.70, 0.28, 1);
-      const drift = (seeded01(seed + track * 13.2 + side * 7.7) - 0.5) * 0.11 * edgeDamp;
+    for (let row = 0; row < layerRows; row++) {
+      const t0 = 0.11 + row * rowStep;
+      const t1 = clamp(t0 + rowStep * (1.42 + seeded01(seed + row * 4.3 + side * 3.1) * 0.36), 0.14, 0.99);
+      const tMid = (t0 + t1) * 0.5;
+      const zMid = side * roofSpan * 0.5 * tMid;
+      const y0 = surfaceY(t0);
+      const y1 = surfaceY(t1);
+      const yMid = (y0 + y1) * 0.5;
+      const slopeAngle = side * Math.atan2(Math.abs(y1 - y0), (t1 - t0) * roofSpan * 0.5);
+      const rowDepth = Math.max(0.09, (t1 - t0) * roofSpan * 0.5);
+      const rowWeight = 1 - row / layerRows;
 
-      for (let seg = 0; seg < slopeSegments; seg++) {
-        const t0 = 0.07 + (seg / slopeSegments) * 0.88;
-        const t1 = 0.07 + ((seg + 1) / slopeSegments) * 0.88;
-        const localSeed = seed + side * 101.3 + track * 17.9 + seg * 23.4;
-        const wave0 = Math.sin((t0 + xT * 0.35) * Math.PI * 1.2) * drift;
-        const wave1 = Math.sin((t1 + xT * 0.35) * Math.PI * 1.2) * drift;
-        const x0 = clamp(
-          baseX + wave0 + (seeded01(localSeed + 2.4) - 0.5) * 0.030 * edgeDamp,
-          -halfRoofLength + 0.08,
-          halfRoofLength - 0.08
+      for (let lane = 0; lane < laneCount; lane++) {
+        const laneSeed = seed + side * 91.7 + row * 17.9 + lane * 7.3;
+        if (seeded01(laneSeed + 10.1) < 0.04 && row > 1) continue;
+
+        const baseX = -halfRoofLength + (lane + 0.5) * laneWidth;
+        const edgeFactor = halfRoofLength > 0.001 ? Math.abs(baseX) / halfRoofLength : 0;
+        const edgeDamp = clamp(1 - edgeFactor * 0.65, 0.38, 1);
+        const posX = clamp(
+          baseX + (seeded01(laneSeed + 1.3) - 0.5) * laneWidth * 0.32,
+          -halfRoofLength + 0.06,
+          halfRoofLength - 0.06
         );
-        const x1 = clamp(
-          baseX + wave1 + (seeded01(localSeed + 4.8) - 0.5) * 0.030 * edgeDamp,
-          -halfRoofLength + 0.08,
-          halfRoofLength - 0.08
+        const posY = yMid + 0.020 + rowWeight * 0.008 + (seeded01(laneSeed + 2.6) - 0.5) * 0.006;
+        const posZ = zMid + (seeded01(laneSeed + 3.9) - 0.5) * rowDepth * 0.10;
+        const bundleW = laneWidth * (1.08 + seeded01(laneSeed + 5.2) * 0.22);
+        const bundleH = (0.018 + rowWeight * 0.010 + seeded01(laneSeed + 6.7) * 0.007) * edgeDamp;
+        const bundleD = rowDepth * (1.08 + seeded01(laneSeed + 8.4) * 0.30);
+        const straw = makeStrawColor(laneSeed + 11.8, 0.28 * (1 - rowWeight));
+
+        geometries.push(
+          createBox(
+            bundleW,
+            bundleH,
+            bundleD,
+            new THREE.Vector3(posX, posY, posZ),
+            straw,
+            new THREE.Euler(
+              slopeAngle + (seeded01(laneSeed + 12.6) - 0.5) * 0.04,
+              (seeded01(laneSeed + 14.2) - 0.5) * 0.10,
+              (seeded01(laneSeed + 15.5) - 0.5) * 0.05
+            )
+          )
         );
 
-        const p0 = new THREE.Vector3(
-          x0,
-          surfaceY(t0) + 0.020 + (seeded01(localSeed + 6.2) - 0.5) * 0.010,
-          side * roofSpan * 0.5 * t0
-        );
-        const p1 = new THREE.Vector3(
-          x1,
-          surfaceY(t1) + 0.020 + (seeded01(localSeed + 8.7) - 0.5) * 0.010,
-          side * roofSpan * 0.5 * t1
-        );
-
-        const thickness =
-          (0.010 + (1 - t0) * 0.004 + seeded01(localSeed + 9.2) * 0.0035) * edgeDamp + 0.002;
-        const tint = 0.87 + seeded01(localSeed + 12.1) * 0.24;
-        const straw = new THREE.Color(
-          clamp(COLORS.chogaBundle.r * tint, 0, 1),
-          clamp(COLORS.chogaBundle.g * tint, 0, 1),
-          clamp(COLORS.chogaBundle.b * tint, 0, 1)
-        );
-        geometries.push(createBeamBetween(p0, p1, thickness, straw));
-
-        if (seeded01(localSeed + 15.4) > 0.78 && seg >= 1 && seg <= slopeSegments - 2) {
-          const midT = (t0 + t1) * 0.5;
-          const pMid = new THREE.Vector3(
-            (p0.x + p1.x) * 0.5,
-            surfaceY(midT) + 0.012,
-            side * roofSpan * 0.5 * midT
+        if (row > layerRows * 0.55 && seeded01(laneSeed + 16.8) > 0.72) {
+          const looseStart = new THREE.Vector3(
+            posX + (seeded01(laneSeed + 18.1) - 0.5) * bundleW * 0.35,
+            posY - bundleH * 0.35,
+            side * roofSpan * 0.5 * clamp(t1 + 0.01, 0, 1.02)
           );
-          const pTail = new THREE.Vector3(
-            pMid.x + (seeded01(localSeed + 18.3) - 0.5) * 0.030,
-            pMid.y - (0.03 + seeded01(localSeed + 20.7) * 0.04),
-            side * roofSpan * 0.5 * Math.min(1.02, midT + 0.08)
+          const looseEnd = new THREE.Vector3(
+            looseStart.x + (seeded01(laneSeed + 20.6) - 0.5) * 0.035,
+            looseStart.y - (0.034 + seeded01(laneSeed + 22.2) * 0.048),
+            side * roofSpan * 0.5 * clamp(t1 + 0.07 + seeded01(laneSeed + 24.4) * 0.04, 0, 1.06)
           );
-          geometries.push(createBeamBetween(pMid, pTail, thickness * 0.62, straw));
+          geometries.push(createBeamBetween(looseStart, looseEnd, 0.006 + seeded01(laneSeed + 26.1) * 0.004, straw));
         }
       }
     }
