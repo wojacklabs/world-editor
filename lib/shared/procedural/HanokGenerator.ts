@@ -734,7 +734,7 @@ function pushChogaRoof(
 
   for (let sideX = -1; sideX <= 1; sideX += 2) {
     for (let sideZ = -1; sideZ <= 1; sideZ += 2) {
-      const edgeSegments = 6;
+      const edgeSegments = 4;
       for (let seg = 0; seg < edgeSegments; seg++) {
         const t0 = 0.10 + (seg / edgeSegments) * 0.84;
         const t1 = 0.10 + ((seg + 1) / edgeSegments) * 0.84;
@@ -748,27 +748,28 @@ function pushChogaRoof(
           surfaceY(t1) + 0.016,
           sideZ * roofSpan * 0.5 * t1
         );
-        geometries.push(createBeamBetween(p0, p1, 0.014, COLORS.chogaRope));
+        geometries.push(createBeamBetween(p0, p1, 0.011, COLORS.chogaRope));
       }
     }
   }
 
-  const fringeCount = Math.max(22, Math.round(roofLength / 0.24));
+  const fringeCount = Math.max(14, Math.round(roofLength / 0.38));
   for (let side = -1; side <= 1; side += 2) {
     for (let i = 0; i < fringeCount; i++) {
       const x = -halfRoofLength + ((i + 0.5) / fringeCount) * roofLength;
       const fringeSeed = seed + i * 14.8 + side * 2.9;
+      if (seeded01(fringeSeed + 16.8) < 0.26) continue;
       const start = new THREE.Vector3(
-        x + (seeded01(fringeSeed + 1.8) - 0.5) * 0.045,
-        surfaceY(0.985) - 0.028 + (seeded01(fringeSeed + 3.4) - 0.5) * 0.010,
-        side * roofSpan * 0.5 * 0.985
+        x + (seeded01(fringeSeed + 1.8) - 0.5) * 0.030,
+        surfaceY(0.99) - 0.020 + (seeded01(fringeSeed + 3.4) - 0.5) * 0.008,
+        side * roofSpan * 0.5 * 0.99
       );
       const end = new THREE.Vector3(
-        start.x + (seeded01(fringeSeed + 5.3) - 0.5) * 0.030,
-        start.y - (0.06 + seeded01(fringeSeed + 7.9) * 0.07),
-        side * roofSpan * 0.5 * (1.01 + seeded01(fringeSeed + 9.7) * 0.03)
+        start.x + (seeded01(fringeSeed + 5.3) - 0.5) * 0.020,
+        start.y - (0.035 + seeded01(fringeSeed + 7.9) * 0.035),
+        side * roofSpan * 0.5 * (1.003 + seeded01(fringeSeed + 9.7) * 0.015)
       );
-      const thickness = 0.007 + seeded01(fringeSeed + 12.4) * 0.005;
+      const thickness = 0.005 + seeded01(fringeSeed + 12.4) * 0.003;
       const tint = 0.92 + seeded01(fringeSeed + 14.1) * 0.16;
       const straw = new THREE.Color(
         clamp(COLORS.chogaBundle.r * tint, 0, 1),
