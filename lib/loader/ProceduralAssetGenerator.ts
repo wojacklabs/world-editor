@@ -424,6 +424,7 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform float uMudWeathering;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
@@ -431,14 +432,57 @@ varying float vCameraDistance;
 varying vec3 vViewDirection;
 varying vec4 vColor;
 
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float noise21(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+}
+
+float fbm21(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * noise21(p);
+        p = p * 2.07 + vec2(17.2, -9.4);
+        a *= 0.5;
+    }
+    return v;
+}
+
 void main() {
     vec3 normal = normalize(vNormal);
     vec3 base = vColor.rgb;
+    float mudLike = 0.0;
+    float mudMicro = 0.5;
+    float mudLower = 0.0;
+
+    if (uMudWeathering > 0.5) {
+        mudLike = smoothstep(0.42, 0.72, base.g) * smoothstep(0.30, 0.62, base.b);
+        float mudMacro = fbm21(vPosition.xz * 0.58 + vec2(vPosition.y * 0.35, -vPosition.y * 0.21));
+        mudMicro = fbm21(vPosition.xz * 4.2 + vec2(vPosition.y * 1.7, vPosition.x * 0.9));
+        mudLower = 1.0 - smoothstep(0.60, 1.90, vPosition.y);
+        float weather = (mudMacro - 0.5) * 0.16 + (mudMicro - 0.5) * 0.07 + mudLower * 0.12;
+        base = clamp(base * (1.0 + weather * mudLike), 0.0, 1.0);
+    }
 
     float NdotL = max(dot(normal, sunDirection), 0.0);
     float diffuse = NdotL * 0.65 + 0.35;
     float ao = 0.55 + 0.45 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
     float rim = pow(1.0 - max(dot(normal, vViewDirection), 0.0), 2.8) * 0.08;
+
+    diffuse *= 1.0 - mudLike * 0.10 + (mudMicro - 0.5) * 0.08 * mudLike;
+    ao = mix(ao, ao * (0.90 + mudLower * 0.18), mudLike);
 
     vec3 color = base * (ambientIntensity * ao + diffuse) + vec3(rim);
 
@@ -1319,6 +1363,7 @@ export class ProceduralAssetGenerator {
           ambientIntensity: { value: 0.42 },
           fogColor: { value: this.fogColor.clone() },
           fogDensity: { value: this.fogDensity },
+          uMudWeathering: { value: params.type === "hanok_choga" ? 1.0 : 0.0 },
         },
       });
     } else {

@@ -783,203 +783,60 @@ function pushChogaRoof(
   }
 }
 
-function createMudTone(seed: number): THREE.Color {
-  const tint = 0.92 + seeded01(seed + 1.7) * 0.16;
-  const warm = (seeded01(seed + 3.9) - 0.5) * 0.03;
+function createChogaMudColor(seed: number, darkness: number = 0): THREE.Color {
+  const tint = 0.90 + seeded01(seed + 1.7) * 0.18;
+  const warm = (seeded01(seed + 3.9) - 0.5) * 0.04;
+  const darken = darkness * (0.05 + seeded01(seed + 5.6) * 0.06);
   return new THREE.Color(
-    clamp(COLORS.wallMud.r * tint + warm * 0.45, 0, 1),
-    clamp(COLORS.wallMud.g * tint + warm * 0.25, 0, 1),
-    clamp(COLORS.wallMud.b * tint - warm * 0.12, 0, 1)
+    clamp(COLORS.wallMud.r * tint - darken + warm * 0.35, 0, 1),
+    clamp(COLORS.wallMud.g * tint - darken + warm * 0.22, 0, 1),
+    clamp(COLORS.wallMud.b * tint - darken - warm * 0.10, 0, 1)
   );
 }
 
-function pushMudPatchClusterOnZFace(
-  geometries: THREE.BufferGeometry[],
-  centerX: number,
-  centerZ: number,
-  faceSign: number,
-  spanX: number,
-  minY: number,
-  maxY: number,
-  wallThickness: number,
-  count: number,
-  seed: number,
-  avoidCenterWidth: number = 0,
-  avoidMinY: number = 0,
-  avoidMaxY: number = 0
-): void {
-  for (let i = 0; i < count; i++) {
-    const s = seed + i * 17.3;
-    const localX = (seeded01(s + 1.1) - 0.5) * spanX * 0.80;
-    const patchW = spanX * (0.09 + seeded01(s + 2.7) * 0.16);
-    const patchH = 0.10 + seeded01(s + 4.9) * 0.22;
-    const y = minY + seeded01(s + 6.3) * Math.max(0.1, maxY - minY);
-    const z = centerZ + faceSign * (wallThickness * 0.52 + 0.0015);
-    if (
-      avoidCenterWidth > 0 &&
-      Math.abs(localX) < avoidCenterWidth * 0.56 &&
-      y > avoidMinY &&
-      y < avoidMaxY
-    ) {
-      continue;
-    }
-
-    const color = createMudTone(s + 9.5);
-    const skewX0 = (seeded01(s + 11.2) - 0.5) * patchW * 0.28;
-    const skewX1 = (seeded01(s + 13.7) - 0.5) * patchW * 0.28;
-    const skewY0 = (seeded01(s + 15.9) - 0.5) * patchH * 0.30;
-    const skewY1 = (seeded01(s + 17.6) - 0.5) * patchH * 0.30;
-    const halfW = patchW * 0.5;
-    const halfH = patchH * 0.5;
-    const a = new THREE.Vector3(centerX + localX - halfW + skewX0, y + halfH + skewY0, z);
-    const b = new THREE.Vector3(centerX + localX + halfW + skewX1, y + halfH - skewY0 * 0.4, z);
-    const c = new THREE.Vector3(centerX + localX + halfW - skewX0 * 0.4, y - halfH + skewY1, z);
-    const d = new THREE.Vector3(centerX + localX - halfW - skewX1, y - halfH - skewY1, z);
-    geometries.push(createQuad(a, b, c, d, color));
-  }
-}
-
-function pushMudPatchClusterOnXFace(
-  geometries: THREE.BufferGeometry[],
-  centerX: number,
-  centerZ: number,
-  faceSign: number,
-  spanZ: number,
-  minY: number,
-  maxY: number,
-  wallThickness: number,
-  count: number,
-  seed: number
-): void {
-  for (let i = 0; i < count; i++) {
-    const s = seed + i * 19.7;
-    const localZ = (seeded01(s + 1.4) - 0.5) * spanZ * 0.80;
-    const patchD = spanZ * (0.10 + seeded01(s + 3.8) * 0.16);
-    const patchH = 0.10 + seeded01(s + 5.5) * 0.22;
-    const y = minY + seeded01(s + 7.6) * Math.max(0.1, maxY - minY);
-    const x = centerX + faceSign * (wallThickness * 0.52 + 0.0015);
-    const color = createMudTone(s + 11.8);
-
-    const skewZ0 = (seeded01(s + 14.3) - 0.5) * patchD * 0.28;
-    const skewZ1 = (seeded01(s + 16.9) - 0.5) * patchD * 0.28;
-    const skewY0 = (seeded01(s + 19.2) - 0.5) * patchH * 0.30;
-    const skewY1 = (seeded01(s + 22.7) - 0.5) * patchH * 0.30;
-    const halfD = patchD * 0.5;
-    const halfH = patchH * 0.5;
-    const a = new THREE.Vector3(x, y + halfH + skewY0, centerZ + localZ - halfD + skewZ0);
-    const b = new THREE.Vector3(x, y + halfH - skewY0 * 0.4, centerZ + localZ + halfD + skewZ1);
-    const c = new THREE.Vector3(x, y - halfH + skewY1, centerZ + localZ + halfD - skewZ0 * 0.4);
-    const d = new THREE.Vector3(x, y - halfH - skewY1, centerZ + localZ - halfD - skewZ1);
-    geometries.push(createQuad(a, b, c, d, color));
-  }
-}
-
-function pushChogaWallWeathering(
+function pushChogaLowerDirtBands(
   geometries: THREE.BufferGeometry[],
   length: number,
   width: number,
-  wallHeight: number,
   foundationHeight: number,
   wallThickness: number,
-  baySize: number,
-  xBays: number,
-  zBays: number,
-  plan: PlanCell[][],
-  includeKitchen: boolean,
-  includeRearWindows: boolean,
   seed: number
 ): void {
   const frontZ = -width * 0.5 + wallThickness * 0.5;
   const backZ = width * 0.5 - wallThickness * 0.5;
   const leftX = -length * 0.5 + wallThickness * 0.5;
   const rightX = length * 0.5 - wallThickness * 0.5;
-  const minY = foundationHeight + 0.20;
-  const maxY = foundationHeight + wallHeight - 0.20;
+  const baseY = foundationHeight + 0.07;
 
-  for (let x = 0; x < xBays; x++) {
-    const cx = -length * 0.5 + (x + 0.5) * baySize;
-    const frontCell = plan[x][0];
-    if (frontCell === "kitchen") {
-      pushMudPatchClusterOnZFace(
-        geometries,
-        cx,
-        frontZ,
-        -1,
-        baySize * 0.84,
-        minY,
-        maxY,
-        wallThickness,
-        4,
-        seed + x * 31.1 + 10.4
-      );
-    }
-
-    const hasRearWindow = includeRearWindows && seeded01(seed + x * 1.73 + 19.0) > 0.56;
-    const rearWindowHeight = wallHeight * 0.34;
-    const rearWindowY = foundationHeight + wallHeight * 0.62;
-    pushMudPatchClusterOnZFace(
-      geometries,
-      cx,
-      backZ,
-      1,
-      baySize * 0.84,
-      minY,
-      maxY,
-      wallThickness,
-      hasRearWindow ? 4 : 5,
-      seed + x * 37.9 + 122.8,
-      hasRearWindow ? baySize * 0.42 : 0,
-      rearWindowY - rearWindowHeight * 0.65,
-      rearWindowY + rearWindowHeight * 0.65
-    );
-  }
-
-  for (let z = 0; z < zBays; z++) {
-    const cz = -width * 0.5 + (z + 0.5) * baySize;
-    const leftCell = plan[0][z];
-    if (!(z === 0 && leftCell === "kitchen" && includeKitchen)) {
-      pushMudPatchClusterOnXFace(
-        geometries,
-        leftX,
-        cz,
-        -1,
-        baySize * 0.84,
-        minY,
-        maxY,
-        wallThickness,
-        4,
-        seed + z * 33.4 + 241.6
-      );
-    }
-    pushMudPatchClusterOnXFace(
-      geometries,
-      rightX,
-      cz,
-      1,
-      baySize * 0.84,
-      minY,
-      maxY,
-      wallThickness,
-      4,
-      seed + z * 35.7 + 318.2
-    );
-  }
-
-  const smearY = foundationHeight + 0.08;
-  const perimeterSegments = Math.max(12, Math.round((length + width) / 1.1));
-  for (let i = 0; i < perimeterSegments; i++) {
-    const t = (i + 0.5) / perimeterSegments;
+  const xSegments = Math.max(10, Math.round(length / 1.3));
+  for (let i = 0; i < xSegments; i++) {
+    const t = (i + 0.5) / xSegments;
     const x = -length * 0.5 + t * length;
-    const segW = 0.28 + seeded01(seed + i * 7.1) * 0.20;
-    const segH = 0.045 + seeded01(seed + i * 11.9) * 0.03;
-    const segD = wallThickness * (0.05 + seeded01(seed + i * 13.4) * 0.08);
-    const tone = createMudTone(seed + i * 17.7 + 402.6);
-
+    const segW = 0.24 + seeded01(seed + i * 9.1) * 0.20;
+    const segH = 0.036 + seeded01(seed + i * 11.8) * 0.020;
+    const segD = wallThickness * (0.06 + seeded01(seed + i * 13.3) * 0.08);
+    const tone = createChogaMudColor(seed + i * 17.2 + 330.0, 1);
     geometries.push(
-      createBox(segW, segH, segD, new THREE.Vector3(x, smearY, frontZ - segD * 0.45), tone)
+      createBox(segW, segH, segD, new THREE.Vector3(x, baseY, frontZ - segD * 0.5), tone)
     );
     geometries.push(
-      createBox(segW, segH, segD, new THREE.Vector3(x, smearY, backZ + segD * 0.45), tone)
+      createBox(segW, segH, segD, new THREE.Vector3(x, baseY, backZ + segD * 0.5), tone)
+    );
+  }
+
+  const zSegments = Math.max(7, Math.round(width / 1.2));
+  for (let i = 0; i < zSegments; i++) {
+    const t = (i + 0.5) / zSegments;
+    const z = -width * 0.5 + t * width;
+    const segD = 0.24 + seeded01(seed + i * 8.7) * 0.18;
+    const segH = 0.034 + seeded01(seed + i * 12.9) * 0.018;
+    const segW = wallThickness * (0.06 + seeded01(seed + i * 15.1) * 0.08);
+    const tone = createChogaMudColor(seed + i * 21.4 + 410.0, 1);
+    geometries.push(
+      createBox(segW, segH, segD, new THREE.Vector3(leftX - segW * 0.5, baseY, z), tone)
+    );
+    geometries.push(
+      createBox(segW, segH, segD, new THREE.Vector3(rightX + segW * 0.5, baseY, z), tone)
     );
   }
 }
@@ -1093,20 +950,110 @@ function generateHanokLinearHouseGeometry(
   const backZ = width * 0.5 - wallThickness * 0.5;
   const leftX = -length * 0.5 + wallThickness * 0.5;
   const rightX = length * 0.5 - wallThickness * 0.5;
+  const pushWallPanelZ = (
+    panelWidth: number,
+    panelHeight: number,
+    center: THREE.Vector3,
+    offset: number,
+    darkness: number = 0
+  ): void => {
+    if (style !== "choga") {
+      geometries.push(createBox(panelWidth, panelHeight, wallThickness, center, COLORS.wall));
+      return;
+    }
+
+    const stripCount = Math.max(1, Math.min(6, Math.round(panelWidth / Math.max(0.22, baySize * 0.20))));
+    const stripW = panelWidth / stripCount;
+    for (let i = 0; i < stripCount; i++) {
+      const localX = -panelWidth * 0.5 + (i + 0.5) * stripW;
+      const s = seed + offset * 1.31 + i * 3.7;
+      const zJitter = (seeded01(s + 1.2) - 0.5) * wallThickness * 0.20;
+      const depth = wallThickness * (0.90 + seeded01(s + 4.9) * 0.20);
+      const tone = createChogaMudColor(seed + offset + i * 5.2, darkness + 0.05);
+      geometries.push(
+        createBox(
+          stripW * 1.03,
+          panelHeight,
+          depth,
+          new THREE.Vector3(center.x + localX, center.y, center.z + zJitter),
+          tone
+        )
+      );
+    }
+
+    if (panelHeight > 0.35 && seeded01(seed + offset * 0.73) > 0.46) {
+      const bandY = center.y - panelHeight * (0.18 + seeded01(seed + offset * 0.91) * 0.26);
+      const bandH = 0.024 + seeded01(seed + offset * 1.07) * 0.020;
+      const bandColor = createChogaMudColor(seed + offset + 91.2, darkness + 0.55);
+      geometries.push(
+        createBox(
+          panelWidth * 0.90,
+          bandH,
+          wallThickness * 0.18,
+          new THREE.Vector3(center.x, bandY, center.z - wallThickness * 0.08),
+          bandColor
+        )
+      );
+    }
+  };
+  const pushWallPanelX = (
+    panelDepth: number,
+    panelHeight: number,
+    center: THREE.Vector3,
+    offset: number,
+    darkness: number = 0
+  ): void => {
+    if (style !== "choga") {
+      geometries.push(createBox(wallThickness, panelHeight, panelDepth, center, COLORS.wall));
+      return;
+    }
+
+    const stripCount = Math.max(1, Math.min(6, Math.round(panelDepth / Math.max(0.22, baySize * 0.20))));
+    const stripD = panelDepth / stripCount;
+    for (let i = 0; i < stripCount; i++) {
+      const localZ = -panelDepth * 0.5 + (i + 0.5) * stripD;
+      const s = seed + offset * 1.19 + i * 4.1;
+      const xJitter = (seeded01(s + 1.6) - 0.5) * wallThickness * 0.20;
+      const widthX = wallThickness * (0.90 + seeded01(s + 5.2) * 0.20);
+      const tone = createChogaMudColor(seed + offset + i * 6.1, darkness + 0.05);
+      geometries.push(
+        createBox(
+          widthX,
+          panelHeight,
+          stripD * 1.03,
+          new THREE.Vector3(center.x + xJitter, center.y, center.z + localZ),
+          tone
+        )
+      );
+    }
+
+    if (panelHeight > 0.35 && seeded01(seed + offset * 0.81) > 0.44) {
+      const bandY = center.y - panelHeight * (0.18 + seeded01(seed + offset * 1.03) * 0.25);
+      const bandH = 0.024 + seeded01(seed + offset * 1.17) * 0.020;
+      const bandColor = createChogaMudColor(seed + offset + 101.4, darkness + 0.55);
+      geometries.push(
+        createBox(
+          wallThickness * 0.16,
+          bandH,
+          panelDepth * 0.90,
+          new THREE.Vector3(center.x - wallThickness * 0.08, bandY, center.z),
+          bandColor
+        )
+      );
+    }
+  };
 
   for (let x = 0; x < xBays; x++) {
     const cx = -length * 0.5 + (x + 0.5) * baySize;
     const frontCell = plan[x][0];
 
     if (frontCell === "kitchen") {
-      geometries.push(
-        createBox(
-          baySize * 0.94,
-          wallHeight,
-          wallThickness,
-          new THREE.Vector3(cx, wallBaseY, frontZ),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelZ(
+        baySize * 0.94,
+        wallHeight,
+        new THREE.Vector3(cx, wallBaseY, frontZ),
+        100 + x * 9.1,
+        0.12
       );
     } else {
       const openingWidth = baySize * 0.62;
@@ -1115,41 +1062,30 @@ function generateHanokLinearHouseGeometry(
       const transomHeight = 0.34;
       const openingHeight = Math.max(0.8, wallHeight - sillHeight - transomHeight);
 
-      geometries.push(
-        createBox(
-          sideWidth,
-          wallHeight,
-          wallThickness,
-          new THREE.Vector3(cx - openingWidth * 0.5 - sideWidth * 0.5, wallBaseY, frontZ),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelZ(
+        sideWidth,
+        wallHeight,
+        new THREE.Vector3(cx - openingWidth * 0.5 - sideWidth * 0.5, wallBaseY, frontZ),
+        120 + x * 13.7
       );
-      geometries.push(
-        createBox(
-          sideWidth,
-          wallHeight,
-          wallThickness,
-          new THREE.Vector3(cx + openingWidth * 0.5 + sideWidth * 0.5, wallBaseY, frontZ),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelZ(
+        sideWidth,
+        wallHeight,
+        new THREE.Vector3(cx + openingWidth * 0.5 + sideWidth * 0.5, wallBaseY, frontZ),
+        122 + x * 13.7
       );
-      geometries.push(
-        createBox(
-          openingWidth,
-          sillHeight,
-          wallThickness,
-          new THREE.Vector3(cx, foundationHeight + sillHeight * 0.5, frontZ),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelZ(
+        openingWidth,
+        sillHeight,
+        new THREE.Vector3(cx, foundationHeight + sillHeight * 0.5, frontZ),
+        124 + x * 13.7,
+        0.22
       );
-      geometries.push(
-        createBox(
-          openingWidth,
-          transomHeight,
-          wallThickness,
-          new THREE.Vector3(cx, foundationHeight + wallHeight - transomHeight * 0.5, frontZ),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelZ(
+        openingWidth,
+        transomHeight,
+        new THREE.Vector3(cx, foundationHeight + wallHeight - transomHeight * 0.5, frontZ),
+        126 + x * 13.7
       );
 
       // Wooden frame + paper panel
@@ -1202,14 +1138,12 @@ function generateHanokLinearHouseGeometry(
       );
     }
 
-    geometries.push(
-      createBox(
-        baySize * 0.94,
-        wallHeight,
-        wallThickness,
-        new THREE.Vector3(cx, wallBaseY, backZ),
-        style === "giwa" ? COLORS.wall : COLORS.wallMud
-      )
+    pushWallPanelZ(
+      baySize * 0.94,
+      wallHeight,
+      new THREE.Vector3(cx, wallBaseY, backZ),
+      160 + x * 11.2,
+      0.08
     );
 
     const addRearWindow = includeRearWindows && seeded01(seed + x * 1.73 + 19.0) > 0.56;
@@ -1257,32 +1191,24 @@ function generateHanokLinearHouseGeometry(
       const sillHeight = 0.38;
       const openingHeight = wallHeight - sillHeight - 0.22;
 
-      geometries.push(
-        createBox(
-          wallThickness,
-          wallHeight,
-          sideWidth,
-          new THREE.Vector3(leftX, wallBaseY, cz - openingWidth * 0.5 - sideWidth * 0.5),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelX(
+        sideWidth,
+        wallHeight,
+        new THREE.Vector3(leftX, wallBaseY, cz - openingWidth * 0.5 - sideWidth * 0.5),
+        210 + z * 9.5
       );
-      geometries.push(
-        createBox(
-          wallThickness,
-          wallHeight,
-          sideWidth,
-          new THREE.Vector3(leftX, wallBaseY, cz + openingWidth * 0.5 + sideWidth * 0.5),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelX(
+        sideWidth,
+        wallHeight,
+        new THREE.Vector3(leftX, wallBaseY, cz + openingWidth * 0.5 + sideWidth * 0.5),
+        212 + z * 9.5
       );
-      geometries.push(
-        createBox(
-          wallThickness,
-          sillHeight,
-          openingWidth,
-          new THREE.Vector3(leftX, foundationHeight + sillHeight * 0.5, cz),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelX(
+        openingWidth,
+        sillHeight,
+        new THREE.Vector3(leftX, foundationHeight + sillHeight * 0.5, cz),
+        214 + z * 9.5,
+        0.18
       );
       geometries.push(
         createBox(
@@ -1294,25 +1220,19 @@ function generateHanokLinearHouseGeometry(
         )
       );
     } else {
-      geometries.push(
-        createBox(
-          wallThickness,
-          wallHeight,
-          baySize * 0.94,
-          new THREE.Vector3(leftX, wallBaseY, cz),
-          style === "giwa" ? COLORS.wall : COLORS.wallMud
-        )
+      pushWallPanelX(
+        baySize * 0.94,
+        wallHeight,
+        new THREE.Vector3(leftX, wallBaseY, cz),
+        230 + z * 10.7
       );
     }
 
-    geometries.push(
-      createBox(
-        wallThickness,
-        wallHeight,
-        baySize * 0.94,
-        new THREE.Vector3(rightX, wallBaseY, cz),
-        style === "giwa" ? COLORS.wall : COLORS.wallMud
-      )
+    pushWallPanelX(
+      baySize * 0.94,
+      wallHeight,
+      new THREE.Vector3(rightX, wallBaseY, cz),
+      250 + z * 10.7
     );
   }
 
@@ -1412,21 +1332,7 @@ function generateHanokLinearHouseGeometry(
   }
 
   if (style === "choga") {
-    pushChogaWallWeathering(
-      geometries,
-      length,
-      width,
-      wallHeight,
-      foundationHeight,
-      wallThickness,
-      baySize,
-      xBays,
-      zBays,
-      plan,
-      includeKitchen,
-      includeRearWindows,
-      seed
-    );
+    pushChogaLowerDirtBands(geometries, length, width, foundationHeight, wallThickness, seed);
   }
 
   if (includeKitchen) {
