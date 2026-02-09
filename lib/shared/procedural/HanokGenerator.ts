@@ -784,12 +784,12 @@ function pushChogaRoof(
 }
 
 function createMudTone(seed: number): THREE.Color {
-  const tint = 0.78 + seeded01(seed + 1.7) * 0.34;
-  const warm = (seeded01(seed + 3.9) - 0.5) * 0.06;
+  const tint = 0.92 + seeded01(seed + 1.7) * 0.16;
+  const warm = (seeded01(seed + 3.9) - 0.5) * 0.03;
   return new THREE.Color(
-    clamp(COLORS.wallMud.r * tint + warm * 0.7, 0, 1),
-    clamp(COLORS.wallMud.g * tint + warm * 0.4, 0, 1),
-    clamp(COLORS.wallMud.b * tint - warm * 0.2, 0, 1)
+    clamp(COLORS.wallMud.r * tint + warm * 0.45, 0, 1),
+    clamp(COLORS.wallMud.g * tint + warm * 0.25, 0, 1),
+    clamp(COLORS.wallMud.b * tint - warm * 0.12, 0, 1)
   );
 }
 
@@ -811,10 +811,10 @@ function pushMudPatchClusterOnZFace(
   for (let i = 0; i < count; i++) {
     const s = seed + i * 17.3;
     const localX = (seeded01(s + 1.1) - 0.5) * spanX * 0.80;
-    const patchW = spanX * (0.14 + seeded01(s + 2.7) * 0.24);
-    const patchH = 0.13 + seeded01(s + 4.9) * 0.34;
+    const patchW = spanX * (0.09 + seeded01(s + 2.7) * 0.16);
+    const patchH = 0.10 + seeded01(s + 4.9) * 0.22;
     const y = minY + seeded01(s + 6.3) * Math.max(0.1, maxY - minY);
-    const thickness = wallThickness * (0.08 + seeded01(s + 8.2) * 0.22);
+    const z = centerZ + faceSign * (wallThickness * 0.52 + 0.0015);
     if (
       avoidCenterWidth > 0 &&
       Math.abs(localX) < avoidCenterWidth * 0.56 &&
@@ -825,37 +825,17 @@ function pushMudPatchClusterOnZFace(
     }
 
     const color = createMudTone(s + 9.5);
-    geometries.push(
-      createBox(
-        patchW,
-        patchH,
-        thickness,
-        new THREE.Vector3(centerX + localX, y, centerZ + faceSign * thickness * 0.5),
-        color
-      )
-    );
-
-    if (seeded01(s + 12.4) > 0.54) {
-      const traceLength = patchW * (0.34 + seeded01(s + 14.6) * 0.38);
-      geometries.push(
-        createBox(
-          traceLength,
-          0.008,
-          0.004,
-          new THREE.Vector3(
-            centerX + localX * 0.84,
-            y + (seeded01(s + 16.2) - 0.5) * patchH * 0.4,
-            centerZ + faceSign * (thickness + 0.004)
-          ),
-          COLORS.woodMid,
-          new THREE.Euler(
-            (seeded01(s + 18.5) - 0.5) * 0.22,
-            0,
-            (seeded01(s + 21.3) - 0.5) * 0.42
-          )
-        )
-      );
-    }
+    const skewX0 = (seeded01(s + 11.2) - 0.5) * patchW * 0.28;
+    const skewX1 = (seeded01(s + 13.7) - 0.5) * patchW * 0.28;
+    const skewY0 = (seeded01(s + 15.9) - 0.5) * patchH * 0.30;
+    const skewY1 = (seeded01(s + 17.6) - 0.5) * patchH * 0.30;
+    const halfW = patchW * 0.5;
+    const halfH = patchH * 0.5;
+    const a = new THREE.Vector3(centerX + localX - halfW + skewX0, y + halfH + skewY0, z);
+    const b = new THREE.Vector3(centerX + localX + halfW + skewX1, y + halfH - skewY0 * 0.4, z);
+    const c = new THREE.Vector3(centerX + localX + halfW - skewX0 * 0.4, y - halfH + skewY1, z);
+    const d = new THREE.Vector3(centerX + localX - halfW - skewX1, y - halfH - skewY1, z);
+    geometries.push(createQuad(a, b, c, d, color));
   }
 }
 
@@ -874,43 +854,23 @@ function pushMudPatchClusterOnXFace(
   for (let i = 0; i < count; i++) {
     const s = seed + i * 19.7;
     const localZ = (seeded01(s + 1.4) - 0.5) * spanZ * 0.80;
-    const patchD = spanZ * (0.16 + seeded01(s + 3.8) * 0.24);
-    const patchH = 0.13 + seeded01(s + 5.5) * 0.32;
+    const patchD = spanZ * (0.10 + seeded01(s + 3.8) * 0.16);
+    const patchH = 0.10 + seeded01(s + 5.5) * 0.22;
     const y = minY + seeded01(s + 7.6) * Math.max(0.1, maxY - minY);
-    const thickness = wallThickness * (0.08 + seeded01(s + 9.1) * 0.22);
+    const x = centerX + faceSign * (wallThickness * 0.52 + 0.0015);
     const color = createMudTone(s + 11.8);
 
-    geometries.push(
-      createBox(
-        thickness,
-        patchH,
-        patchD,
-        new THREE.Vector3(centerX + faceSign * thickness * 0.5, y, centerZ + localZ),
-        color
-      )
-    );
-
-    if (seeded01(s + 14.3) > 0.58) {
-      const traceLength = patchD * (0.36 + seeded01(s + 16.9) * 0.34);
-      geometries.push(
-        createBox(
-          0.004,
-          0.008,
-          traceLength,
-          new THREE.Vector3(
-            centerX + faceSign * (thickness + 0.004),
-            y + (seeded01(s + 19.2) - 0.5) * patchH * 0.36,
-            centerZ + localZ * 0.86
-          ),
-          COLORS.woodMid,
-          new THREE.Euler(
-            (seeded01(s + 22.7) - 0.5) * 0.22,
-            (seeded01(s + 25.1) - 0.5) * 0.44,
-            0
-          )
-        )
-      );
-    }
+    const skewZ0 = (seeded01(s + 14.3) - 0.5) * patchD * 0.28;
+    const skewZ1 = (seeded01(s + 16.9) - 0.5) * patchD * 0.28;
+    const skewY0 = (seeded01(s + 19.2) - 0.5) * patchH * 0.30;
+    const skewY1 = (seeded01(s + 22.7) - 0.5) * patchH * 0.30;
+    const halfD = patchD * 0.5;
+    const halfH = patchH * 0.5;
+    const a = new THREE.Vector3(x, y + halfH + skewY0, centerZ + localZ - halfD + skewZ0);
+    const b = new THREE.Vector3(x, y + halfH - skewY0 * 0.4, centerZ + localZ + halfD + skewZ1);
+    const c = new THREE.Vector3(x, y - halfH + skewY1, centerZ + localZ + halfD - skewZ0 * 0.4);
+    const d = new THREE.Vector3(x, y - halfH - skewY1, centerZ + localZ - halfD - skewZ1);
+    geometries.push(createQuad(a, b, c, d, color));
   }
 }
 
@@ -949,7 +909,7 @@ function pushChogaWallWeathering(
         minY,
         maxY,
         wallThickness,
-        6,
+        4,
         seed + x * 31.1 + 10.4
       );
     }
@@ -966,7 +926,7 @@ function pushChogaWallWeathering(
       minY,
       maxY,
       wallThickness,
-      hasRearWindow ? 5 : 7,
+      hasRearWindow ? 4 : 5,
       seed + x * 37.9 + 122.8,
       hasRearWindow ? baySize * 0.42 : 0,
       rearWindowY - rearWindowHeight * 0.65,
@@ -987,7 +947,7 @@ function pushChogaWallWeathering(
         minY,
         maxY,
         wallThickness,
-        6,
+        4,
         seed + z * 33.4 + 241.6
       );
     }
@@ -1000,7 +960,7 @@ function pushChogaWallWeathering(
       minY,
       maxY,
       wallThickness,
-      6,
+      4,
       seed + z * 35.7 + 318.2
     );
   }
@@ -1010,16 +970,16 @@ function pushChogaWallWeathering(
   for (let i = 0; i < perimeterSegments; i++) {
     const t = (i + 0.5) / perimeterSegments;
     const x = -length * 0.5 + t * length;
-    const segW = 0.34 + seeded01(seed + i * 7.1) * 0.28;
-    const segH = 0.06 + seeded01(seed + i * 11.9) * 0.05;
-    const segD = wallThickness * (0.20 + seeded01(seed + i * 13.4) * 0.28);
+    const segW = 0.28 + seeded01(seed + i * 7.1) * 0.20;
+    const segH = 0.045 + seeded01(seed + i * 11.9) * 0.03;
+    const segD = wallThickness * (0.05 + seeded01(seed + i * 13.4) * 0.08);
     const tone = createMudTone(seed + i * 17.7 + 402.6);
 
     geometries.push(
-      createBox(segW, segH, segD, new THREE.Vector3(x, smearY, frontZ - segD * 0.35), tone)
+      createBox(segW, segH, segD, new THREE.Vector3(x, smearY, frontZ - segD * 0.45), tone)
     );
     geometries.push(
-      createBox(segW, segH, segD, new THREE.Vector3(x, smearY, backZ + segD * 0.35), tone)
+      createBox(segW, segH, segD, new THREE.Vector3(x, smearY, backZ + segD * 0.45), tone)
     );
   }
 }
