@@ -564,87 +564,110 @@ function pushChogaRoof(
     );
   };
 
-  // Traditional eonggi layering: broad courses are stacked from eave toward ridge with heavy overlap.
-  const layerRows = Math.max(7, Math.round((roofSpan * 0.5) / 0.28));
-  const rowStep = 0.82 / layerRows;
+  // Eonggi-style layering: broad overlapped courses with rounded bundle volume.
+  const layerRows = Math.max(8, Math.round((roofSpan * 0.5) / 0.26));
+  const exposedStep = 0.74 / layerRows;
+  const overlapScale = 2.8;
   for (let side = -1; side <= 1; side += 2) {
     for (let row = 0; row < layerRows; row++) {
-      const rowSeed = seed + side * 63.1 + row * 10.3;
-      const tEave = clamp(0.98 - row * rowStep, 0.18, 1.02);
-      const tRidge = clamp(
-        tEave - rowStep * (1.56 + seeded01(rowSeed + 1.8) * 0.30),
-        0.10,
+      const rowSeed = seed + side * 79.3 + row * 11.7;
+      const rowWeight = 1 - row / layerRows;
+      const tExposed = clamp(0.97 - row * exposedStep, 0.18, 1.00);
+      const tInner = clamp(
+        tExposed - exposedStep * overlapScale * (0.90 + seeded01(rowSeed + 1.7) * 0.22),
+        0.08,
         0.95
       );
-      const tMid = (tEave + tRidge) * 0.5;
-      const yEave = surfaceY(tEave);
-      const yRidge = surfaceY(tRidge);
-      const yMid = (yEave + yRidge) * 0.5;
-      const rowDepth = Math.max(0.14, (tEave - tRidge) * roofSpan * 0.5);
-      const slopeAngle = side * Math.atan2(Math.abs(yRidge - yEave), (tEave - tRidge) * roofSpan * 0.5);
-      const rowWeight = 1 - row / layerRows;
+      const tMid = (tExposed + tInner) * 0.5;
+      const yExposed = surfaceY(tExposed);
+      const yInner = surfaceY(tInner);
+      const yMid = (yExposed + yInner) * 0.5;
+      const rowDepth = Math.max(0.16, (tExposed - tInner) * roofSpan * 0.5);
+      const slopeAngle = side * Math.atan2(Math.abs(yInner - yExposed), (tExposed - tInner) * roofSpan * 0.5);
+      const rowThickness = 0.072 + rowWeight * 0.020 + seeded01(rowSeed + 2.9) * 0.008;
+      const rowZ = side * roofSpan * 0.5 * tMid;
+      const rowY = yMid + 0.014 + rowWeight * 0.006;
 
-      const wingCount = roofLength > baySize * 3.7 ? 2 : 1;
-      const wingSpan = roofLength / wingCount;
-      for (let wing = 0; wing < wingCount; wing++) {
-        const wingSeed = rowSeed + wing * 17.9;
-        const baseX = -halfRoofLength + (wing + 0.5) * wingSpan;
-        const edgeFactor = halfRoofLength > 0.001 ? Math.abs(baseX) / halfRoofLength : 0;
-        const edgeDamp = clamp(1 - edgeFactor * 0.52, 0.58, 1);
-        const posX = clamp(
-          baseX + (seeded01(wingSeed + 2.4) - 0.5) * wingSpan * 0.05,
-          -halfRoofLength + 0.02,
-          halfRoofLength - 0.02
-        );
-        const posY = yMid + 0.019 + rowWeight * 0.007 + (seeded01(wingSeed + 3.8) - 0.5) * 0.004;
-        const posZ = side * roofSpan * 0.5 * tMid + (seeded01(wingSeed + 5.2) - 0.5) * rowDepth * 0.03;
-        const beltW = wingSpan * (1.05 + seeded01(wingSeed + 7.6) * 0.10);
-        const beltH = (0.023 + rowWeight * 0.008 + seeded01(wingSeed + 9.4) * 0.004) * edgeDamp;
-        const beltD = rowDepth * (0.96 + seeded01(wingSeed + 11.3) * 0.10);
-        const straw = makeStrawColor(wingSeed + 13.1, 0.16);
+      // Broad, flat-but-thick main course.
+      geometries.push(
+        createBox(
+          roofLength * 1.01,
+          rowThickness * 0.78,
+          rowDepth * (0.96 + seeded01(rowSeed + 4.2) * 0.08),
+          new THREE.Vector3(0, rowY, rowZ + (seeded01(rowSeed + 5.4) - 0.5) * 0.02),
+          makeStrawColor(rowSeed + 6.8, 0.14),
+          new THREE.Euler(
+            slopeAngle + (seeded01(rowSeed + 8.1) - 0.5) * 0.014,
+            (seeded01(rowSeed + 9.7) - 0.5) * 0.010,
+            (seeded01(rowSeed + 10.8) - 0.5) * 0.008
+          )
+        )
+      );
 
-        // Base belt body
+      // Upper bundle mass for thatch volume (keeps silhouette thick, not board-like).
+      geometries.push(
+        createBox(
+          roofLength * 0.985,
+          rowThickness * 0.54,
+          rowDepth * (0.62 + seeded01(rowSeed + 11.2) * 0.10),
+          new THREE.Vector3(
+            0,
+            rowY + rowThickness * 0.24,
+            rowZ - side * rowDepth * (0.12 + seeded01(rowSeed + 12.6) * 0.03)
+          ),
+          makeStrawColor(rowSeed + 13.7, 0.11),
+          new THREE.Euler(
+            slopeAngle + (seeded01(rowSeed + 15.1) - 0.5) * 0.014,
+            (seeded01(rowSeed + 16.4) - 0.5) * 0.008,
+            (seeded01(rowSeed + 17.2) - 0.5) * 0.008
+          )
+        )
+      );
+
+      // Small exposed fringe blocks only at row edge (short and dense, no long spikes).
+      const edgeFringeCount = Math.max(10, Math.round(roofLength / 1.2));
+      for (let i = 0; i < edgeFringeCount; i++) {
+        const fSeed = rowSeed + i * 21.7;
+        const fx = -halfRoofLength + ((i + 0.5) / edgeFringeCount) * roofLength;
+        const fw = 0.08 + seeded01(fSeed + 1.8) * 0.08;
+        const fh = rowThickness * (0.22 + seeded01(fSeed + 2.9) * 0.18);
+        const fd = 0.05 + seeded01(fSeed + 4.4) * 0.06;
         geometries.push(
           createBox(
-            beltW,
-            beltH * 0.62,
-            beltD,
-            new THREE.Vector3(posX, posY - beltH * 0.10, posZ),
-            straw,
-            new THREE.Euler(
-              slopeAngle + (seeded01(wingSeed + 14.7) - 0.5) * 0.035,
-              (seeded01(wingSeed + 16.2) - 0.5) * 0.05,
-              (seeded01(wingSeed + 17.6) - 0.5) * 0.025
-            )
-          )
-        );
-
-        // Rounded exposed edge of each belt so it reads as bundled straw, not plank tiles.
-        const edgeT = clamp(tEave - rowStep * (0.10 + seeded01(wingSeed + 18.9) * 0.10), 0.11, 1.02);
-        const edgeY = surfaceY(edgeT) + 0.010 + rowWeight * 0.004;
-        const edgeZ = side * roofSpan * 0.5 * edgeT;
-        const edgeRadius = beltH * (0.42 + seeded01(wingSeed + 20.3) * 0.16);
-        geometries.push(
-          createCylinder(
-            edgeRadius,
-            edgeRadius * (0.90 + seeded01(wingSeed + 21.6) * 0.08),
-            beltW * 1.02,
-            10,
+            fw,
+            fh,
+            fd,
             new THREE.Vector3(
-              posX + (seeded01(wingSeed + 22.8) - 0.5) * 0.03,
-              edgeY,
-              edgeZ - side * rowDepth * 0.06
+              fx + (seeded01(fSeed + 5.6) - 0.5) * 0.04,
+              yExposed - fh * 0.12 + seeded01(fSeed + 6.7) * 0.01,
+              side * roofSpan * 0.5 * tExposed + side * fd * 0.50
             ),
-            makeStrawColor(wingSeed + 23.9, 0.10),
+            makeStrawColor(fSeed + 7.9, 0.10),
             new THREE.Euler(
-              slopeAngle + (seeded01(wingSeed + 25.1) - 0.5) * 0.03,
-              (seeded01(wingSeed + 26.2) - 0.5) * 0.05,
-              Math.PI * 0.5
+              slopeAngle + (seeded01(fSeed + 9.1) - 0.5) * 0.05,
+              (seeded01(fSeed + 10.2) - 0.5) * 0.04,
+              (seeded01(fSeed + 11.3) - 0.5) * 0.06
             )
           )
         );
       }
 
+      // Rounded edge impression using a soft rectangular ribbon (fewer line artifacts than cylinders).
+      const edgeRadius = rowThickness * 0.56;
+      geometries.push(
+        createBox(
+          roofLength * 0.995,
+          edgeRadius * 1.35,
+          edgeRadius * 1.15,
+          new THREE.Vector3(0, yExposed + 0.010 + rowWeight * 0.004, side * roofSpan * 0.5 * tExposed),
+          makeStrawColor(rowSeed + 14.1, 0.10),
+          new THREE.Euler(
+            slopeAngle + (seeded01(rowSeed + 15.2) - 0.5) * 0.010,
+            (seeded01(rowSeed + 16.1) - 0.5) * 0.008,
+            (seeded01(rowSeed + 17.3) - 0.5) * 0.008
+          )
+        )
+      );
     }
   }
 
@@ -675,79 +698,56 @@ function pushChogaRoof(
   }
 
   geometries.push(
-    createCylinder(
-      isMainWing ? 0.12 : 0.10,
-      isMainWing ? 0.12 : 0.10,
+    createBox(
       roofLength * 0.99,
-      14,
+      isMainWing ? 0.16 : 0.14,
+      isMainWing ? 0.17 : 0.15,
       new THREE.Vector3(0, roofBaseY + roofRise + 0.09, 0),
-      COLORS.chogaBundle,
-      new THREE.Euler(0, 0, Math.PI * 0.5)
+      COLORS.chogaBundle
     )
   );
   geometries.push(
-    createCylinder(
-      isMainWing ? 0.08 : 0.07,
-      isMainWing ? 0.08 : 0.07,
-      roofLength * 0.98,
-      10,
+    createBox(
+      roofLength * 0.97,
+      isMainWing ? 0.11 : 0.10,
+      isMainWing ? 0.12 : 0.10,
       new THREE.Vector3(0, roofBaseY + roofRise + 0.16, 0),
-      COLORS.chogaBundle,
-      new THREE.Euler(0, 0, Math.PI * 0.5)
+      COLORS.chogaBundle
     )
   );
   const ridgeTieCount = Math.max(5, Math.round(roofLength / 0.92));
   for (let i = 0; i < ridgeTieCount; i++) {
     const x = -halfRoofLength + ((i + 0.5) / ridgeTieCount) * roofLength;
     geometries.push(
-      createCylinder(
-        0.015,
-        0.015,
-        0.24,
-        8,
+      createBox(
+        0.03,
+        0.23,
+        0.03,
         new THREE.Vector3(x, roofBaseY + roofRise + 0.16, 0),
-        COLORS.chogaRope,
-        new THREE.Euler(Math.PI * 0.5, 0, 0)
+        COLORS.chogaRope
       )
     );
   }
 
   geometries.push(
-    createCylinder(
-      0.050,
-      0.050,
+    createBox(
       roofLength * 0.96,
-      10,
+      0.055,
+      0.055,
       new THREE.Vector3(0, surfaceY(0.93) + 0.012, -roofSpan * 0.5 * 0.93),
-      COLORS.chogaRope,
-      new THREE.Euler(0, 0, Math.PI * 0.5)
+      COLORS.chogaRope
     )
   );
   geometries.push(
-    createCylinder(
-      0.050,
-      0.050,
+    createBox(
       roofLength * 0.96,
-      10,
+      0.055,
+      0.055,
       new THREE.Vector3(0, surfaceY(0.93) + 0.012, roofSpan * 0.5 * 0.93),
-      COLORS.chogaRope,
-      new THREE.Euler(0, 0, Math.PI * 0.5)
+      COLORS.chogaRope
     )
   );
 
-  // Keep rope representation minimal so straw belts stay visually dominant.
-  const ropeCount = Math.max(2, Math.round(length / (baySize * 2.1)));
-  const ropeSpacing = roofLength / Math.max(1, ropeCount);
-  for (let i = 0; i < ropeCount; i++) {
-    const x = -halfRoofLength + (i + 0.5) * ropeSpacing;
-    for (let side = -1; side <= 1; side += 2) {
-      const pTop = new THREE.Vector3(x, surfaceY(0.16) + 0.018, side * roofSpan * 0.5 * 0.16);
-      const pMid = new THREE.Vector3(x, surfaceY(0.56) + 0.014, side * roofSpan * 0.5 * 0.56);
-      const pBot = new THREE.Vector3(x, surfaceY(0.92) + 0.010, side * roofSpan * 0.5 * 0.92);
-      geometries.push(createBeamBetween(pTop, pMid, 0.011, COLORS.chogaRope));
-      geometries.push(createBeamBetween(pMid, pBot, 0.010, COLORS.chogaRope));
-    }
-  }
 }
 
 function createChogaMudColor(seed: number, darkness: number = 0): THREE.Color {
