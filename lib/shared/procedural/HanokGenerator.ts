@@ -32,6 +32,7 @@ interface NormalizedDimensions {
 
 type PlanCell = "ondol" | "daecheong" | "kitchen" | "storage";
 type HanokWingRole = "main" | "auxiliary";
+type GiwaRoofType = "matbae" | "ujingak" | "paljak";
 
 interface HanokLinearOptions {
   wingRole?: HanokWingRole;
@@ -238,6 +239,25 @@ function createTriangle(
   return tintGeometry(geometry, color);
 }
 
+function createBeamBetween(
+  start: THREE.Vector3,
+  end: THREE.Vector3,
+  thickness: number,
+  color: THREE.Color
+): THREE.BufferGeometry {
+  const direction = new THREE.Vector3().subVectors(end, start);
+  const length = Math.max(0.001, direction.length());
+  const geometry = new THREE.BoxGeometry(length, thickness, thickness);
+  const center = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
+  const quaternion = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(1, 0, 0),
+    direction.normalize()
+  );
+  const matrix = new THREE.Matrix4().compose(center, quaternion, new THREE.Vector3(1, 1, 1));
+  geometry.applyMatrix4(matrix);
+  return tintGeometry(geometry, color);
+}
+
 function mergeGeometries(geometries: THREE.BufferGeometry[]): THREE.BufferGeometry {
   if (geometries.length === 0) {
     return new THREE.BoxGeometry(0.01, 0.01, 0.01);
@@ -323,6 +343,23 @@ function isStructureType(cell: PlanCell): boolean {
   return cell === "ondol" || cell === "storage" || cell === "kitchen";
 }
 
+function resolveGiwaRoofType(
+  length: number,
+  width: number,
+  seed: number,
+  wingRole: HanokWingRole
+): GiwaRoofType {
+  if (wingRole === "auxiliary") {
+    return length > 12 && width > 7 ? "ujingak" : "matbae";
+  }
+
+  const area = length * width;
+  const roll = seeded01(seed + area * 0.19);
+  if (area >= 150 && roll > 0.45) return "paljak";
+  if (area >= 90 && roll > 0.20) return "ujingak";
+  return "matbae";
+}
+
 function pushGiwaRoof(
   geometries: THREE.BufferGeometry[],
   length: number,
@@ -334,6 +371,7 @@ function pushGiwaRoof(
   wingRole: HanokWingRole
 ): void {
   const isMainWing = wingRole === "main";
+  const roofType = resolveGiwaRoofType(length, width, seed, wingRole);
   const eave = isMainWing
     ? clamp(0.78 + baySize * 0.08, 0.75, 1.28)
     : clamp(0.62 + baySize * 0.06, 0.55, 1.02);
@@ -342,9 +380,14 @@ function pushGiwaRoof(
   const roofBaseY = foundationHeight + wallHeight + 0.02;
   const roofRise = wallHeight * (isMainWing ? 0.72 : 0.60) + seeded01(seed + 4.4) * 0.18;
   const slopeAngle = Math.atan2(roofRise, roofSpan * 0.5);
+  const ridgeHalf = roofType === "matbae"
+    ? roofLength * 0.5
+    : roofType === "ujingak"
+      ? roofLength * 0.24
+      : roofLength * 0.32;
 
-  const ridgeLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY + roofRise, 0);
-  const ridgeRight = new THREE.Vector3(roofLength * 0.5, roofBaseY + roofRise, 0);
+  const ridgeLeft = new THREE.Vector3(-ridgeHalf, roofBaseY + roofRise, 0);
+  const ridgeRight = new THREE.Vector3(ridgeHalf, roofBaseY + roofRise, 0);
   const frontLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
   const frontRight = new THREE.Vector3(roofLength * 0.5, roofBaseY, -roofSpan * 0.5);
   const backLeft = new THREE.Vector3(-roofLength * 0.5, roofBaseY, roofSpan * 0.5);
@@ -352,8 +395,32 @@ function pushGiwaRoof(
 
   geometries.push(createQuad(ridgeLeft, ridgeRight, frontRight, frontLeft, COLORS.giwaRoof));
   geometries.push(createQuad(ridgeLeft, ridgeRight, backRight, backLeft, COLORS.giwaRoof));
-  geometries.push(createTriangle(frontLeft, ridgeLeft, backLeft, COLORS.giwaRoof));
-  geometries.push(createTriangle(frontRight, ridgeRight, backRight, COLORS.giwaRoof));
+
+  if (roofType === "matbae") {
+    geometries.push(createTriangle(frontLeft, ridgeLeft, backLeft, COLORS.giwaRoof));
+    geometries.push(createTriangle(frontRight, ridgeRight, backRight, COLORS.giwaRoof));
+  } else {
+    geometries.push(createTriangle(frontLeft, ridgeLeft, backLeft, COLORS.giwaRoof));
+    geometries.push(createTriangle(frontRight, ridgeRight, backRight, COLORS.giwaRoof));
+
+    const hipThickness = roofType === "paljak" ? 0.09 : 0.08;
+    geometries.push(createBeamBetween(ridgeLeft, frontLeft, hipThickness, COLORS.giwaTile));
+    geometries.push(createBeamBetween(ridgeLeft, backLeft, hipThickness, COLORS.giwaTile));
+    geometries.push(createBeamBetween(ridgeRight, frontRight, hipThickness, COLORS.giwaTile));
+    geometries.push(createBeamBetween(ridgeRight, backRight, hipThickness, COLORS.giwaTile));
+
+    if (roofType === "paljak") {
+      const gableInset = roofSpan * 0.20;
+      const leftGableA = new THREE.Vector3(-ridgeHalf, roofBaseY + roofRise * 0.57, -gableInset);
+      const leftGableB = new THREE.Vector3(-ridgeHalf, roofBaseY + roofRise * 0.57, gableInset);
+      const leftGableTop = new THREE.Vector3(-ridgeHalf, roofBaseY + roofRise * 0.96, 0);
+      const rightGableA = new THREE.Vector3(ridgeHalf, roofBaseY + roofRise * 0.57, -gableInset);
+      const rightGableB = new THREE.Vector3(ridgeHalf, roofBaseY + roofRise * 0.57, gableInset);
+      const rightGableTop = new THREE.Vector3(ridgeHalf, roofBaseY + roofRise * 0.96, 0);
+      geometries.push(createTriangle(leftGableA, leftGableTop, leftGableB, COLORS.wallMud));
+      geometries.push(createTriangle(rightGableB, rightGableTop, rightGableA, COLORS.wallMud));
+    }
+  }
 
   const tileRows = Math.max(8, Math.round((roofSpan * 0.5) / (isMainWing ? 0.16 : 0.20)));
   for (let side = -1; side <= 1; side += 2) {
@@ -364,16 +431,29 @@ function pushGiwaRoof(
       const z = side * (roofSpan * 0.5 * t);
       const pitch = (side < 0 ? -1 : 1) * slopeAngle * (0.76 + t * 0.3);
       const tileThickness = 0.042 + eaveLift * 0.016;
-      geometries.push(
-        createBox(
-          roofLength * 0.987,
-          tileThickness,
-          0.115,
-          new THREE.Vector3(0, y, z),
-          COLORS.giwaTile,
-          new THREE.Euler(pitch, 0, 0)
-        )
-      );
+
+      const rowHalfLength = roofType === "matbae"
+        ? roofLength * 0.5
+        : ridgeHalf + (roofLength * 0.5 - ridgeHalf) * Math.pow(t, 0.86);
+      const rowLength = rowHalfLength * 2;
+      const tileCols = Math.max(4, Math.round(rowLength / (isMainWing ? 1.25 : 1.5)));
+      const colSpan = rowLength / tileCols;
+
+      for (let col = 0; col < tileCols; col++) {
+        const localX = -rowHalfLength + (col + 0.5) * colSpan;
+        const jitter = (seeded01(seed + i * 9.7 + col * 5.1 + side * 1.3) - 0.5) * 0.06;
+        const yaw = (seeded01(seed + i * 6.8 + col * 13.2) - 0.5) * 0.04;
+        geometries.push(
+          createBox(
+            colSpan * 0.96,
+            tileThickness,
+            0.115,
+            new THREE.Vector3(localX + jitter, y, z),
+            COLORS.giwaTile,
+            new THREE.Euler(pitch, yaw, 0)
+          )
+        );
+      }
     }
   }
 
@@ -381,7 +461,7 @@ function pushGiwaRoof(
     createCylinder(
       isMainWing ? 0.11 : 0.09,
       isMainWing ? 0.11 : 0.09,
-      roofLength * 1.01,
+      ridgeHalf * 2 * 1.02,
       12,
       new THREE.Vector3(0, roofBaseY + roofRise + 0.05, 0),
       COLORS.giwaTile,
@@ -454,23 +534,38 @@ function pushChogaRoof(
       const sag = Math.sin(t * Math.PI) * 0.06;
       const y = roofBaseY + roofRise * profile - sag * 0.38;
       const z = side * (roofSpan * 0.5 * t);
-      const tint = 0.83 + seeded01(seed + i * 7.1 + side * 3.7) * 0.22;
-      const straw = new THREE.Color(
-        COLORS.chogaRoof.r * tint,
-        COLORS.chogaRoof.g * tint,
-        COLORS.chogaRoof.b * tint
-      );
-      const depth = 0.14 + (1 - t) * 0.05;
-      geometries.push(
-        createBox(
-          roofLength * 0.984,
-          0.068,
-          depth,
-          new THREE.Vector3(0, y, z),
-          straw,
-          new THREE.Euler((side < 0 ? -1 : 1) * slopeAngle * (0.78 + t * 0.28), 0, 0)
-        )
-      );
+      const pitch = (side < 0 ? -1 : 1) * slopeAngle * (0.78 + t * 0.28);
+      const rowHalfLength = roofLength * (0.47 + t * 0.03);
+      const rowLength = rowHalfLength * 2;
+      const bundleCols = Math.max(5, Math.round(rowLength / (isMainWing ? 1.0 : 1.2)));
+      const colSpan = rowLength / bundleCols;
+      const baseDepth = 0.12 + (1 - t) * 0.07;
+
+      for (let col = 0; col < bundleCols; col++) {
+        const localX = -rowHalfLength + (col + 0.5) * colSpan;
+        const jitterSeed = seed + i * 17.1 + col * 23.3 + side * 13.7;
+        const xJitter = (seeded01(jitterSeed + 2.1) - 0.5) * 0.11;
+        const yJitter = (seeded01(jitterSeed + 4.7) - 0.5) * 0.028;
+        const yaw = (seeded01(jitterSeed + 9.3) - 0.5) * 0.08;
+        const depth = baseDepth * (0.84 + seeded01(jitterSeed + 11.8) * 0.30);
+        const tint = 0.82 + seeded01(jitterSeed + 19.4) * 0.24;
+        const straw = new THREE.Color(
+          COLORS.chogaRoof.r * tint,
+          COLORS.chogaRoof.g * tint,
+          COLORS.chogaRoof.b * tint
+        );
+
+        geometries.push(
+          createBox(
+            colSpan * 0.94,
+            0.062,
+            depth,
+            new THREE.Vector3(localX + xJitter, y + yJitter, z),
+            straw,
+            new THREE.Euler(pitch, yaw, 0)
+          )
+        );
+      }
     }
   }
 
