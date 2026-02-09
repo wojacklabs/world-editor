@@ -950,6 +950,164 @@ function generateHanokLinearHouseGeometry(
   const backZ = width * 0.5 - wallThickness * 0.5;
   const leftX = -length * 0.5 + wallThickness * 0.5;
   const rightX = length * 0.5 - wallThickness * 0.5;
+  const pushChogaPanelSurfaceZ = (
+    panelWidth: number,
+    panelHeight: number,
+    center: THREE.Vector3,
+    offset: number,
+    darkness: number
+  ): void => {
+    const colCount = Math.max(2, Math.min(8, Math.round(panelWidth / Math.max(0.18, baySize * 0.16))));
+    const rowCount = Math.max(2, Math.min(5, Math.round(panelHeight / 0.46)));
+    const cellW = panelWidth / colCount;
+    const cellH = panelHeight / rowCount;
+
+    for (let row = 0; row < rowCount; row++) {
+      for (let col = 0; col < colCount; col++) {
+        const localX = -panelWidth * 0.5 + (col + 0.5) * cellW;
+        const localY = -panelHeight * 0.5 + (row + 0.5) * cellH;
+        const s = seed + offset * 1.37 + col * 7.9 + row * 13.4;
+        const edgeX = panelWidth > 0.001 ? Math.abs(localX) / (panelWidth * 0.5) : 0;
+        const edgeY = panelHeight > 0.001 ? Math.abs(localY) / (panelHeight * 0.5) : 0;
+        const edgeFactor = clamp(Math.max(edgeX, edgeY), 0, 1);
+        const bulge = 1 - edgeFactor;
+        const zJitter =
+          (seeded01(s + 1.1) - 0.5) * wallThickness * 0.24 + (bulge - 0.30) * wallThickness * 0.12;
+        const depth = wallThickness * (0.72 + seeded01(s + 2.8) * 0.36);
+        const chunkW = cellW * (1.03 + seeded01(s + 3.9) * 0.09);
+        const chunkH = cellH * (1.02 + seeded01(s + 4.6) * 0.12);
+        const drop = row === 0 ? seeded01(s + 6.2) * cellH * 0.08 : 0;
+        const tone = createChogaMudColor(
+          seed + offset + col * 5.1 + row * 2.9,
+          darkness + edgeFactor * 0.06
+        );
+
+        geometries.push(
+          createBox(
+            chunkW,
+            chunkH,
+            depth,
+            new THREE.Vector3(center.x + localX, center.y + localY - drop, center.z + zJitter),
+            tone
+          )
+        );
+
+        if (row <= 1 && seeded01(s + 7.3) > 0.78) {
+          const clodW = chunkW * (0.18 + seeded01(s + 8.1) * 0.20);
+          const clodH = chunkH * (0.12 + seeded01(s + 9.7) * 0.18);
+          const clodD = wallThickness * (0.12 + seeded01(s + 10.9) * 0.14);
+          const clodTone = createChogaMudColor(seed + offset + col * 4.3 + row * 6.2, darkness + 0.55);
+          geometries.push(
+            createBox(
+              clodW,
+              clodH,
+              clodD,
+              new THREE.Vector3(
+                center.x + localX + (seeded01(s + 11.4) - 0.5) * chunkW * 0.35,
+                center.y + localY - chunkH * 0.22,
+                center.z + zJitter - wallThickness * 0.11
+              ),
+              clodTone
+            )
+          );
+        }
+      }
+    }
+
+    if (panelHeight > 0.35 && seeded01(seed + offset * 0.73) > 0.34) {
+      const bandY = center.y - panelHeight * (0.17 + seeded01(seed + offset * 0.91) * 0.28);
+      const bandH = 0.030 + seeded01(seed + offset * 1.07) * 0.024;
+      const bandColor = createChogaMudColor(seed + offset + 91.2, darkness + 0.55);
+      geometries.push(
+        createBox(
+          panelWidth * 0.92,
+          bandH,
+          wallThickness * 0.20,
+          new THREE.Vector3(center.x, bandY, center.z - wallThickness * 0.09),
+          bandColor
+        )
+      );
+    }
+  };
+  const pushChogaPanelSurfaceX = (
+    panelDepth: number,
+    panelHeight: number,
+    center: THREE.Vector3,
+    offset: number,
+    darkness: number
+  ): void => {
+    const colCount = Math.max(2, Math.min(8, Math.round(panelDepth / Math.max(0.18, baySize * 0.16))));
+    const rowCount = Math.max(2, Math.min(5, Math.round(panelHeight / 0.46)));
+    const cellD = panelDepth / colCount;
+    const cellH = panelHeight / rowCount;
+
+    for (let row = 0; row < rowCount; row++) {
+      for (let col = 0; col < colCount; col++) {
+        const localZ = -panelDepth * 0.5 + (col + 0.5) * cellD;
+        const localY = -panelHeight * 0.5 + (row + 0.5) * cellH;
+        const s = seed + offset * 1.41 + col * 8.3 + row * 11.8;
+        const edgeZ = panelDepth > 0.001 ? Math.abs(localZ) / (panelDepth * 0.5) : 0;
+        const edgeY = panelHeight > 0.001 ? Math.abs(localY) / (panelHeight * 0.5) : 0;
+        const edgeFactor = clamp(Math.max(edgeZ, edgeY), 0, 1);
+        const bulge = 1 - edgeFactor;
+        const xJitter =
+          (seeded01(s + 1.6) - 0.5) * wallThickness * 0.24 + (bulge - 0.28) * wallThickness * 0.12;
+        const widthX = wallThickness * (0.72 + seeded01(s + 3.5) * 0.36);
+        const chunkD = cellD * (1.03 + seeded01(s + 4.7) * 0.09);
+        const chunkH = cellH * (1.02 + seeded01(s + 5.3) * 0.12);
+        const drop = row === 0 ? seeded01(s + 6.7) * cellH * 0.08 : 0;
+        const tone = createChogaMudColor(
+          seed + offset + col * 4.9 + row * 3.1,
+          darkness + edgeFactor * 0.06
+        );
+
+        geometries.push(
+          createBox(
+            widthX,
+            chunkH,
+            chunkD,
+            new THREE.Vector3(center.x + xJitter, center.y + localY - drop, center.z + localZ),
+            tone
+          )
+        );
+
+        if (row <= 1 && seeded01(s + 7.2) > 0.79) {
+          const clodX = wallThickness * (0.12 + seeded01(s + 8.9) * 0.12);
+          const clodH = chunkH * (0.12 + seeded01(s + 10.1) * 0.18);
+          const clodD = chunkD * (0.18 + seeded01(s + 11.6) * 0.20);
+          const clodTone = createChogaMudColor(seed + offset + col * 6.2 + row * 2.7, darkness + 0.55);
+          geometries.push(
+            createBox(
+              clodX,
+              clodH,
+              clodD,
+              new THREE.Vector3(
+                center.x + xJitter - wallThickness * 0.11,
+                center.y + localY - chunkH * 0.22,
+                center.z + localZ + (seeded01(s + 12.3) - 0.5) * chunkD * 0.35
+              ),
+              clodTone
+            )
+          );
+        }
+      }
+    }
+
+    if (panelHeight > 0.35 && seeded01(seed + offset * 0.81) > 0.33) {
+      const bandY = center.y - panelHeight * (0.17 + seeded01(seed + offset * 1.03) * 0.27);
+      const bandH = 0.030 + seeded01(seed + offset * 1.17) * 0.024;
+      const bandColor = createChogaMudColor(seed + offset + 101.4, darkness + 0.55);
+      geometries.push(
+        createBox(
+          wallThickness * 0.20,
+          bandH,
+          panelDepth * 0.92,
+          new THREE.Vector3(center.x - wallThickness * 0.09, bandY, center.z),
+          bandColor
+        )
+      );
+    }
+  };
   const pushWallPanelZ = (
     panelWidth: number,
     panelHeight: number,
@@ -961,40 +1119,7 @@ function generateHanokLinearHouseGeometry(
       geometries.push(createBox(panelWidth, panelHeight, wallThickness, center, COLORS.wall));
       return;
     }
-
-    const stripCount = Math.max(1, Math.min(6, Math.round(panelWidth / Math.max(0.22, baySize * 0.20))));
-    const stripW = panelWidth / stripCount;
-    for (let i = 0; i < stripCount; i++) {
-      const localX = -panelWidth * 0.5 + (i + 0.5) * stripW;
-      const s = seed + offset * 1.31 + i * 3.7;
-      const zJitter = (seeded01(s + 1.2) - 0.5) * wallThickness * 0.20;
-      const depth = wallThickness * (0.90 + seeded01(s + 4.9) * 0.20);
-      const tone = createChogaMudColor(seed + offset + i * 5.2, darkness + 0.05);
-      geometries.push(
-        createBox(
-          stripW * 1.03,
-          panelHeight,
-          depth,
-          new THREE.Vector3(center.x + localX, center.y, center.z + zJitter),
-          tone
-        )
-      );
-    }
-
-    if (panelHeight > 0.35 && seeded01(seed + offset * 0.73) > 0.46) {
-      const bandY = center.y - panelHeight * (0.18 + seeded01(seed + offset * 0.91) * 0.26);
-      const bandH = 0.024 + seeded01(seed + offset * 1.07) * 0.020;
-      const bandColor = createChogaMudColor(seed + offset + 91.2, darkness + 0.55);
-      geometries.push(
-        createBox(
-          panelWidth * 0.90,
-          bandH,
-          wallThickness * 0.18,
-          new THREE.Vector3(center.x, bandY, center.z - wallThickness * 0.08),
-          bandColor
-        )
-      );
-    }
+    pushChogaPanelSurfaceZ(panelWidth, panelHeight, center, offset, darkness);
   };
   const pushWallPanelX = (
     panelDepth: number,
@@ -1007,40 +1132,7 @@ function generateHanokLinearHouseGeometry(
       geometries.push(createBox(wallThickness, panelHeight, panelDepth, center, COLORS.wall));
       return;
     }
-
-    const stripCount = Math.max(1, Math.min(6, Math.round(panelDepth / Math.max(0.22, baySize * 0.20))));
-    const stripD = panelDepth / stripCount;
-    for (let i = 0; i < stripCount; i++) {
-      const localZ = -panelDepth * 0.5 + (i + 0.5) * stripD;
-      const s = seed + offset * 1.19 + i * 4.1;
-      const xJitter = (seeded01(s + 1.6) - 0.5) * wallThickness * 0.20;
-      const widthX = wallThickness * (0.90 + seeded01(s + 5.2) * 0.20);
-      const tone = createChogaMudColor(seed + offset + i * 6.1, darkness + 0.05);
-      geometries.push(
-        createBox(
-          widthX,
-          panelHeight,
-          stripD * 1.03,
-          new THREE.Vector3(center.x + xJitter, center.y, center.z + localZ),
-          tone
-        )
-      );
-    }
-
-    if (panelHeight > 0.35 && seeded01(seed + offset * 0.81) > 0.44) {
-      const bandY = center.y - panelHeight * (0.18 + seeded01(seed + offset * 1.03) * 0.25);
-      const bandH = 0.024 + seeded01(seed + offset * 1.17) * 0.020;
-      const bandColor = createChogaMudColor(seed + offset + 101.4, darkness + 0.55);
-      geometries.push(
-        createBox(
-          wallThickness * 0.16,
-          bandH,
-          panelDepth * 0.90,
-          new THREE.Vector3(center.x - wallThickness * 0.08, bandY, center.z),
-          bandColor
-        )
-      );
-    }
+    pushChogaPanelSurfaceX(panelDepth, panelHeight, center, offset, darkness);
   };
 
   for (let x = 0; x < xBays; x++) {
