@@ -9,6 +9,7 @@ import EditorInspector from "@/components/editor/EditorInspector";
 import AssetChatPanel from "@/components/editor/AssetChatPanel";
 import AssetLibraryPanel from "@/components/editor/AssetLibraryPanel";
 import { useEditorStore } from "@/lib/editor/store/editorStore";
+import type { HanokPlanPreset } from "@/lib/editor/types/EditorTypes";
 import { SavedAsset } from "@/lib/editor/assets/AssetLibrary";
 import { MeshData, createMeshFromData } from "@/lib/editor/assets/CustomMeshBuilder";
 import { getManualTileManager } from "@/lib/editor/tiles/ManualTileManager";
@@ -510,6 +511,7 @@ export default function EditorPage() {
       width: number;
       height: number;
       baySize: number;
+      planPreset: HanokPlanPreset;
     }
   ): { id: string; newSeed: number } | null => {
     if (!engine) return null;

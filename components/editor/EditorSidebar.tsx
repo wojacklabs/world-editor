@@ -2,6 +2,7 @@
 
 import { useEditorStore } from "@/lib/editor/store/editorStore";
 import type {
+  HanokPlanPreset,
   ToolType,
   HeightmapTool,
   BiomeType,
@@ -43,6 +44,14 @@ const PROP_TYPES: { id: ProceduralAssetType; label: string }[] = [
   { id: "wall_fence_segment", label: "Fence" },
   { id: "jangdokdae_set", label: "Jangdokdae" },
   { id: "doghouse", label: "Doghouse" },
+];
+
+const HANOK_PLAN_PRESETS: { id: HanokPlanPreset; label: string }[] = [
+  { id: "auto", label: "Auto" },
+  { id: "linear", label: "Linear" },
+  { id: "l_shape", label: "L Shape" },
+  { id: "u_shape", label: "U Shape" },
+  { id: "courtyard", label: "Courtyard" },
 ];
 
 function SliderField({
@@ -119,6 +128,8 @@ export default function EditorSidebar() {
     setAssetLength,
     setAssetWidth,
     setAssetHeight,
+    setAssetBaySize,
+    setAssetPlanPreset,
     setWaterType,
     setWaterFlowAngle,
     randomizeAssetSeed,
@@ -131,6 +142,8 @@ export default function EditorSidebar() {
     selectedAssetType === "wall_fence_segment" ||
     selectedAssetType === "jangdokdae_set" ||
     selectedAssetType === "doghouse";
+  const isHanokHouseAsset =
+    selectedAssetType === "hanok_giwa" || selectedAssetType === "hanok_choga";
 
   const activeToolMeta = TOOL_ITEMS.find((tool) => tool.id === activeTool);
 
@@ -319,15 +332,17 @@ export default function EditorSidebar() {
 
             <PanelSection title="Placement">
               <div className="space-y-3.5">
-                <SliderField
-                  label="Scale"
-                  value={assetSettings.size}
-                  valueText={`${assetSettings.size.toFixed(1)}x`}
-                  min={0.2}
-                  max={5}
-                  step={0.1}
-                  onChange={setAssetSize}
-                />
+                {!isDimensionDrivenAsset && (
+                  <SliderField
+                    label="Scale"
+                    value={assetSettings.size}
+                    valueText={`${assetSettings.size.toFixed(1)}x`}
+                    min={0.2}
+                    max={5}
+                    step={0.1}
+                    onChange={setAssetSize}
+                  />
+                )}
                 {isDimensionDrivenAsset && (
                   <>
                     <SliderField
@@ -357,6 +372,40 @@ export default function EditorSidebar() {
                       step={0.1}
                       onChange={setAssetHeight}
                     />
+                    {isHanokHouseAsset && (
+                      <>
+                        <SliderField
+                          label="Bay Size"
+                          value={assetSettings.baySize}
+                          valueText={`${assetSettings.baySize.toFixed(1)}m`}
+                          min={1.6}
+                          max={3.6}
+                          step={0.1}
+                          onChange={setAssetBaySize}
+                        />
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-[12px]">
+                            <span className="text-slate-400">Plan Preset</span>
+                            <span className="text-slate-200">{assetSettings.planPreset}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-1.5">
+                            {HANOK_PLAN_PRESETS.map((preset) => (
+                              <button
+                                key={preset.id}
+                                onClick={() => setAssetPlanPreset(preset.id)}
+                                className={`py-2 text-[12px] rounded-lg border transition-all ${
+                                  assetSettings.planPreset === preset.id
+                                    ? "bg-slate-700/80 border-slate-600 text-slate-100"
+                                    : "bg-slate-900/45 border-slate-700/50 text-slate-400 hover:text-slate-200 hover:border-slate-600"
+                                }`}
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </>
                 )}
                 <button

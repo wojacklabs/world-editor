@@ -147,6 +147,7 @@ export class ProceduralPropsRenderer {
             prop.params.width ?? 0,
             prop.params.height ?? 0,
             prop.params.baySize ?? 0,
+            prop.params.planPreset ?? "auto",
           ].join("|")
         : prop.assetType;
 
@@ -163,6 +164,12 @@ export class ProceduralPropsRenderer {
       // Create base mesh from first prop's params
       const firstProp = typeProps[0];
       const type = firstProp.assetType;
+      const isStructureType =
+        type === "hanok_giwa" ||
+        type === "hanok_choga" ||
+        type === "wall_fence_segment" ||
+        type === "jangdokdae_set" ||
+        type === "doghouse";
       const params: GeneratorParams = {
         type,
         seed: firstProp.params.seed,
@@ -174,6 +181,7 @@ export class ProceduralPropsRenderer {
         width: firstProp.params.width,
         height: firstProp.params.height,
         baySize: firstProp.params.baySize,
+        planPreset: firstProp.params.planPreset,
         colorBase: firstProp.params.colorBase,
         colorDetail: firstProp.params.colorDetail,
       };
@@ -202,7 +210,11 @@ export class ProceduralPropsRenderer {
         const prop = typeProps[i];
         position.set(prop.position.x, prop.position.y, prop.position.z);
         quaternion.identity();
-        scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
+        if (isStructureType) {
+          scale.set(1, 1, 1);
+        } else {
+          scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
+        }
         mat4.compose(position, quaternion, scale);
         instancedMesh.setMatrixAt(i, mat4);
       }
@@ -234,6 +246,13 @@ export class ProceduralPropsRenderer {
    * Create a single prop mesh with full params
    */
   private createPropMesh(prop: ProceduralPropInstance): THREE.Mesh | null {
+    const isStructureType =
+      prop.assetType === "hanok_giwa" ||
+      prop.assetType === "hanok_choga" ||
+      prop.assetType === "wall_fence_segment" ||
+      prop.assetType === "jangdokdae_set" ||
+      prop.assetType === "doghouse";
+
     // Generate mesh at unit size (1.0) - actual scaling comes from instance.scale
     // In the editor, params.size and instance.scale are kept in sync,
     // so we ignore params.size and apply only instance.scale
@@ -248,6 +267,7 @@ export class ProceduralPropsRenderer {
       width: prop.params.width,
       height: prop.params.height,
       baySize: prop.params.baySize,
+      planPreset: prop.params.planPreset,
       colorBase: prop.params.colorBase,
       colorDetail: prop.params.colorDetail,
     };
@@ -258,7 +278,11 @@ export class ProceduralPropsRenderer {
     // Apply transform - instance.scale contains the final intended size
     mesh.position.set(prop.position.x, prop.position.y, prop.position.z);
     mesh.rotation.set(prop.rotation.x, prop.rotation.y, prop.rotation.z);
-    mesh.scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
+    if (isStructureType) {
+      mesh.scale.set(1, 1, 1);
+    } else {
+      mesh.scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
+    }
 
     mesh.name = `prop_${prop.id}`;
 

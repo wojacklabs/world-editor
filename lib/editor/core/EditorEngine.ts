@@ -9,6 +9,7 @@ THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 import type {
   BrushSettings,
+  HanokPlanPreset,
   HeightmapTool,
   MaterialType,
   ProceduralAssetType,
@@ -734,7 +735,13 @@ export class EditorEngine {
     type: ProceduralAssetType,
     size: number,
     seed?: number,
-    customSettings?: { length?: number; width?: number; height?: number; baySize?: number }
+    customSettings?: {
+      length?: number;
+      width?: number;
+      height?: number;
+      baySize?: number;
+      planPreset?: HanokPlanPreset;
+    }
   ): void {
     if (!this.propManager) return;
     this.propManager.createPreview(type, size, seed, customSettings);
@@ -776,6 +783,7 @@ export class EditorEngine {
       width?: number;
       height?: number;
       baySize?: number;
+      planPreset?: HanokPlanPreset;
     }
   ): string | null {
     if (!this.propManager) return null;

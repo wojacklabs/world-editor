@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { EditorEngine } from "@/lib/editor/core/EditorEngine";
 import { useEditorStore } from "@/lib/editor/store/editorStore";
+import type { HanokPlanPreset } from "@/lib/editor/types/EditorTypes";
 
 interface WorldEditorProps {
   onEngineReady?: (engine: EditorEngine) => void;
@@ -18,6 +19,7 @@ interface WorldEditorProps {
       width: number;
       height: number;
       baySize: number;
+      planPreset: HanokPlanPreset;
     }
   ) => void;
 }
@@ -207,6 +209,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
           width: assetSettings.width,
           height: assetSettings.height,
           baySize: assetSettings.baySize,
+          planPreset: assetSettings.planPreset,
         }
       );
       engineRef.current.setPropPreviewVisible(true);
@@ -224,6 +227,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     assetSettings.width,
     assetSettings.height,
     assetSettings.baySize,
+    assetSettings.planPreset,
   ]);
 
   // Update preview size separately (preserves position)
@@ -300,6 +304,7 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
                 width: store.assetSettings.width,
                 height: store.assetSettings.height,
                 baySize: store.assetSettings.baySize,
+                planPreset: store.assetSettings.planPreset,
               }
             );
             store.clearPendingAsset();

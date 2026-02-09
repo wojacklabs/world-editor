@@ -21,6 +21,7 @@ import {
   generateHanokHouseGeometry,
   generateJangdokdaeGeometry,
 } from "../shared/procedural/HanokGenerator";
+import type { HanokPlanPreset } from "../shared/procedural/HanokGenerator";
 
 const REFERENCE_TREE_URL = "/assets/references/infinite-terrain/tree.glb";
 
@@ -751,6 +752,7 @@ export interface GeneratorParams {
   width?: number;
   height?: number;
   baySize?: number;
+  planPreset?: HanokPlanPreset;
   colorBase: { r: number; g: number; b: number };
   colorDetail: { r: number; g: number; b: number };
 }
@@ -1172,19 +1174,21 @@ export class ProceduralAssetGenerator {
     ensureAttributes(geometry);
     const material = this.createMaterial(params);
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.scale.setScalar(params.size);
+    const baseScale = isKoreanStructureType(params.type) ? 1.0 : params.size;
+    mesh.scale.setScalar(baseScale);
     return mesh;
   }
 
   private getStructureDimensions(
     params: GeneratorParams,
-    defaults: { length: number; width: number; height: number; baySize?: number }
-  ): { lengthM: number; widthM: number; heightM: number; baySizeM?: number } {
+    defaults: { length: number; width: number; height: number; baySize?: number; planPreset?: HanokPlanPreset }
+  ): { lengthM: number; widthM: number; heightM: number; baySizeM?: number; planPreset?: HanokPlanPreset } {
     const lengthM = Math.max(0.5, params.length ?? defaults.length);
     const widthM = Math.max(0.4, params.width ?? defaults.width);
     const heightM = Math.max(0.4, params.height ?? defaults.height);
     const baySizeM = params.baySize ?? defaults.baySize;
-    return { lengthM, widthM, heightM, baySizeM };
+    const planPreset = params.planPreset ?? defaults.planPreset;
+    return { lengthM, widthM, heightM, baySizeM, planPreset };
   }
 
   private generateHanokGiwa(params: GeneratorParams): THREE.BufferGeometry {
@@ -1193,6 +1197,7 @@ export class ProceduralAssetGenerator {
       width: 6,
       height: 2.6,
       baySize: 2.4,
+      planPreset: "auto",
     });
     return generateHanokHouseGeometry("giwa", dimensions, params.seed);
   }
@@ -1203,6 +1208,7 @@ export class ProceduralAssetGenerator {
       width: 5.4,
       height: 2.4,
       baySize: 2.2,
+      planPreset: "auto",
     });
     return generateHanokHouseGeometry("choga", dimensions, params.seed);
   }

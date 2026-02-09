@@ -12,6 +12,7 @@ import {
   generateHanokHouseGeometry,
   generateJangdokdaeGeometry,
 } from "../../shared/procedural/HanokGenerator";
+import type { HanokPlanPreset } from "../../shared/procedural/HanokGenerator";
 
 // ============================================
 // Wind-enabled vertex shader for foliage (grass, bush, tree leaves)
@@ -491,6 +492,7 @@ export interface AssetParams {
   width?: number;
   height?: number;
   baySize?: number;
+  planPreset?: HanokPlanPreset;
   subdivisionOverride?: number;  // Override subdivision level for LOD
 }
 
@@ -548,6 +550,7 @@ export const DEFAULT_ASSET_PARAMS: Record<AssetType, AssetParams> = {
     width: 6,
     height: 2.6,
     baySize: 2.4,
+    planPreset: "auto",
   },
   hanok_choga: {
     type: "hanok_choga",
@@ -562,6 +565,7 @@ export const DEFAULT_ASSET_PARAMS: Record<AssetType, AssetParams> = {
     width: 5.4,
     height: 2.4,
     baySize: 2.2,
+    planPreset: "auto",
   },
   wall_fence_segment: {
     type: "wall_fence_segment",
@@ -927,7 +931,8 @@ export class ProceduralAsset {
     ensureAttributes(geometry);
     this.createMaterial();
     this.mesh = new THREE.Mesh(geometry, this.material!);
-    this.mesh.scale.setScalar(this.params.size);
+    const baseScale = isKoreanStructureAsset(this.params.type) ? 1.0 : this.params.size;
+    this.mesh.scale.setScalar(baseScale);
 
     if (this.scene && typeof this.scene.add === "function") {
       this.scene.add(this.mesh);
@@ -1524,14 +1529,15 @@ export class ProceduralAsset {
   }
 
   private getStructureDimensions(
-    defaults: { length: number; width: number; height: number; baySize?: number }
-  ): { lengthM: number; widthM: number; heightM: number; baySizeM?: number } {
+    defaults: { length: number; width: number; height: number; baySize?: number; planPreset?: HanokPlanPreset }
+  ): { lengthM: number; widthM: number; heightM: number; baySizeM?: number; planPreset?: HanokPlanPreset } {
     const lengthM = Math.max(0.5, this.params.length ?? defaults.length);
     const widthM = Math.max(0.4, this.params.width ?? defaults.width);
     const heightM = Math.max(0.4, this.params.height ?? defaults.height);
     const baySizeM = this.params.baySize ?? defaults.baySize;
+    const planPreset = this.params.planPreset ?? defaults.planPreset;
 
-    return { lengthM, widthM, heightM, baySizeM };
+    return { lengthM, widthM, heightM, baySizeM, planPreset };
   }
 
   private generateHanokGiwa(): THREE.BufferGeometry {
@@ -1540,6 +1546,7 @@ export class ProceduralAsset {
       width: 6,
       height: 2.6,
       baySize: 2.4,
+      planPreset: "auto",
     });
     return generateHanokHouseGeometry("giwa", dimensions, this.params.seed);
   }
@@ -1550,6 +1557,7 @@ export class ProceduralAsset {
       width: 5.4,
       height: 2.4,
       baySize: 2.2,
+      planPreset: "auto",
     });
     return generateHanokHouseGeometry("choga", dimensions, this.params.seed);
   }

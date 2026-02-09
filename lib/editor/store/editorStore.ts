@@ -5,6 +5,7 @@ import type {
   HeightmapTool,
   BrushSettings,
   MaterialType,
+  HanokPlanPreset,
   ProceduralAssetType,
   ProceduralAssetSettings,
   PendingAsset,
@@ -18,18 +19,28 @@ import { DEFAULT_EDITOR_STATE } from "../types/EditorTypes";
 
 const ASSET_DIMENSION_PRESETS: Record<
   ProceduralAssetType,
-  { length: number; width: number; height: number; baySize: number }
+  { length: number; width: number; height: number; baySize: number; planPreset: HanokPlanPreset }
 > = {
-  rock: { length: 2, width: 2, height: 2, baySize: 2.4 },
-  tree: { length: 2, width: 2, height: 4, baySize: 2.4 },
-  bush: { length: 1.5, width: 1.5, height: 1.2, baySize: 2.4 },
-  grass_clump: { length: 1, width: 1, height: 0.6, baySize: 2.4 },
-  hanok_giwa: { length: 10, width: 6, height: 2.6, baySize: 2.4 },
-  hanok_choga: { length: 9, width: 5.4, height: 2.4, baySize: 2.2 },
-  wall_fence_segment: { length: 6, width: 0.45, height: 1.6, baySize: 2.4 },
-  jangdokdae_set: { length: 3.2, width: 2.2, height: 0.8, baySize: 2.4 },
-  doghouse: { length: 1.7, width: 1.2, height: 1.3, baySize: 2.4 },
+  rock: { length: 2, width: 2, height: 2, baySize: 2.4, planPreset: "auto" },
+  tree: { length: 2, width: 2, height: 4, baySize: 2.4, planPreset: "auto" },
+  bush: { length: 1.5, width: 1.5, height: 1.2, baySize: 2.4, planPreset: "auto" },
+  grass_clump: { length: 1, width: 1, height: 0.6, baySize: 2.4, planPreset: "auto" },
+  hanok_giwa: { length: 10, width: 6, height: 2.6, baySize: 2.4, planPreset: "auto" },
+  hanok_choga: { length: 9, width: 5.4, height: 2.4, baySize: 2.2, planPreset: "auto" },
+  wall_fence_segment: { length: 6, width: 0.45, height: 1.6, baySize: 2.4, planPreset: "auto" },
+  jangdokdae_set: { length: 3.2, width: 2.2, height: 0.8, baySize: 2.4, planPreset: "auto" },
+  doghouse: { length: 1.7, width: 1.2, height: 1.3, baySize: 2.4, planPreset: "auto" },
 };
+
+function isDimensionDrivenAssetType(type: ProceduralAssetType): boolean {
+  return (
+    type === "hanok_giwa" ||
+    type === "hanok_choga" ||
+    type === "wall_fence_segment" ||
+    type === "jangdokdae_set" ||
+    type === "doghouse"
+  );
+}
 
 interface EditorStore extends EditorState {
   // Tool actions
@@ -52,6 +63,8 @@ interface EditorStore extends EditorState {
   setAssetLength: (length: number) => void;
   setAssetWidth: (width: number) => void;
   setAssetHeight: (height: number) => void;
+  setAssetBaySize: (baySize: number) => void;
+  setAssetPlanPreset: (planPreset: HanokPlanPreset) => void;
 
   // Prop instance actions
   setSelectedPropInstance: (id: string | null) => void;
@@ -122,17 +135,27 @@ export const useEditorStore = create<EditorStore>((set) => ({
       assetSettings: {
         ...state.assetSettings,
         type,
+        size: isDimensionDrivenAssetType(type) ? 1.0 : state.assetSettings.size,
         length: ASSET_DIMENSION_PRESETS[type].length,
         width: ASSET_DIMENSION_PRESETS[type].width,
         height: ASSET_DIMENSION_PRESETS[type].height,
         baySize: ASSET_DIMENSION_PRESETS[type].baySize,
+        planPreset: ASSET_DIMENSION_PRESETS[type].planPreset,
         // Keep same seed when switching types to preserve preview
       },
     })),
 
   setAssetSettings: (settings) =>
     set((state) => ({
-      assetSettings: { ...state.assetSettings, ...settings },
+      assetSettings: {
+        ...state.assetSettings,
+        ...settings,
+        size: isDimensionDrivenAssetType(
+          (settings.type ?? state.assetSettings.type) as ProceduralAssetType
+        )
+          ? 1.0
+          : Math.max(0.1, Math.min(10, settings.size ?? state.assetSettings.size)),
+      },
     })),
 
   randomizeAssetSeed: () =>
@@ -147,7 +170,9 @@ export const useEditorStore = create<EditorStore>((set) => ({
     set((state) => ({
       assetSettings: {
         ...state.assetSettings,
-        size: Math.max(0.1, Math.min(10, size)),
+        size: isDimensionDrivenAssetType(state.selectedAssetType)
+          ? 1.0
+          : Math.max(0.1, Math.min(10, size)),
       },
     })),
 
@@ -172,6 +197,22 @@ export const useEditorStore = create<EditorStore>((set) => ({
       assetSettings: {
         ...state.assetSettings,
         height: Math.max(0.4, Math.min(8, height)),
+      },
+    })),
+
+  setAssetBaySize: (baySize) =>
+    set((state) => ({
+      assetSettings: {
+        ...state.assetSettings,
+        baySize: Math.max(1.6, Math.min(3.6, baySize)),
+      },
+    })),
+
+  setAssetPlanPreset: (planPreset) =>
+    set((state) => ({
+      assetSettings: {
+        ...state.assetSettings,
+        planPreset,
       },
     })),
 

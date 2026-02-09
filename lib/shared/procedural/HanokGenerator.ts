@@ -8,11 +8,19 @@ export type KoreanStructureType =
   | "jangdokdae_set"
   | "doghouse";
 
+export type HanokPlanPreset =
+  | "auto"
+  | "linear"
+  | "l_shape"
+  | "u_shape"
+  | "courtyard";
+
 export interface StructureDimensions {
   lengthM: number;
   widthM: number;
   heightM: number;
   baySizeM?: number;
+  planPreset?: HanokPlanPreset;
 }
 
 interface NormalizedDimensions {
@@ -53,6 +61,13 @@ function seeded01(seed: number): number {
 }
 
 function ensureGeometryForMerge(geometry: THREE.BufferGeometry): void {
+  const keep = new Set(["position", "normal", "uv", "color"]);
+  for (const name of Object.keys(geometry.attributes)) {
+    if (!keep.has(name)) {
+      geometry.deleteAttribute(name);
+    }
+  }
+
   const position = geometry.getAttribute("position");
   if (!position || position.count === 0) return;
 
@@ -60,17 +75,29 @@ function ensureGeometryForMerge(geometry: THREE.BufferGeometry): void {
     geometry.computeVertexNormals();
   }
 
-  if (!geometry.getAttribute("uv")) {
+  const uv = geometry.getAttribute("uv");
+  if (!uv || uv.itemSize !== 2) {
     geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(position.count * 2), 2));
   }
 
-  if (!geometry.getAttribute("color")) {
+  const color = geometry.getAttribute("color");
+  if (!color || color.itemSize !== 4) {
     const colors = new Float32Array(position.count * 4);
-    for (let i = 0; i < position.count; i++) {
-      colors[i * 4] = 1;
-      colors[i * 4 + 1] = 1;
-      colors[i * 4 + 2] = 1;
-      colors[i * 4 + 3] = 1;
+    if (color && color.itemSize >= 3) {
+      const source = color.array as ArrayLike<number>;
+      for (let i = 0; i < position.count; i++) {
+        colors[i * 4] = source[i * color.itemSize] ?? 1;
+        colors[i * 4 + 1] = source[i * color.itemSize + 1] ?? 1;
+        colors[i * 4 + 2] = source[i * color.itemSize + 2] ?? 1;
+        colors[i * 4 + 3] = color.itemSize > 3 ? (source[i * color.itemSize + 3] ?? 1) : 1;
+      }
+    } else {
+      for (let i = 0; i < position.count; i++) {
+        colors[i * 4] = 1;
+        colors[i * 4 + 1] = 1;
+        colors[i * 4 + 2] = 1;
+        colors[i * 4 + 3] = 1;
+      }
     }
     geometry.setAttribute("color", new THREE.BufferAttribute(colors, 4));
   }
@@ -207,11 +234,17 @@ function mergeGeometries(geometries: THREE.BufferGeometry[]): THREE.BufferGeomet
     return new THREE.BoxGeometry(0.01, 0.01, 0.01);
   }
 
-  const prepared = geometries.filter((geometry) => {
-    ensureGeometryForMerge(geometry);
-    const position = geometry.getAttribute("position");
-    return Boolean(position && position.count > 0);
-  });
+  const prepared = geometries
+    .map((geometry) => (geometry.index ? geometry.toNonIndexed() : geometry))
+    .filter((geometry) => {
+      ensureGeometryForMerge(geometry);
+      const position = geometry.getAttribute("position");
+      return Boolean(position && position.count > 0);
+    });
+
+  if (prepared.length === 0) {
+    return new THREE.BoxGeometry(0.01, 0.01, 0.01);
+  }
 
   const merged = BufferGeometryUtils.mergeGeometries(prepared, false);
   if (!merged) {
@@ -268,7 +301,7 @@ function isStructureType(cell: PlanCell): boolean {
   return cell === "ondol" || cell === "storage" || cell === "kitchen";
 }
 
-export function generateHanokHouseGeometry(
+function generateHanokLinearHouseGeometry(
   style: "giwa" | "choga",
   dimensions: StructureDimensions,
   seed: number
@@ -842,6 +875,144 @@ export function generateHanokHouseGeometry(
   }
 
   return mergeGeometries(geometries);
+}
+
+function resolvePlanPreset(
+  requested: HanokPlanPreset,
+  xBays: number,
+  zBays: number,
+  seed: number
+): Exclude<HanokPlanPreset, "auto"> {
+  const canUseL = xBays >= 4 && zBays >= 3;
+  const canUseU = xBays >= 5 && zBays >= 4;
+  const canUseCourtyard = xBays >= 7 && zBays >= 7;
+
+  if (requested !== "auto") {
+    if (requested === "courtyard" && !canUseCourtyard) {
+      return canUseU ? "u_shape" : canUseL ? "l_shape" : "linear";
+    }
+    if (requested === "u_shape" && !canUseU) {
+      return canUseL ? "l_shape" : "linear";
+    }
+    if (requested === "l_shape" && !canUseL) {
+      return "linear";
+    }
+    return requested;
+  }
+
+  const area = xBays * zBays;
+  const roll = seeded01(seed + area * 0.73);
+  if (canUseCourtyard && area >= 64 && roll > 0.7) return "courtyard";
+  if (canUseU && area >= 36 && roll > 0.45) return "u_shape";
+  if (canUseL && area >= 20 && roll > 0.2) return "l_shape";
+  return "linear";
+}
+
+function generateCompoundHanokHouseGeometry(
+  style: "giwa" | "choga",
+  dimensions: StructureDimensions,
+  seed: number,
+  preset: Exclude<HanokPlanPreset, "auto" | "linear">
+): THREE.BufferGeometry {
+  const normalized = normalizeHouseDimensions(dimensions);
+  const baySize = normalized.baySizeM;
+  const xBays = Math.max(3, Math.round(normalized.lengthM / baySize));
+  const zBays = Math.max(2, Math.round(normalized.widthM / baySize));
+  const wallHeight = normalized.heightM;
+
+  const wings: THREE.BufferGeometry[] = [];
+  const pushWing = (
+    lengthBays: number,
+    widthBays: number,
+    centerX: number,
+    centerZ: number,
+    rotationY: number,
+    wingSeed: number
+  ): void => {
+    const wingGeometry = generateHanokLinearHouseGeometry(
+      style,
+      {
+        lengthM: Math.max(3, lengthBays) * baySize,
+        widthM: Math.max(2, widthBays) * baySize,
+        heightM: wallHeight,
+        baySizeM: baySize,
+        planPreset: "linear",
+      },
+      wingSeed
+    );
+    wingGeometry.rotateY(rotationY);
+    wingGeometry.translate(centerX, 0, centerZ);
+    wings.push(wingGeometry);
+  };
+
+  if (preset === "l_shape") {
+    const frontDepthBays = Math.max(2, Math.round(zBays * 0.56));
+    const sideLengthBays = Math.max(3, Math.round(xBays * 0.58));
+
+    const frontCenterZ = -((zBays - frontDepthBays) * baySize * 0.5);
+    const sideCenterX = -((xBays - sideLengthBays) * baySize * 0.5);
+
+    pushWing(xBays, frontDepthBays, 0, frontCenterZ, 0, seed + 11.3);
+    pushWing(sideLengthBays, zBays, sideCenterX, 0, 0, seed + 23.9);
+  } else if (preset === "u_shape") {
+    const sideWidthBays = Math.max(2, Math.round(xBays * 0.30));
+    const sideLengthBays = Math.max(3, Math.round(zBays * 0.78));
+    const rearDepthBays = Math.max(2, Math.round(zBays * 0.34));
+
+    const rearCenterZ = (zBays - rearDepthBays) * baySize * 0.5;
+    pushWing(xBays, rearDepthBays, 0, rearCenterZ, 0, seed + 13.2);
+
+    const sideCenterZ = -((zBays - sideLengthBays) * baySize * 0.5);
+    const sideOffsetX = (xBays - sideWidthBays) * baySize * 0.5;
+    pushWing(sideLengthBays, sideWidthBays, -sideOffsetX, sideCenterZ, Math.PI * 0.5, seed + 31.8);
+    pushWing(sideLengthBays, sideWidthBays, sideOffsetX, sideCenterZ, Math.PI * 0.5, seed + 47.1);
+  } else {
+    const ringBays = Math.max(2, Math.round(Math.min(xBays, zBays) * 0.28));
+    const innerXBays = xBays - ringBays * 2;
+    const innerZBays = zBays - ringBays * 2;
+
+    if (innerXBays < 2 || innerZBays < 2) {
+      return generateCompoundHanokHouseGeometry(style, dimensions, seed, "u_shape");
+    }
+
+    const frontCenterZ = -((zBays - ringBays) * baySize * 0.5);
+    const backCenterZ = (zBays - ringBays) * baySize * 0.5;
+    const sideOffsetX = (xBays - ringBays) * baySize * 0.5;
+
+    pushWing(xBays, ringBays, 0, frontCenterZ, 0, seed + 17.9);
+    pushWing(xBays, ringBays, 0, backCenterZ, 0, seed + 29.4);
+    pushWing(innerZBays, ringBays, -sideOffsetX, 0, Math.PI * 0.5, seed + 41.7);
+    pushWing(innerZBays, ringBays, sideOffsetX, 0, Math.PI * 0.5, seed + 53.8);
+  }
+
+  const merged = mergeGeometries(wings);
+  const orientation = Math.floor(seeded01(seed + 61.3) * 4);
+  if (orientation > 0) {
+    merged.rotateY((Math.PI * 0.5) * orientation);
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
+  }
+  return merged;
+}
+
+export function generateHanokHouseGeometry(
+  style: "giwa" | "choga",
+  dimensions: StructureDimensions,
+  seed: number
+): THREE.BufferGeometry {
+  const normalized = normalizeHouseDimensions(dimensions);
+  const baySize = normalized.baySizeM;
+  const xBays = Math.max(3, Math.round(normalized.lengthM / baySize));
+  const zBays = Math.max(2, Math.round(normalized.widthM / baySize));
+
+  const requestedPreset = dimensions.planPreset ?? "auto";
+  const resolvedPreset = resolvePlanPreset(requestedPreset, xBays, zBays, seed);
+
+  if (resolvedPreset === "linear") {
+    return generateHanokLinearHouseGeometry(style, dimensions, seed);
+  }
+
+  return generateCompoundHanokHouseGeometry(style, dimensions, seed, resolvedPreset);
 }
 
 export function generateFenceSegmentGeometry(

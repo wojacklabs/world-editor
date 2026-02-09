@@ -40,6 +40,13 @@ export type ProceduralAssetType =
   | "jangdokdae_set"
   | "doghouse";
 
+export type HanokPlanPreset =
+  | "auto"
+  | "linear"
+  | "l_shape"
+  | "u_shape"
+  | "courtyard";
+
 export interface ProceduralAssetSettings {
   type: ProceduralAssetType;
   seed: number;
@@ -51,6 +58,7 @@ export interface ProceduralAssetSettings {
   width: number;
   height: number;
   baySize: number;
+  planPreset: HanokPlanPreset;
 }
 
 // Brush settings
@@ -206,6 +214,7 @@ export const DEFAULT_ASSET_SETTINGS: ProceduralAssetSettings = {
   width: 6,
   height: 2.6,
   baySize: 2.4,
+  planPreset: "auto",
 };
 
 export const DEFAULT_DEBUG_VISIBILITY: DebugVisibility = {

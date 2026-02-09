@@ -6,6 +6,7 @@ import { ProceduralAsset, AssetParams, AssetType, DEFAULT_ASSET_PARAMS } from ".
 import { loadTextureWithFallbackSync } from "../../shared/rendering/TextureLoader.three";
 import { DEFAULT_FOLIAGE_QUALITY_PROFILE } from "../../shared/foliage/FoliageQualityProfile";
 import type { LightManager } from "../lighting/LightManager";
+import type { HanokPlanPreset } from "../../shared/procedural/HanokGenerator";
 import CustomShaderMaterial from "three-custom-shader-material/vanilla";
 // ============================================
 // LOD Configuration
@@ -774,6 +775,7 @@ export interface SerializedProceduralPropParams {
   width?: number;
   height?: number;
   baySize?: number;
+  planPreset?: HanokPlanPreset;
   colorBase: SerializedColor;
   colorDetail: SerializedColor;
 }
@@ -830,6 +832,10 @@ function isKoreanStructureAssetType(type: AssetType): boolean {
     type === "jangdokdae_set" ||
     type === "doghouse"
   );
+}
+
+function getEffectiveAssetScale(type: AssetType, size: number): number {
+  return isKoreanStructureAssetType(type) ? 1.0 : size;
 }
 
 function quantizeNumber(value: number, precision: number = 100): number {
@@ -1800,8 +1806,9 @@ export class PropManager {
     const width = quantizeNumber(params.width ?? defaults.width ?? 1, 100);
     const height = quantizeNumber(params.height ?? defaults.height ?? 1, 100);
     const baySize = quantizeNumber(params.baySize ?? defaults.baySize ?? 2.4, 100);
+    const planPreset = params.planPreset ?? defaults.planPreset ?? "auto";
     const seed = quantizeNumber(params.seed, 1000);
-    return `${length}_${width}_${height}_${baySize}_${seed}`;
+    return `${length}_${width}_${height}_${baySize}_${planPreset}_${seed}`;
   }
 
   private getOrCreateCustomLODGeometry(
@@ -2413,7 +2420,7 @@ export class PropManager {
     type: AssetType,
     size: number,
     seed?: number,
-    customSettings?: { length?: number; width?: number; height?: number; baySize?: number }
+    customSettings?: { length?: number; width?: number; height?: number; baySize?: number; planPreset?: HanokPlanPreset }
   ): void {
     this.disposePreviewResources();
 
@@ -2425,18 +2432,20 @@ export class PropManager {
     const variationIndex = this.getVariationIndex(normalizedSeed);
 
     // Create new preview params
+    const effectiveSize = getEffectiveAssetScale(type, size);
     this.previewParams = {
       ...DEFAULT_ASSET_PARAMS[type],
       type,
-      size,
+      size: effectiveSize,
       seed: normalizedSeed,
       length: customSettings?.length ?? DEFAULT_ASSET_PARAMS[type].length,
       width: customSettings?.width ?? DEFAULT_ASSET_PARAMS[type].width,
       height: customSettings?.height ?? DEFAULT_ASSET_PARAMS[type].height,
       baySize: customSettings?.baySize ?? DEFAULT_ASSET_PARAMS[type].baySize,
+      planPreset: customSettings?.planPreset ?? DEFAULT_ASSET_PARAMS[type].planPreset,
     };
 
-    this.previewScale = size;
+    this.previewScale = effectiveSize;
     this.previewRotation.set(0, 0, 0);
 
     const useInstancedPreview = !isKoreanStructureAssetType(type);
@@ -2477,6 +2486,7 @@ export class PropManager {
       width: this.previewParams.width,
       height: this.previewParams.height,
       baySize: this.previewParams.baySize,
+      planPreset: this.previewParams.planPreset,
     });
     return newSeed;
   }
@@ -2485,9 +2495,10 @@ export class PropManager {
   updatePreviewSize(size: number): void {
     if (!this.previewParams) return;
 
+    const effectiveSize = getEffectiveAssetScale(this.previewParams.type, size);
     const previousSize = this.previewParams.size;
-    this.previewScale = size;
-    this.previewParams.size = size;
+    this.previewScale = effectiveSize;
+    this.previewParams.size = effectiveSize;
 
     if (this.previewInstancedMesh) {
       this.updateInstancedPreviewTransform();
@@ -2496,7 +2507,7 @@ export class PropManager {
 
     // Fallback procedural preview path
     if (this.previewMesh) {
-      const scaleFactor = size / Math.max(0.0001, previousSize);
+      const scaleFactor = effectiveSize / Math.max(0.0001, previousSize);
       this.previewMesh.scale.multiplyScalar(scaleFactor);
     }
   }
@@ -2515,14 +2526,16 @@ export class PropManager {
     width?: number;
     height?: number;
     baySize?: number;
+    planPreset?: HanokPlanPreset;
   }): void {
     this.disposePreviewResources();
 
     // Create new preview params with full customization
+    const effectiveSize = getEffectiveAssetScale(params.type, params.size);
     this.previewParams = {
       type: params.type,
       seed: params.seed,
-      size: params.size,
+      size: effectiveSize,
       sizeVariation: params.sizeVariation,
       noiseScale: params.noiseScale,
       noiseAmplitude: params.noiseAmplitude,
@@ -2532,8 +2545,9 @@ export class PropManager {
       width: params.width,
       height: params.height,
       baySize: params.baySize,
+      planPreset: params.planPreset,
     };
-    this.previewScale = params.size;
+    this.previewScale = effectiveSize;
     this.previewRotation.set(0, 0, 0);
 
     // Generate preview asset
@@ -2670,6 +2684,7 @@ export class PropManager {
       width?: number;
       height?: number;
       baySize?: number;
+      planPreset?: HanokPlanPreset;
     }
   ): string | null {
     const type = assetType as AssetType;
@@ -2688,17 +2703,19 @@ export class PropManager {
 
     const seed = customSettings?.seed ?? Math.random() * 10000;
     const size = customSettings?.size ?? DEFAULT_ASSET_PARAMS[type].size;
+    const effectiveSize = getEffectiveAssetScale(type, size);
     const variationIndex = this.getVariationIndex(seed);
 
     const params: AssetParams = {
       ...DEFAULT_ASSET_PARAMS[type],
       type,
       seed,
-      size,
+      size: effectiveSize,
       length: customSettings?.length ?? DEFAULT_ASSET_PARAMS[type].length,
       width: customSettings?.width ?? DEFAULT_ASSET_PARAMS[type].width,
       height: customSettings?.height ?? DEFAULT_ASSET_PARAMS[type].height,
       baySize: customSettings?.baySize ?? DEFAULT_ASSET_PARAMS[type].baySize,
+      planPreset: customSettings?.planPreset ?? DEFAULT_ASSET_PARAMS[type].planPreset,
     };
     const signature = isKoreanStructureAssetType(type)
       ? this.getStructureSignature(params)
@@ -2715,7 +2732,7 @@ export class PropManager {
       params,
       position: new THREE.Vector3(x, y, z),
       rotation: new THREE.Vector3(0, rotationY, 0),
-      scale: new THREE.Vector3(size, size, size),
+      scale: new THREE.Vector3(effectiveSize, effectiveSize, effectiveSize),
       visible: true,
     };
 
@@ -2801,13 +2818,19 @@ export class PropManager {
 
   // Export instances for saving
   exportInstances(): SerializedProceduralPropInstance[] {
-    return Array.from(this.instances.values()).map((inst) => ({
+    return Array.from(this.instances.values()).map((inst) => {
+      const isStructure = isKoreanStructureAssetType(inst.assetType);
+      const sizeValue = isStructure ? 1.0 : inst.params.size;
+      const scale = isStructure
+        ? { x: 1.0, y: 1.0, z: 1.0 }
+        : { x: inst.scale.x, y: inst.scale.y, z: inst.scale.z };
+      return {
       id: inst.id,
       assetType: inst.assetType,
       params: {
         type: inst.params.type,
         seed: inst.params.seed,
-        size: inst.params.size,
+        size: sizeValue,
         sizeVariation: inst.params.sizeVariation,
         noiseScale: inst.params.noiseScale,
         noiseAmplitude: inst.params.noiseAmplitude,
@@ -2815,6 +2838,7 @@ export class PropManager {
         width: inst.params.width,
         height: inst.params.height,
         baySize: inst.params.baySize,
+        planPreset: inst.params.planPreset,
         colorBase: {
           r: inst.params.colorBase.r,
           g: inst.params.colorBase.g,
@@ -2828,8 +2852,9 @@ export class PropManager {
       },
       position: { x: inst.position.x, y: inst.position.y, z: inst.position.z },
       rotation: { x: inst.rotation.x, y: inst.rotation.y, z: inst.rotation.z },
-      scale: { x: inst.scale.x, y: inst.scale.y, z: inst.scale.z },
-    }));
+      scale,
+      };
+    });
   }
 
   // Import instances from saved data
@@ -2840,10 +2865,12 @@ export class PropManager {
     const affectedGroups = new Set<InstanceGroupKey>();
 
     for (const item of data) {
+      const isStructure = isKoreanStructureAssetType(item.assetType);
+      const sizeValue = isStructure ? 1.0 : item.params.size;
       const params: AssetParams = {
         type: item.params.type,
         seed: item.params.seed,
-        size: item.params.size,
+        size: sizeValue,
         sizeVariation: item.params.sizeVariation,
         noiseScale: item.params.noiseScale,
         noiseAmplitude: item.params.noiseAmplitude,
@@ -2851,6 +2878,7 @@ export class PropManager {
         width: item.params.width,
         height: item.params.height,
         baySize: item.params.baySize,
+        planPreset: item.params.planPreset,
         colorBase: new THREE.Color(
           item.params.colorBase.r,
           item.params.colorBase.g,
@@ -2877,7 +2905,9 @@ export class PropManager {
         params,
         position: new THREE.Vector3(item.position.x, item.position.y, item.position.z),
         rotation: new THREE.Vector3(item.rotation.x, item.rotation.y, item.rotation.z),
-        scale: new THREE.Vector3(item.scale.x, item.scale.y, item.scale.z),
+        scale: isStructure
+          ? new THREE.Vector3(1, 1, 1)
+          : new THREE.Vector3(item.scale.x, item.scale.y, item.scale.z),
         visible: true,
       };
 
