@@ -175,6 +175,32 @@ function createCylinder(
   return tintGeometry(geometry, color);
 }
 
+function createStrawBundle(
+  length: number,
+  thickness: number,
+  depth: number,
+  position: THREE.Vector3,
+  color: THREE.Color,
+  rotation: THREE.Euler = new THREE.Euler(),
+  radialSegments: number = 10
+): THREE.BufferGeometry {
+  const geometry = new THREE.CylinderGeometry(
+    0.5,
+    0.5,
+    Math.max(0.001, length),
+    Math.max(6, radialSegments),
+    1,
+    false
+  );
+  geometry.scale(Math.max(0.001, thickness), 1, Math.max(0.001, depth));
+  geometry.rotateZ(Math.PI * 0.5);
+  if (rotation.x !== 0) geometry.rotateX(rotation.x);
+  if (rotation.y !== 0) geometry.rotateY(rotation.y);
+  if (rotation.z !== 0) geometry.rotateZ(rotation.z);
+  geometry.translate(position.x, position.y, position.z);
+  return tintGeometry(geometry, color);
+}
+
 function createSphere(
   radius: number,
   widthSegments: number,
@@ -564,10 +590,10 @@ function pushChogaRoof(
     );
   };
 
-  // Eonggi-style layering: thick compressed courses with short eave fringe.
-  const layerRows = Math.max(9, Math.round((roofSpan * 0.5) / 0.27));
-  const exposedStep = 0.76 / layerRows;
-  const overlapScale = 2.35;
+  // Eonggi-style layering: thick compressed courses with broad, rounded bundle profile.
+  const layerRows = Math.max(6, Math.round((roofSpan * 0.5) / 0.39));
+  const exposedStep = 0.86 / layerRows;
+  const overlapScale = 2.55;
   for (let side = -1; side <= 1; side += 2) {
     for (let row = 0; row < layerRows; row++) {
       const rowSeed = seed + side * 79.3 + row * 11.7;
@@ -583,64 +609,70 @@ function pushChogaRoof(
       const yInner = surfaceY(tInner);
       const yMid = (yExposed + yInner) * 0.5;
       const slopeRun = Math.max(0.14, (tExposed - tInner) * roofSpan * 0.5);
-      const rowDepth = Math.max(0.22, slopeRun * (0.95 + seeded01(rowSeed + 2.1) * 0.12));
+      const rowDepth = Math.max(0.34, slopeRun * (1.10 + seeded01(rowSeed + 2.1) * 0.12));
       const slopeAngle = side * Math.atan2(Math.abs(yInner - yExposed), slopeRun);
-      const rowThickness = 0.09 + rowWeight * 0.03 + seeded01(rowSeed + 2.9) * 0.012;
+      const rowThickness = 0.14 + rowWeight * 0.05 + seeded01(rowSeed + 2.9) * 0.020;
       const courseLen = clamp(
-        roofLength * (0.97 - row * 0.004 + seeded01(rowSeed + 3.6) * 0.01),
-        roofLength * 0.78,
-        roofLength * 0.99
+        roofLength * (0.985 - row * 0.002 + seeded01(rowSeed + 3.6) * 0.007),
+        roofLength * 0.84,
+        roofLength * 0.998
       );
       const rowZ = side * roofSpan * 0.5 * tMid + (seeded01(rowSeed + 4.8) - 0.5) * rowDepth * 0.04;
-      const rowY = yMid + 0.016 + rowWeight * 0.006;
+      const rowY = yMid + 0.019 + rowWeight * 0.008;
+      const bundleThickness = rowThickness * (1.00 + seeded01(rowSeed + 5.1) * 0.12);
+      const bundleDepth = rowDepth * (0.70 + seeded01(rowSeed + 5.8) * 0.14);
 
       geometries.push(
-        createBox(
+        createStrawBundle(
           courseLen,
-          rowThickness * (0.92 + seeded01(rowSeed + 5.4) * 0.10),
-          rowDepth,
+          bundleThickness,
+          bundleDepth,
           new THREE.Vector3(0, rowY, rowZ),
           makeStrawColor(rowSeed + 6.2, 0.12),
           new THREE.Euler(
-            slopeAngle + (seeded01(rowSeed + 7.3) - 0.5) * 0.006,
+            slopeAngle + (seeded01(rowSeed + 7.3) - 0.5) * 0.007,
             (seeded01(rowSeed + 8.4) - 0.5) * 0.003,
             (seeded01(rowSeed + 9.5) - 0.5) * 0.003
-          )
+          ),
+          10
         )
       );
 
-      const crownRadius = rowThickness * (0.34 + seeded01(rowSeed + 10.7) * 0.12);
       geometries.push(
-        createCylinder(
-          crownRadius * 0.85,
-          crownRadius,
-          courseLen * (0.95 + seeded01(rowSeed + 11.8) * 0.03),
-          10,
+        createStrawBundle(
+          courseLen * (0.94 + seeded01(rowSeed + 11.8) * 0.03),
+          rowThickness * (0.44 + seeded01(rowSeed + 10.7) * 0.18),
+          rowDepth * (0.42 + seeded01(rowSeed + 12.9) * 0.12),
           new THREE.Vector3(
             0,
-            rowY + rowThickness * 0.30,
-            rowZ - side * rowDepth * (0.12 + seeded01(rowSeed + 12.9) * 0.04)
+            rowY + rowThickness * (0.18 + seeded01(rowSeed + 13.1) * 0.08),
+            rowZ - side * rowDepth * (0.14 + seeded01(rowSeed + 13.6) * 0.05)
           ),
-          makeStrawColor(rowSeed + 13.6, 0.10),
-          new THREE.Euler(0, 0, Math.PI * 0.5)
+          makeStrawColor(rowSeed + 14.2, 0.08),
+          new THREE.Euler(
+            slopeAngle + (seeded01(rowSeed + 15.1) - 0.5) * 0.006,
+            (seeded01(rowSeed + 16.3) - 0.5) * 0.003,
+            0
+          ),
+          8
         )
       );
 
-      const patchCount = Math.max(1, Math.round(roofLength / 6.4));
+      const patchCount = Math.max(2, Math.round(roofLength / 10.5));
       for (let i = 0; i < patchCount; i++) {
         const patchSeed = rowSeed + i * 27.3 + 70.0;
-        const patchLen = courseLen * (0.12 + seeded01(patchSeed + 1.7) * 0.14);
+        const patchLen = courseLen * (0.18 + seeded01(patchSeed + 1.7) * 0.14);
         const patchX = -halfRoofLength + patchLen * 0.5 + seeded01(patchSeed + 2.9) * (roofLength - patchLen);
-        const patchH = rowThickness * (0.18 + seeded01(patchSeed + 4.1) * 0.12);
-        const patchD = rowDepth * (0.18 + seeded01(patchSeed + 5.4) * 0.12);
+        const patchH = rowThickness * (0.28 + seeded01(patchSeed + 4.1) * 0.20);
+        const patchD = rowDepth * (0.26 + seeded01(patchSeed + 5.4) * 0.18);
         geometries.push(
-          createBox(
+          createStrawBundle(
             patchLen,
             patchH,
             patchD,
             new THREE.Vector3(
               patchX,
-              rowY + rowThickness * (0.12 + seeded01(patchSeed + 6.6) * 0.08),
+              rowY + rowThickness * (0.16 + seeded01(patchSeed + 6.6) * 0.10),
               rowZ - side * rowDepth * (0.08 + seeded01(patchSeed + 7.8) * 0.05)
             ),
             makeStrawColor(patchSeed + 8.9, 0.14),
@@ -648,33 +680,34 @@ function pushChogaRoof(
               slopeAngle + (seeded01(patchSeed + 9.7) - 0.5) * 0.009,
               (seeded01(patchSeed + 10.8) - 0.5) * 0.004,
               (seeded01(patchSeed + 11.9) - 0.5) * 0.004
-            )
+            ),
+            7
           )
         );
       }
 
-      if (row <= 1) {
-        const fringeCount = Math.max(6, Math.round(roofLength / 1.6));
+      if (row === 0) {
+        const fringeCount = Math.max(18, Math.round(roofLength / 0.52));
         for (let i = 0; i < fringeCount; i++) {
-          const fringeSeed = rowSeed + i * 15.2 + 210.0;
-          const fx =
-            -halfRoofLength + ((i + 0.5) / fringeCount) * roofLength + (seeded01(fringeSeed + 1.1) - 0.5) * 0.06;
-          const fringeLen = 0.05 + seeded01(fringeSeed + 2.3) * 0.06;
-          const fringeW = 0.022 + seeded01(fringeSeed + 3.9) * 0.016;
-          const fringeD = 0.013 + seeded01(fringeSeed + 4.8) * 0.009;
-          const fz = side * roofSpan * 0.5 * tExposed + side * fringeD * 0.42;
-          const fy = yExposed - fringeLen * (0.12 + seeded01(fringeSeed + 5.4) * 0.08);
+          const fringeSeed = rowSeed + i * 17.1 + 310.0;
+          const fringeW = 0.05 + seeded01(fringeSeed + 1.2) * 0.03;
+          const fringeH = 0.09 + seeded01(fringeSeed + 2.4) * 0.06;
+          const fringeD = 0.02 + seeded01(fringeSeed + 3.6) * 0.018;
+          const fringeX =
+            -halfRoofLength + ((i + 0.5) / fringeCount) * roofLength + (seeded01(fringeSeed + 4.8) - 0.5) * 0.11;
+          const fringeZ = side * roofSpan * 0.5 * tExposed + side * (fringeD * 0.64 + rowDepth * 0.06);
+          const fringeY = yExposed - fringeH * (0.44 + seeded01(fringeSeed + 5.9) * 0.14);
           geometries.push(
             createBox(
               fringeW,
-              fringeLen,
+              fringeH,
               fringeD,
-              new THREE.Vector3(fx, fy, fz),
-              makeStrawColor(fringeSeed + 6.2, 0.08),
+              new THREE.Vector3(fringeX, fringeY, fringeZ),
+              makeStrawColor(fringeSeed + 7.2, 0.08),
               new THREE.Euler(
-                slopeAngle + side * (0.16 + seeded01(fringeSeed + 7.8) * 0.08),
-                (seeded01(fringeSeed + 8.7) - 0.5) * 0.08,
-                (seeded01(fringeSeed + 9.6) - 0.5) * 0.03
+                slopeAngle + side * (0.08 + seeded01(fringeSeed + 8.4) * 0.10),
+                (seeded01(fringeSeed + 9.6) - 0.5) * 0.18,
+                (seeded01(fringeSeed + 10.8) - 0.5) * 0.06
               )
             )
           );
@@ -683,7 +716,77 @@ function pushChogaRoof(
     }
   }
 
-  const ridgeTuftCount = Math.max(6, Math.round(roofLength / 1.25));
+  // Short eave skirt bundles: adds rounded, heavy thatch lip instead of sharp plank edge.
+  for (let side = -1; side <= 1; side += 2) {
+    const skirtCount = Math.max(8, Math.round(roofLength / 1.35));
+    for (let i = 0; i < skirtCount; i++) {
+      const skirtSeed = seed + side * 151.7 + i * 23.4 + 980.0;
+      const segmentSpan = roofLength / skirtCount;
+      const skirtLen = segmentSpan * (0.96 + seeded01(skirtSeed + 1.8) * 0.28);
+      const x = -halfRoofLength + (i + 0.5) * segmentSpan + (seeded01(skirtSeed + 2.9) - 0.5) * segmentSpan * 0.22;
+      const t = 0.955 + seeded01(skirtSeed + 3.6) * 0.028;
+      const z = side * roofSpan * 0.5 * t + side * (0.03 + seeded01(skirtSeed + 4.4) * 0.03);
+      const y = surfaceY(t) - 0.018 - seeded01(skirtSeed + 5.7) * 0.028;
+      const skirtThickness = 0.070 + seeded01(skirtSeed + 6.8) * 0.030;
+      const skirtDepth = 0.070 + seeded01(skirtSeed + 7.6) * 0.030;
+      geometries.push(
+        createStrawBundle(
+          skirtLen,
+          skirtThickness,
+          skirtDepth,
+          new THREE.Vector3(x, y, z),
+          makeStrawColor(skirtSeed + 8.3, 0.10),
+          new THREE.Euler(
+            side * (0.18 + seeded01(skirtSeed + 9.2) * 0.10),
+            (seeded01(skirtSeed + 10.1) - 0.5) * 0.10,
+            (seeded01(skirtSeed + 11.0) - 0.5) * 0.05
+          ),
+          8
+        )
+      );
+    }
+  }
+
+  // Rope bands that bind the thatch courses.
+  const ropeTs = isMainWing ? [0.86, 0.70, 0.55] : [0.84, 0.67];
+  for (let side = -1; side <= 1; side += 2) {
+    for (let i = 0; i < ropeTs.length; i++) {
+      const ropeSeed = seed + side * 173.3 + i * 41.2 + 1430.0;
+      const t = ropeTs[i];
+      const ropeY = surfaceY(t) + 0.012 + i * 0.004;
+      const ropeZ = side * roofSpan * 0.5 * t;
+      const ropeLen = roofLength * (0.94 - i * 0.03);
+      const ropeRadius = (isMainWing ? 0.026 : 0.022) * (1 - i * 0.10);
+      geometries.push(
+        createCylinder(
+          ropeRadius * 0.94,
+          ropeRadius,
+          ropeLen,
+          10,
+          new THREE.Vector3(0, ropeY, ropeZ),
+          COLORS.chogaRope,
+          new THREE.Euler(0, 0, Math.PI * 0.5)
+        )
+      );
+
+      const tieCount = Math.max(4, Math.round(ropeLen / 2.45));
+      for (let j = 0; j < tieCount; j++) {
+        const tieX = -ropeLen * 0.5 + ((j + 0.5) / tieCount) * ropeLen;
+        const tieScale = 0.013 + seeded01(ropeSeed + j * 7.9 + 2.1) * 0.010;
+        geometries.push(
+          createBox(
+            tieScale,
+            tieScale * 1.5,
+            tieScale,
+            new THREE.Vector3(tieX, ropeY + tieScale * 0.7, ropeZ),
+            COLORS.chogaRope
+          )
+        );
+      }
+    }
+  }
+
+  const ridgeTuftCount = Math.max(5, Math.round(roofLength / 1.9));
   for (let i = 0; i < ridgeTuftCount; i++) {
     const x = -halfRoofLength + ((i + 0.5) / ridgeTuftCount) * roofLength;
     const tuftSeed = seed + i * 9.5;
@@ -949,7 +1052,7 @@ function generateHanokLinearHouseGeometry(
     );
 
     const area = Math.max(0.25, panelWidth * panelHeight);
-    const plasterCount = Math.max(4, Math.min(14, Math.round(area * 2.2)));
+    const plasterCount = Math.max(2, Math.min(8, Math.round(area * 1.15)));
     for (let i = 0; i < plasterCount; i++) {
       const s = seed + offset * 1.37 + i * 9.1;
       const localX = (seeded01(s + 1.1) - 0.5) * panelWidth * 0.86;
@@ -957,9 +1060,9 @@ function generateHanokLinearHouseGeometry(
       const edgeX = panelWidth > 0.001 ? Math.abs(localX) / (panelWidth * 0.5) : 0;
       const edgeY = panelHeight > 0.001 ? Math.abs(localY) / (panelHeight * 0.5) : 0;
       const edgeFactor = clamp(Math.max(edgeX, edgeY), 0, 1);
-      const smearW = panelWidth * (0.15 + seeded01(s + 3.9) * 0.22);
-      const smearH = panelHeight * (0.13 + seeded01(s + 4.8) * 0.20);
-      const smearD = wallThickness * (0.11 + seeded01(s + 6.1) * 0.13);
+      const smearW = panelWidth * (0.22 + seeded01(s + 3.9) * 0.34);
+      const smearH = panelHeight * (0.20 + seeded01(s + 4.8) * 0.24);
+      const smearD = wallThickness * (0.12 + seeded01(s + 6.1) * 0.14);
       const relief = zSign * wallThickness * (0.15 + seeded01(s + 7.5) * 0.10 - edgeFactor * 0.06);
       geometries.push(
         createBox(
@@ -971,12 +1074,12 @@ function generateHanokLinearHouseGeometry(
         )
       );
 
-      if (seeded01(s + 8.7) > 0.66) {
+      if (seeded01(s + 8.7) > 0.74) {
         geometries.push(
           createBox(
-            smearW * (0.48 + seeded01(s + 9.4) * 0.24),
-            smearH * (0.34 + seeded01(s + 10.3) * 0.20),
-            smearD * (0.36 + seeded01(s + 11.1) * 0.24),
+            smearW * (0.52 + seeded01(s + 9.4) * 0.26),
+            smearH * (0.40 + seeded01(s + 10.3) * 0.22),
+            smearD * (0.42 + seeded01(s + 11.1) * 0.24),
             new THREE.Vector3(
               center.x + localX + (seeded01(s + 12.6) - 0.5) * smearW * 0.24,
               center.y + localY - smearH * 0.18,
@@ -988,12 +1091,12 @@ function generateHanokLinearHouseGeometry(
       }
     }
 
-    const crackCount = Math.max(2, Math.min(9, Math.round(area * 1.3)));
+    const crackCount = Math.max(1, Math.min(5, Math.round(area * 0.62)));
     for (let i = 0; i < crackCount; i++) {
       const s = seed + offset * 1.61 + i * 13.4;
-      const crackLen = panelWidth * (0.12 + seeded01(s + 1.9) * 0.26);
-      const crackH = 0.010 + seeded01(s + 2.8) * 0.016;
-      const crackD = wallThickness * (0.020 + seeded01(s + 3.6) * 0.018);
+      const crackLen = panelWidth * (0.16 + seeded01(s + 1.9) * 0.24);
+      const crackH = 0.008 + seeded01(s + 2.8) * 0.012;
+      const crackD = wallThickness * (0.018 + seeded01(s + 3.6) * 0.016);
       const crackX = (seeded01(s + 4.7) - 0.5) * panelWidth * 0.82;
       const crackY = center.y - panelHeight * (0.10 + seeded01(s + 5.8) * 0.62);
       geometries.push(
@@ -1045,7 +1148,7 @@ function generateHanokLinearHouseGeometry(
     );
 
     const area = Math.max(0.25, panelDepth * panelHeight);
-    const plasterCount = Math.max(4, Math.min(14, Math.round(area * 2.2)));
+    const plasterCount = Math.max(2, Math.min(8, Math.round(area * 1.15)));
     for (let i = 0; i < plasterCount; i++) {
       const s = seed + offset * 1.41 + i * 8.8;
       const localZ = (seeded01(s + 1.4) - 0.5) * panelDepth * 0.86;
@@ -1053,9 +1156,9 @@ function generateHanokLinearHouseGeometry(
       const edgeZ = panelDepth > 0.001 ? Math.abs(localZ) / (panelDepth * 0.5) : 0;
       const edgeY = panelHeight > 0.001 ? Math.abs(localY) / (panelHeight * 0.5) : 0;
       const edgeFactor = clamp(Math.max(edgeZ, edgeY), 0, 1);
-      const smearD = panelDepth * (0.15 + seeded01(s + 4.2) * 0.22);
-      const smearH = panelHeight * (0.13 + seeded01(s + 5.1) * 0.20);
-      const smearX = wallThickness * (0.11 + seeded01(s + 6.6) * 0.13);
+      const smearD = panelDepth * (0.22 + seeded01(s + 4.2) * 0.34);
+      const smearH = panelHeight * (0.20 + seeded01(s + 5.1) * 0.24);
+      const smearX = wallThickness * (0.12 + seeded01(s + 6.6) * 0.14);
       const relief = xSign * wallThickness * (0.15 + seeded01(s + 7.2) * 0.10 - edgeFactor * 0.06);
       geometries.push(
         createBox(
@@ -1067,12 +1170,12 @@ function generateHanokLinearHouseGeometry(
         )
       );
 
-      if (seeded01(s + 8.4) > 0.66) {
+      if (seeded01(s + 8.4) > 0.74) {
         geometries.push(
           createBox(
-            smearX * (0.36 + seeded01(s + 9.2) * 0.24),
-            smearH * (0.34 + seeded01(s + 10.4) * 0.20),
-            smearD * (0.48 + seeded01(s + 11.8) * 0.24),
+            smearX * (0.42 + seeded01(s + 9.2) * 0.26),
+            smearH * (0.40 + seeded01(s + 10.4) * 0.22),
+            smearD * (0.52 + seeded01(s + 11.8) * 0.24),
             new THREE.Vector3(
               center.x + xSign * wallThickness * 0.26,
               center.y + localY - smearH * 0.18,
@@ -1084,12 +1187,12 @@ function generateHanokLinearHouseGeometry(
       }
     }
 
-    const crackCount = Math.max(2, Math.min(9, Math.round(area * 1.3)));
+    const crackCount = Math.max(1, Math.min(5, Math.round(area * 0.62)));
     for (let i = 0; i < crackCount; i++) {
       const s = seed + offset * 1.58 + i * 12.9;
-      const crackD = panelDepth * (0.12 + seeded01(s + 1.5) * 0.26);
-      const crackH = 0.010 + seeded01(s + 2.4) * 0.016;
-      const crackX = wallThickness * (0.020 + seeded01(s + 3.7) * 0.018);
+      const crackD = panelDepth * (0.16 + seeded01(s + 1.5) * 0.24);
+      const crackH = 0.008 + seeded01(s + 2.4) * 0.012;
+      const crackX = wallThickness * (0.018 + seeded01(s + 3.7) * 0.016);
       const crackZ = (seeded01(s + 4.9) - 0.5) * panelDepth * 0.82;
       const crackY = center.y - panelHeight * (0.10 + seeded01(s + 6.3) * 0.62);
       geometries.push(
