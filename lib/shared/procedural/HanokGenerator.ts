@@ -588,86 +588,81 @@ function pushChogaRoof(
       const rowZ = side * roofSpan * 0.5 * tMid;
       const rowY = yMid + 0.014 + rowWeight * 0.006;
 
-      // Broad, flat-but-thick main course.
-      geometries.push(
-        createBox(
-          roofLength * 1.01,
-          rowThickness * 0.78,
-          rowDepth * (0.96 + seeded01(rowSeed + 4.2) * 0.08),
-          new THREE.Vector3(0, rowY, rowZ + (seeded01(rowSeed + 5.4) - 0.5) * 0.02),
-          makeStrawColor(rowSeed + 6.8, 0.14),
-          new THREE.Euler(
-            slopeAngle + (seeded01(rowSeed + 8.1) - 0.5) * 0.014,
-            (seeded01(rowSeed + 9.7) - 0.5) * 0.010,
-            (seeded01(rowSeed + 10.8) - 0.5) * 0.008
-          )
-        )
-      );
+      // Build each row from a few thick, flat bundle segments (not narrow timber-like strips).
+      const bundleCount = Math.max(4, Math.round(roofLength / 3.2));
+      const bundleStep = roofLength / bundleCount;
+      for (let i = 0; i < bundleCount; i++) {
+        const bundleSeed = rowSeed + i * 17.9;
+        const centerX = -halfRoofLength + (i + 0.5) * bundleStep;
+        const edgeMargin = 0.22;
+        const leftRoom = centerX - (-halfRoofLength + edgeMargin);
+        const rightRoom = halfRoofLength - edgeMargin - centerX;
+        const maxHalfLen = Math.max(0.12, Math.min(leftRoom, rightRoom));
+        const segLenRaw = bundleStep * (0.96 + seeded01(bundleSeed + 1.7) * 0.12);
+        const segLen = Math.min(segLenRaw, maxHalfLen * 2);
+        if (segLen < 0.36) continue;
+        const segY = rowY + (seeded01(bundleSeed + 3.1) - 0.5) * 0.006;
+        const segZ = rowZ + (seeded01(bundleSeed + 4.4) - 0.5) * rowDepth * 0.06;
+        const bodyH = rowThickness * (0.74 + seeded01(bundleSeed + 5.9) * 0.12);
+        const bodyD = rowDepth * (0.88 + seeded01(bundleSeed + 7.2) * 0.10);
 
-      // Upper bundle mass for thatch volume (keeps silhouette thick, not board-like).
-      geometries.push(
-        createBox(
-          roofLength * 0.985,
-          rowThickness * 0.54,
-          rowDepth * (0.62 + seeded01(rowSeed + 11.2) * 0.10),
-          new THREE.Vector3(
-            0,
-            rowY + rowThickness * 0.24,
-            rowZ - side * rowDepth * (0.12 + seeded01(rowSeed + 12.6) * 0.03)
-          ),
-          makeStrawColor(rowSeed + 13.7, 0.11),
-          new THREE.Euler(
-            slopeAngle + (seeded01(rowSeed + 15.1) - 0.5) * 0.014,
-            (seeded01(rowSeed + 16.4) - 0.5) * 0.008,
-            (seeded01(rowSeed + 17.2) - 0.5) * 0.008
-          )
-        )
-      );
-
-      // Small exposed fringe blocks only at row edge (short and dense, no long spikes).
-      const edgeFringeCount = Math.max(10, Math.round(roofLength / 1.2));
-      for (let i = 0; i < edgeFringeCount; i++) {
-        const fSeed = rowSeed + i * 21.7;
-        const fx = -halfRoofLength + ((i + 0.5) / edgeFringeCount) * roofLength;
-        const fw = 0.08 + seeded01(fSeed + 1.8) * 0.08;
-        const fh = rowThickness * (0.22 + seeded01(fSeed + 2.9) * 0.18);
-        const fd = 0.05 + seeded01(fSeed + 4.4) * 0.06;
         geometries.push(
           createBox(
-            fw,
-            fh,
-            fd,
-            new THREE.Vector3(
-              fx + (seeded01(fSeed + 5.6) - 0.5) * 0.04,
-              yExposed - fh * 0.12 + seeded01(fSeed + 6.7) * 0.01,
-              side * roofSpan * 0.5 * tExposed + side * fd * 0.50
-            ),
-            makeStrawColor(fSeed + 7.9, 0.10),
+            segLen,
+            bodyH,
+            bodyD,
+            new THREE.Vector3(centerX + (seeded01(bundleSeed + 8.6) - 0.5) * 0.08, segY, segZ),
+            makeStrawColor(bundleSeed + 9.8, 0.14),
             new THREE.Euler(
-              slopeAngle + (seeded01(fSeed + 9.1) - 0.5) * 0.05,
-              (seeded01(fSeed + 10.2) - 0.5) * 0.04,
-              (seeded01(fSeed + 11.3) - 0.5) * 0.06
+              slopeAngle + (seeded01(bundleSeed + 11.1) - 0.5) * 0.010,
+              (seeded01(bundleSeed + 12.4) - 0.5) * 0.006,
+              (seeded01(bundleSeed + 13.9) - 0.5) * 0.006
+            )
+          )
+        );
+
+        geometries.push(
+          createBox(
+            segLen * (0.82 + seeded01(bundleSeed + 14.8) * 0.10),
+            rowThickness * (0.34 + seeded01(bundleSeed + 16.2) * 0.10),
+            bodyD * (0.60 + seeded01(bundleSeed + 17.4) * 0.12),
+            new THREE.Vector3(
+              centerX + (seeded01(bundleSeed + 18.7) - 0.5) * 0.06,
+              segY + bodyH * 0.26,
+              segZ - side * bodyD * (0.14 + seeded01(bundleSeed + 20.1) * 0.05)
+            ),
+            makeStrawColor(bundleSeed + 21.6, 0.10),
+            new THREE.Euler(
+              slopeAngle + (seeded01(bundleSeed + 22.8) - 0.5) * 0.010,
+              (seeded01(bundleSeed + 23.9) - 0.5) * 0.006,
+              (seeded01(bundleSeed + 25.4) - 0.5) * 0.006
+            )
+          )
+        );
+
+        // Exposed lip as short thick strip to avoid stick-like rendering artifacts.
+        const lipLen = segLen * (0.72 + seeded01(bundleSeed + 26.7) * 0.12);
+        const lipH = rowThickness * (0.20 + seeded01(bundleSeed + 27.9) * 0.07);
+        const lipD = rowThickness * (0.42 + seeded01(bundleSeed + 29.3) * 0.11);
+        geometries.push(
+          createBox(
+            lipLen,
+            lipH,
+            lipD,
+            new THREE.Vector3(
+              centerX,
+              yExposed + lipH * 0.40,
+              side * roofSpan * 0.5 * tExposed + side * lipD * 0.56
+            ),
+            makeStrawColor(bundleSeed + 27.9, 0.08),
+            new THREE.Euler(
+              slopeAngle + (seeded01(bundleSeed + 30.6) - 0.5) * 0.014,
+              (seeded01(bundleSeed + 31.9) - 0.5) * 0.010,
+              (seeded01(bundleSeed + 33.4) - 0.5) * 0.010
             )
           )
         );
       }
-
-      // Rounded edge impression using a soft rectangular ribbon (fewer line artifacts than cylinders).
-      const edgeRadius = rowThickness * 0.56;
-      geometries.push(
-        createBox(
-          roofLength * 0.995,
-          edgeRadius * 1.35,
-          edgeRadius * 1.15,
-          new THREE.Vector3(0, yExposed + 0.010 + rowWeight * 0.004, side * roofSpan * 0.5 * tExposed),
-          makeStrawColor(rowSeed + 14.1, 0.10),
-          new THREE.Euler(
-            slopeAngle + (seeded01(rowSeed + 15.2) - 0.5) * 0.010,
-            (seeded01(rowSeed + 16.1) - 0.5) * 0.008,
-            (seeded01(rowSeed + 17.3) - 0.5) * 0.008
-          )
-        )
-      );
     }
   }
 
