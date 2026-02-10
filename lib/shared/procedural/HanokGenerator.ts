@@ -201,42 +201,6 @@ function createStrawBundle(
   return tintGeometry(geometry, color);
 }
 
-function createOrientedStrawBundle(
-  length: number,
-  thickness: number,
-  depth: number,
-  position: THREE.Vector3,
-  direction: THREE.Vector3,
-  color: THREE.Color,
-  twist: number = 0,
-  radialSegments: number = 12
-): THREE.BufferGeometry {
-  const geometry = new THREE.CylinderGeometry(
-    0.5,
-    0.5,
-    Math.max(0.001, length),
-    Math.max(10, radialSegments),
-    1,
-    false
-  );
-  geometry.scale(Math.max(0.001, thickness), 1, Math.max(0.001, depth));
-  geometry.rotateZ(Math.PI * 0.5);
-
-  const dir = direction.clone();
-  if (dir.lengthSq() < 1e-8) {
-    dir.set(1, 0, 0);
-  } else {
-    dir.normalize();
-  }
-  const align = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1, 0, 0), dir);
-  geometry.applyQuaternion(align);
-  if (Math.abs(twist) > 1e-6) {
-    geometry.applyMatrix4(new THREE.Matrix4().makeRotationAxis(dir, twist));
-  }
-  geometry.translate(position.x, position.y, position.z);
-  return tintGeometry(geometry, color);
-}
-
 function createSphere(
   radius: number,
   widthSegments: number,
@@ -680,34 +644,44 @@ function pushChogaRoof(
       const rowZ = side * roofSpan * 0.5 * tMid + (seeded01(rowSeed + 4.8) - 0.5) * rowDepth * 0.04;
       const rowY = yMid + 0.020 + rowWeight * 0.008;
 
-      // Thick under-course keeps the roof mass, segmented top courses prevent plank-like long strips.
-      const underLen = courseLen * (0.90 + seeded01(rowSeed + 5.1) * 0.03);
-      const underThickness = rowThickness * (0.44 + seeded01(rowSeed + 5.8) * 0.14);
-      const underDepth = rowDepth * (0.90 + seeded01(rowSeed + 6.4) * 0.16);
-      geometries.push(
-        createStrawBundle(
-          underLen,
-          underThickness,
-          underDepth,
-          new THREE.Vector3(0, rowY - rowThickness * 0.06, rowZ + side * rowDepth * 0.02),
-          makeWeatheredStrawColor(rowSeed + 6.9, tInner, 0.5, side, 0.08),
-          new THREE.Euler(
-            slopeAngle + (seeded01(rowSeed + 7.6) - 0.5) * 0.006,
-            (seeded01(rowSeed + 8.5) - 0.5) * 0.003,
-            (seeded01(rowSeed + 9.4) - 0.5) * 0.002
-          ),
-          12
-        )
-      );
+      // Build the lower mass with medium chunks instead of one long strip.
+      const underChunkCount = Math.max(3, Math.round(courseLen / 3.1));
+      const underChunkSpan = courseLen / underChunkCount;
+      for (let chunk = 0; chunk < underChunkCount; chunk++) {
+        const underSeed = rowSeed + chunk * 17.3 + 37.0;
+        const underLen = underChunkSpan * (1.04 + seeded01(underSeed + 1.2) * 0.28);
+        const underX =
+          -courseLen * 0.5 + (chunk + 0.5) * underChunkSpan + (seeded01(underSeed + 2.1) - 0.5) * underChunkSpan * 0.20;
+        const underRoofX = underX * (roofLength / Math.max(0.001, courseLen));
+        const underXNorm = clamp((underRoofX + halfRoofLength) / roofLength, 0, 1);
+        const underThickness = rowThickness * (0.54 + seeded01(underSeed + 3.8) * 0.18);
+        const underDepth = rowDepth * (0.84 + seeded01(underSeed + 4.9) * 0.18);
+        const underY = rowY - rowThickness * (0.08 + seeded01(underSeed + 5.6) * 0.04);
+        const underZ = rowZ + side * rowDepth * (0.02 + seeded01(underSeed + 6.4) * 0.03);
+        geometries.push(
+          createStrawBundle(
+            underLen,
+            underThickness,
+            underDepth,
+            new THREE.Vector3(underX, underY, underZ),
+            makeWeatheredStrawColor(underSeed + 7.2, tInner, underXNorm, side, 0.10),
+            new THREE.Euler(
+              slopeAngle + (seeded01(underSeed + 8.1) - 0.5) * 0.008,
+              (seeded01(underSeed + 9.0) - 0.5) * 0.004,
+              (seeded01(underSeed + 9.9) - 0.5) * 0.003
+            ),
+            12
+          )
+        );
+      }
 
-      const rowSlopeDirection = new THREE.Vector3(0, yExposed - yInner, side * slopeRun).normalize();
-      const segmentCount = Math.max(10, Math.round(courseLen / 0.86));
+      const segmentCount = Math.max(11, Math.round(courseLen / 0.74));
       const segmentSpan = courseLen / segmentCount;
       for (let i = 0; i < segmentCount; i++) {
         const segSeed = rowSeed + i * 19.7 + 70.0;
-        const segLen = rowDepth * (0.94 + seeded01(segSeed + 1.7) * 0.54);
+        const segLen = segmentSpan * (0.76 + seeded01(segSeed + 1.7) * 0.40);
         const segX =
-          -courseLen * 0.5 + (i + 0.5) * segmentSpan + (seeded01(segSeed + 2.9) - 0.5) * segmentSpan * 0.30;
+          -courseLen * 0.5 + (i + 0.5) * segmentSpan + (seeded01(segSeed + 2.9) - 0.5) * segmentSpan * 0.24;
         const roofX = segX * (roofLength / Math.max(0.001, courseLen));
         const xNorm = clamp((roofX + halfRoofLength) / roofLength, 0, 1);
         const waveA = Math.sin(
@@ -717,58 +691,44 @@ function pushChogaRoof(
           (xNorm * (5.2 + seeded01(rowSeed + 14.6) * 1.1) + seeded01(segSeed + 4.4) * 0.9) * Math.PI * 2
         );
         const ridgeWarp = (waveA * 0.64 + waveB * 0.36) * (0.004 + rowWeight * 0.003);
-        const segY = rowY + rowThickness * (0.07 + seeded01(segSeed + 5.6) * 0.10) + ridgeWarp;
+        const segY = rowY + rowThickness * (0.07 + seeded01(segSeed + 5.6) * 0.08) + ridgeWarp;
         const segZ =
-          rowZ - side * rowDepth * (0.11 + seeded01(segSeed + 6.7) * 0.09) + side * ridgeWarp * 0.6;
-        const segThickness = rowThickness * (0.44 + seeded01(segSeed + 7.8) * 0.18);
-        const segDepth = rowDepth * (0.30 + seeded01(segSeed + 8.9) * 0.14);
-        const segDirection = rowSlopeDirection
-          .clone()
-          .add(
-            new THREE.Vector3(
-              (seeded01(segSeed + 10.4) - 0.5) * 0.24,
-              (seeded01(segSeed + 11.6) - 0.5) * 0.08,
-              side * (seeded01(segSeed + 12.8) - 0.5) * 0.12
-            )
-          )
-          .normalize();
+          rowZ - side * rowDepth * (0.10 + seeded01(segSeed + 6.7) * 0.08) + side * ridgeWarp * 0.5;
+        const segThickness = rowThickness * (0.36 + seeded01(segSeed + 7.8) * 0.14);
+        const segDepth = rowDepth * (0.24 + seeded01(segSeed + 8.9) * 0.12);
         geometries.push(
-          createOrientedStrawBundle(
+          createStrawBundle(
             segLen,
             segThickness,
             segDepth,
             new THREE.Vector3(segX, segY, segZ),
-            segDirection,
             makeWeatheredStrawColor(segSeed + 9.7, tMid, xNorm, side, 0.12),
-            (seeded01(segSeed + 13.7) - 0.5) * 0.16,
+            new THREE.Euler(
+              slopeAngle + (seeded01(segSeed + 10.4) - 0.5) * 0.012,
+              (seeded01(segSeed + 11.6) - 0.5) * 0.008,
+              (seeded01(segSeed + 12.8) - 0.5) * 0.006
+            ),
             10
           )
         );
 
-        if (seeded01(segSeed + 14.1) > 0.66) {
-          const capDirection = rowSlopeDirection
-            .clone()
-            .add(
-              new THREE.Vector3(
-                (seeded01(segSeed + 21.2) - 0.5) * 0.20,
-                (seeded01(segSeed + 22.3) - 0.5) * 0.06,
-                side * (seeded01(segSeed + 23.4) - 0.5) * 0.10
-              )
-            )
-            .normalize();
+        if (seeded01(segSeed + 14.1) > 0.74) {
           geometries.push(
-            createOrientedStrawBundle(
-              segLen * (0.54 + seeded01(segSeed + 14.8) * 0.20),
-              segThickness * (0.38 + seeded01(segSeed + 15.7) * 0.18),
-              segDepth * (0.46 + seeded01(segSeed + 16.6) * 0.20),
+            createStrawBundle(
+              segLen * (0.46 + seeded01(segSeed + 14.8) * 0.18),
+              segThickness * (0.42 + seeded01(segSeed + 15.7) * 0.16),
+              segDepth * (0.52 + seeded01(segSeed + 16.6) * 0.16),
               new THREE.Vector3(
-                segX + (seeded01(segSeed + 17.5) - 0.5) * segmentSpan * 0.20,
-                segY + rowThickness * (0.12 + seeded01(segSeed + 18.4) * 0.08),
-                segZ - side * rowDepth * (0.05 + seeded01(segSeed + 19.3) * 0.05)
+                segX + (seeded01(segSeed + 17.5) - 0.5) * segmentSpan * 0.14,
+                segY + rowThickness * (0.10 + seeded01(segSeed + 18.4) * 0.06),
+                segZ - side * rowDepth * (0.05 + seeded01(segSeed + 19.3) * 0.04)
               ),
-              capDirection,
               makeWeatheredStrawColor(segSeed + 20.1, tInner, xNorm, side, 0.10),
-              (seeded01(segSeed + 24.6) - 0.5) * 0.18,
+              new THREE.Euler(
+                slopeAngle + (seeded01(segSeed + 21.2) - 0.5) * 0.014,
+                (seeded01(segSeed + 22.3) - 0.5) * 0.010,
+                (seeded01(segSeed + 23.4) - 0.5) * 0.008
+              ),
               9
             )
           );
