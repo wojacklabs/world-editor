@@ -70,6 +70,7 @@ export class EditorEngine {
   // Foliage system (Thin Instance based)
   private foliageSystem: FoliageSystem | null = null;
   private foliageDirty = false;
+  private windTextureWired = false;
   private propsDirty = false;
 
   // Impostor system (Billboard LOD)
@@ -233,6 +234,15 @@ export class EditorEngine {
       const waterSystem = this.biomeDecorator?.getWaterSystem();
       if (waterSystem) {
         waterSystem.update(performance.now() / 1000);
+
+        // Wire wind texture from foliage to water (once)
+        if (!this.windTextureWired && this.foliageSystem) {
+          const windTex = this.foliageSystem.getWindNoiseTexture();
+          if (windTex) {
+            waterSystem.setWindTexture(windTex);
+            this.windTextureWired = true;
+          }
+        }
       }
 
       // Game mode: update GamePreview and render with its camera
@@ -497,6 +507,7 @@ export class EditorEngine {
       if (this.biomeDirty && this.biomeDecorator) {
         this.biomeDecorator.rebuildAll();
         this.biomeDirty = false;
+        this.windTextureWired = false;
       }
       // Rebuild foliage if dirty
       if (this.foliageDirty && this.foliageSystem) {

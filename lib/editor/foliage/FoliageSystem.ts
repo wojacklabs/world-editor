@@ -2071,6 +2071,10 @@ export class FoliageSystem {
   /**
    * Get statistics
    */
+  getWindNoiseTexture(): THREE.DataTexture | null {
+    return this.windNoiseTexture;
+  }
+
   getStats(): { chunks: number; totalInstances: number } {
     let totalInstances = 0;
     for (const chunk of this.chunks.values()) {

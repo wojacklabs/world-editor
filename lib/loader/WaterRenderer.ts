@@ -40,7 +40,8 @@ uniform vec4 uWave1;
 uniform vec4 uWave2;
 uniform vec4 uWave3;
 
-uniform float uWaveAngle;
+uniform float uWaveAngleCos;
+uniform float uWaveAngleSin;
 uniform vec3 uCameraPosition;
 
 varying vec3 vWorldPos;
@@ -55,9 +56,8 @@ vec3 gerstnerWave(vec4 wave, vec3 p) {
     if (wavelength < 0.01) return vec3(0.0);
     float k = 6.28318 / wavelength;
     float c = sqrt(9.8 / k);
-    float ca = cos(uWaveAngle), sa = sin(uWaveAngle);
     vec2 rawD = normalize(wave.xy);
-    vec2 d = vec2(rawD.x * ca - rawD.y * sa, rawD.x * sa + rawD.y * ca);
+    vec2 d = vec2(rawD.x * uWaveAngleCos - rawD.y * uWaveAngleSin, rawD.x * uWaveAngleSin + rawD.y * uWaveAngleCos);
     float f = k * (dot(d, p.xz) - c * uTime);
     float a = steepness / k;
     return vec3(d.x * a * cos(f), a * sin(f), d.y * a * cos(f));
@@ -112,7 +112,8 @@ uniform vec3 uDeepColor;
 uniform vec3 uFresnelColor;
 uniform float uFresnelPower;
 
-uniform float uWaveAngle;
+uniform float uWaveAngleCos;
+uniform float uWaveAngleSin;
 
 // ---- Analytical Gerstner wave normals ----
 
@@ -122,9 +123,8 @@ void gerstnerWaveNormal(vec4 wave, vec2 xz, float time, inout vec3 tangent, inou
     if (wavelength < 0.01) return;
     float k = 6.28318 / wavelength;
     float c = sqrt(9.8 / k);
-    float ca = cos(uWaveAngle), sa = sin(uWaveAngle);
     vec2 rawD = normalize(wave.xy);
-    vec2 d = vec2(rawD.x * ca - rawD.y * sa, rawD.x * sa + rawD.y * ca);
+    vec2 d = vec2(rawD.x * uWaveAngleCos - rawD.y * uWaveAngleSin, rawD.x * uWaveAngleSin + rawD.y * uWaveAngleCos);
     float f = k * (dot(d, xz) - c * time);
     float sinF = sin(f);
     float cosF = cos(f);
@@ -142,11 +142,11 @@ vec3 computeWaveNormal(vec2 origXZ, float time) {
     gerstnerWaveNormal(uWave2, origXZ, time, tangent, binormal);
     gerstnerWaveNormal(uWave3, origXZ, time, tangent, binormal);
 
-    // Detail waves (fragment-only, adds surface detail)
-    gerstnerWaveNormal(vec4( 0.8,  0.6, 0.05, 1.0),  origXZ, time, tangent, binormal);
-    gerstnerWaveNormal(vec4(-0.6,  0.8, 0.04, 0.7),  origXZ, time, tangent, binormal);
-    gerstnerWaveNormal(vec4( 0.9, -0.4, 0.03, 0.4),  origXZ, time, tangent, binormal);
-    gerstnerWaveNormal(vec4(-0.3, -0.9, 0.02, 0.25), origXZ, time, tangent, binormal);
+    // Detail waves (fragment-only — irrational wavelengths to avoid repetition)
+    gerstnerWaveNormal(vec4( 0.8,  0.6, 0.05, 0.97),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4(-0.6,  0.8, 0.04, 0.67),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4( 0.9, -0.4, 0.03, 0.41),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4(-0.3, -0.9, 0.02, 0.23), origXZ, time, tangent, binormal);
 
     return normalize(cross(binormal, tangent));
 }
@@ -231,10 +231,10 @@ export interface WaterConfig {
 }
 
 const DEFAULT_WAVES: GerstnerWave[] = [
-  { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.375, wavelength: 8.0 },
-  { direction: new THREE.Vector2(0.3, 1.0), steepness: 0.27, wavelength: 5.0 },
-  { direction: new THREE.Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 3.0 },
-  { direction: new THREE.Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.5 },
+  { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.375, wavelength: 7.3 },
+  { direction: new THREE.Vector2(0.3, 1.0), steepness: 0.27, wavelength: 4.7 },
+  { direction: new THREE.Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 2.9 },
+  { direction: new THREE.Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.3 },
 ];
 
 export class WaterRenderer {
@@ -277,7 +277,8 @@ export class WaterRenderer {
       fragmentShader: waterFragmentShader,
       uniforms: {
         uTime: { value: 0 },
-        uWaveAngle: { value: 0 },
+        uWaveAngleCos: { value: 1.0 },
+        uWaveAngleSin: { value: 0.0 },
         uFresnelPower: { value: fresnelPower },
         uShallowColor: { value: shallowColor },
         uDeepColor: { value: deepColor },

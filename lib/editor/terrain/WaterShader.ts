@@ -32,8 +32,9 @@ uniform vec4 uWave1;
 uniform vec4 uWave2;
 uniform vec4 uWave3;
 
-// Wave direction rotation (radians)
-uniform float uWaveAngle;
+// Wave direction rotation (pre-computed cos/sin)
+uniform float uWaveAngleCos;
+uniform float uWaveAngleSin;
 
 // Heightmap for depth-based wave attenuation
 uniform sampler2D uHeightmap;
@@ -46,6 +47,12 @@ uniform sampler2D uInteractiveHeight;
 uniform float uInteractiveEnabled;
 uniform float uInteractiveStrength;
 
+// Wind-driven waves (shared with grass)
+uniform sampler2D uWindTexture;
+uniform float uWindWaveStrength;
+uniform vec2 uWindDirection;
+uniform float uWindEnabled;
+
 varying vec3 vWorldPos;
 varying vec3 vNormal;
 varying vec2 vUV;
@@ -54,6 +61,8 @@ varying vec3 vViewVector;
 varying float vWaveHeight;
 varying vec2 vOrigXZ;
 varying float vDepth;
+varying vec3 vWindNormal;
+varying float vWindMod;
 
 vec3 gerstnerWave(vec4 wave, vec3 p) {
     float steepness = wave.z;
@@ -61,10 +70,8 @@ vec3 gerstnerWave(vec4 wave, vec3 p) {
     if (wavelength < 0.01) return vec3(0.0);
     float k = 2.0 * 3.14159265 / wavelength;
     float c = sqrt(9.8 / k);
-    // Rotate wave direction by uWaveAngle
-    float ca = cos(uWaveAngle), sa = sin(uWaveAngle);
     vec2 rawD = normalize(wave.xy);
-    vec2 d = vec2(rawD.x * ca - rawD.y * sa, rawD.x * sa + rawD.y * ca);
+    vec2 d = vec2(rawD.x * uWaveAngleCos - rawD.y * uWaveAngleSin, rawD.x * uWaveAngleSin + rawD.y * uWaveAngleCos);
     float f = k * (dot(d, p.xz) - c * uTime);
     float a = steepness / k;
     return vec3(d.x * a * cos(f), a * sin(f), d.y * a * cos(f));
@@ -83,12 +90,48 @@ void main() {
     // Attenuate waves in shallow water (prevents clipping through terrain)
     float depthDamping = smoothstep(0.0, 1.5, localDepth);
 
+    // Wind-driven waves (synced with grass wind texture)
+    // Sample wind FIRST so we can modulate Gerstner with it
+    vWindNormal = vec3(0.0, 1.0, 0.0);
+    float windMod = 1.0; // Gerstner modulation factor (1.0 = no wind texture)
+    float windDisp = 0.0;
+    if (uWindEnabled > 0.5) {
+        vec2 windDir = normalize(uWindDirection);
+        // Slower scroll than grass (0.06 vs 0.1) — water has more inertia
+        vec2 windUV = worldPos.xz * 0.025 + windDir * uTime * 0.06;
+        float windNoise = texture2D(uWindTexture, windUV).r * 2.0 - 1.0;
+
+        vec2 flutterUV = worldPos.xz * 0.06 + windDir * uTime * 0.09;
+        float flutter = texture2D(uWindTexture, flutterUV).r * 0.15;
+
+        float combinedWind = windNoise + flutter;
+
+        // Modulate Gerstner: calm when wind is low, active when wind is strong
+        windMod = smoothstep(-0.3, 0.7, combinedWind);
+
+        // Direct wind displacement (bidirectional — creates back-and-forth)
+        windDisp = combinedWind * uWindWaveStrength * depthDamping;
+
+        // Vertex finite-difference normal for wind displacement
+        float eps = 0.02;
+        float hx = (texture2D(uWindTexture, windUV + vec2(eps, 0.0)).r * 2.0 - 1.0
+                   + texture2D(uWindTexture, flutterUV + vec2(eps, 0.0)).r * 0.15) * uWindWaveStrength;
+        float hz = (texture2D(uWindTexture, windUV + vec2(0.0, eps)).r * 2.0 - 1.0
+                   + texture2D(uWindTexture, flutterUV + vec2(0.0, eps)).r * 0.15) * uWindWaveStrength;
+        float h0 = combinedWind * uWindWaveStrength;
+        vWindNormal = normalize(vec3((h0 - hx) / eps, 1.0, (h0 - hz) / eps));
+    }
+
+    // Gerstner waves modulated by wind intensity
     vec3 displacement = vec3(0.0);
     displacement += gerstnerWave(uWave0, worldPos);
     displacement += gerstnerWave(uWave1, worldPos);
     displacement += gerstnerWave(uWave2, worldPos);
     displacement += gerstnerWave(uWave3, worldPos);
-    displacement *= depthDamping;
+    displacement *= depthDamping * windMod;
+
+    // Add wind-driven displacement
+    displacement.y += windDisp;
 
     // Add interactive water ripples (from player/objects)
     if (uInteractiveEnabled > 0.5) {
@@ -99,6 +142,7 @@ void main() {
 
     worldPos += displacement;
     vWaveHeight = displacement.y;
+    vWindMod = windMod;
 
     vWorldPos = worldPos;
     vNormal = vec3(0.0, 1.0, 0.0);
@@ -127,6 +171,8 @@ varying vec3 vViewVector;
 varying float vWaveHeight;
 varying vec2 vOrigXZ;
 varying float vDepth;
+varying vec3 vWindNormal;
+varying float vWindMod;
 
 uniform float uTime;
 uniform float uWaterLevel;
@@ -148,8 +194,9 @@ uniform float uShoreBlendDistance;
 uniform float uFoamIntensity;
 uniform float uShoreFoamWidth;
 
-// Wave direction rotation (radians)
-uniform float uWaveAngle;
+// Wave direction rotation (pre-computed cos/sin)
+uniform float uWaveAngleCos;
+uniform float uWaveAngleSin;
 
 uniform sampler2D uReflectionSampler;
 uniform float uReflectionStrength;
@@ -157,6 +204,8 @@ uniform float uReflectionEnabled;
 
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+
+uniform float uWindNormalStrength;
 
 // ---- Analytical Gerstner wave normals ----
 
@@ -166,10 +215,8 @@ void gerstnerWaveNormal(vec4 wave, vec2 xz, float time, inout vec3 tangent, inou
     if (wavelength < 0.01) return;
     float k = 6.28318 / wavelength;
     float c = sqrt(9.8 / k);
-    // Rotate wave direction by uWaveAngle
-    float ca = cos(uWaveAngle), sa = sin(uWaveAngle);
     vec2 rawD = normalize(wave.xy);
-    vec2 d = vec2(rawD.x * ca - rawD.y * sa, rawD.x * sa + rawD.y * ca);
+    vec2 d = vec2(rawD.x * uWaveAngleCos - rawD.y * uWaveAngleSin, rawD.x * uWaveAngleSin + rawD.y * uWaveAngleCos);
     float f = k * (dot(d, xz) - c * time);
     float sinF = sin(f);
     float cosF = cos(f);
@@ -191,11 +238,11 @@ vec3 computeWaveNormal(vec2 origXZ, float time, float damping) {
     gerstnerWaveNormal(w2, origXZ, time, tangent, binormal);
     gerstnerWaveNormal(w3, origXZ, time, tangent, binormal);
 
-    // Detail waves (fragment-only, also attenuated)
-    gerstnerWaveNormal(vec4( 0.8,  0.6, 0.05*damping, 1.0),  origXZ, time, tangent, binormal);
-    gerstnerWaveNormal(vec4(-0.6,  0.8, 0.04*damping, 0.7),  origXZ, time, tangent, binormal);
-    gerstnerWaveNormal(vec4( 0.9, -0.4, 0.03*damping, 0.4),  origXZ, time, tangent, binormal);
-    gerstnerWaveNormal(vec4(-0.3, -0.9, 0.02*damping, 0.25), origXZ, time, tangent, binormal);
+    // Detail waves (fragment-only, also attenuated — irrational wavelengths to avoid repetition)
+    gerstnerWaveNormal(vec4( 0.8,  0.6, 0.05*damping, 0.97),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4(-0.6,  0.8, 0.04*damping, 0.67),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4( 0.9, -0.4, 0.03*damping, 0.41),  origXZ, time, tangent, binormal);
+    gerstnerWaveNormal(vec4(-0.3, -0.9, 0.02*damping, 0.23), origXZ, time, tangent, binormal);
 
     return normalize(cross(binormal, tangent));
 }
@@ -208,10 +255,12 @@ void main() {
     // Depth-based wave normal damping (matches vertex displacement damping)
     float depthDamping = smoothstep(0.0, 1.5, waterDepth);
 
-    // Analytical wave normal with depth attenuation
-    vec3 waveNormal = computeWaveNormal(vOrigXZ, uTime, depthDamping);
+    // Analytical wave normal with depth attenuation, modulated by wind
+    vec3 waveNormal = computeWaveNormal(vOrigXZ, uTime, depthDamping * vWindMod);
 
-    vec3 finalNormal = waveNormal;
+    // Blend wind-driven normal into Gerstner normal
+    vec3 windNormDelta = (vWindNormal - vec3(0.0, 1.0, 0.0)) * uWindNormalStrength;
+    vec3 finalNormal = normalize(waveNormal + windNormDelta);
 
     // Fresnel: F0=0.35 (reflection-dominant — base color is dark undertone only)
     float rawFresnel = pow(1.0 - max(dot(vViewVector, finalNormal), 0.0), uFresnelPower);
@@ -310,6 +359,10 @@ export interface WaterConfig {
   foamIntensity: number;
   shoreFoamWidth: number;
 
+  // Wind-driven waves (synced with grass wind texture)
+  windWaveStrength: number;
+  windNormalStrength: number;
+
   // Reflection
   reflectionEnabled: boolean;
   reflectionStrength: number;
@@ -326,10 +379,10 @@ export const DEFAULT_WATER_CONFIG: WaterConfig = {
   fresnelColor: new THREE.Color(0.45, 0.65, 0.75),  // More vibrant reflection color
 
   waves: [
-    { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.375, wavelength: 8.0 },   // 0.25 × 1.5
-    { direction: new THREE.Vector2(0.3, 1.0), steepness: 0.27, wavelength: 5.0 },    // 0.18 × 1.5
-    { direction: new THREE.Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 3.0 },   // 0.12 × 1.5
-    { direction: new THREE.Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.5 },   // 0.06 × 1.5
+    { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.375, wavelength: 7.3 },
+    { direction: new THREE.Vector2(0.3, 1.0), steepness: 0.27, wavelength: 4.7 },
+    { direction: new THREE.Vector2(-0.5, 0.7), steepness: 0.18, wavelength: 2.9 },
+    { direction: new THREE.Vector2(0.7, -0.4), steepness: 0.09, wavelength: 1.3 },
   ],
 
   fresnelPower: 2.0,
@@ -338,6 +391,9 @@ export const DEFAULT_WATER_CONFIG: WaterConfig = {
 
   foamIntensity: 1.4,
   shoreFoamWidth: 1.2,
+
+  windWaveStrength: 0.12,
+  windNormalStrength: 0.3,
 
   reflectionEnabled: false,  // RT created but never rendered into — disabled to save VRAM
   reflectionStrength: 0.90,
@@ -357,11 +413,13 @@ export const RIVER_WATER_CONFIG = DEFAULT_WATER_CONFIG;
 export const LAKE_WATER_CONFIG: WaterConfig = {
   ...DEFAULT_WATER_CONFIG,
   waves: [
-    { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.0225, wavelength: 2.5 },  // 0.015 × 1.5
-    { direction: new THREE.Vector2(-0.4, 1.0), steepness: 0.018, wavelength: 1.8 },  // 0.012 × 1.5
-    { direction: new THREE.Vector2(0.7, -0.5), steepness: 0.012, wavelength: 1.2 },  // 0.008 × 1.5
-    { direction: new THREE.Vector2(-0.3, -0.8), steepness: 0.0075, wavelength: 0.8 },// 0.005 × 1.5
+    { direction: new THREE.Vector2(1.0, 0.3), steepness: 0.005, wavelength: 2.3 },
+    { direction: new THREE.Vector2(-0.4, 1.0), steepness: 0.004, wavelength: 1.7 },
+    { direction: new THREE.Vector2(0.7, -0.5), steepness: 0.003, wavelength: 1.1 },
+    { direction: new THREE.Vector2(-0.3, -0.8), steepness: 0.002, wavelength: 0.7 },
   ],
+  windWaveStrength: 0.25,
+  windNormalStrength: 0.6,
 };
 
 /**
@@ -559,10 +617,17 @@ export class WaterSystem {
         uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
         uFogDensity: { value: 0.008 },
 
-        uWaveAngle: { value: 0.0 },
+        uWaveAngleCos: { value: 1.0 },
+        uWaveAngleSin: { value: 0.0 },
 
         uInteractiveEnabled: { value: 0.0 },
         uInteractiveStrength: { value: 1.0 },
+
+        uWindTexture: { value: this.dummyTexture },
+        uWindWaveStrength: { value: cfg.windWaveStrength },
+        uWindNormalStrength: { value: cfg.windNormalStrength },
+        uWindDirection: { value: new THREE.Vector2(0.707, 0.707) },
+        uWindEnabled: { value: 0.0 },
       },
       transparent: true,
       depthWrite: false,
@@ -669,7 +734,8 @@ export class WaterSystem {
    */
   setWaveAngle(angleRadians: number): void {
     if (this.waterMaterial) {
-      this.waterMaterial.uniforms.uWaveAngle.value = angleRadians;
+      this.waterMaterial.uniforms.uWaveAngleCos.value = Math.cos(angleRadians);
+      this.waterMaterial.uniforms.uWaveAngleSin.value = Math.sin(angleRadians);
     }
   }
 
@@ -732,6 +798,26 @@ export class WaterSystem {
   }
 
   /**
+   * Bind wind noise texture (shared with grass) for synchronized wind waves
+   */
+  setWindTexture(texture: THREE.Texture | null, windDirection?: THREE.Vector2): void {
+    if (!this.waterMaterial) return;
+
+    if (texture) {
+      this.waterMaterial.uniforms.uWindTexture.value = texture;
+      this.waterMaterial.uniforms.uWindEnabled.value = 1.0;
+      if (windDirection) {
+        this.waterMaterial.uniforms.uWindDirection.value.copy(windDirection);
+      }
+    } else {
+      if (this.dummyTexture) {
+        this.waterMaterial.uniforms.uWindTexture.value = this.dummyTexture;
+      }
+      this.waterMaterial.uniforms.uWindEnabled.value = 0.0;
+    }
+  }
+
+  /**
    * Update interactive water strength
    */
   setInteractiveStrength(strength: number): void {
@@ -770,6 +856,10 @@ export class WaterSystem {
     this.waterMaterial.uniforms.uFoamIntensity.value = cfg.foamIntensity;
     this.waterMaterial.uniforms.uShoreFoamWidth.value = cfg.shoreFoamWidth;
 
+    // Wind waves
+    this.waterMaterial.uniforms.uWindWaveStrength.value = cfg.windWaveStrength;
+    this.waterMaterial.uniforms.uWindNormalStrength.value = cfg.windNormalStrength;
+
     // Sun
     this.waterMaterial.uniforms.uSunDirection.value = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
     this.waterMaterial.uniforms.uSunColor.value = new THREE.Color(1.0, 0.95, 0.8);
@@ -779,7 +869,8 @@ export class WaterSystem {
     this.waterMaterial.uniforms.uFogDensity.value = 0.008;
 
     // Wave direction angle (default 0 = no rotation)
-    this.waterMaterial.uniforms.uWaveAngle.value = 0;
+    this.waterMaterial.uniforms.uWaveAngleCos.value = 1.0;
+    this.waterMaterial.uniforms.uWaveAngleSin.value = 0.0;
 
     // Reflection
     this.waterMaterial.uniforms.uReflectionStrength.value = cfg.reflectionStrength;
