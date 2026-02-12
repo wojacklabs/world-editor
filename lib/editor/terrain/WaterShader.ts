@@ -276,11 +276,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Fog applied after tonemapping+colorspace (matching Three.js built-in order)
-    float distanceToCamera = length(vWorldPos - cameraPosition);
-    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    float fogFactor = clamp(distanceFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 

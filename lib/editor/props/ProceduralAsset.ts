@@ -226,9 +226,7 @@ void main() {
 
     color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
 
-    // Fog
-    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+    // Fog handled by VolumetricFogPass (post-processing)
 
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
@@ -387,9 +385,7 @@ void main() {
 
     color = color * (ambient + diffuse) + rim;
 
-    // Fog
-    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+    // Fog handled by VolumetricFogPass (post-processing)
 
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
@@ -489,8 +485,7 @@ void main() {
 
     vec3 color = base * (ambientIntensity * ao + diffuse) + vec3(rim);
 
-    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
+    // Fog handled by VolumetricFogPass (post-processing)
 
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>

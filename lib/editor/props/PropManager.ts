@@ -223,13 +223,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Distance + height fog (matching terrain formula)
-    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
-    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
-    float fadeFog = smoothstep(uFadeStart, uFadeEnd, vCameraDistance);
-    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 
@@ -342,13 +336,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Distance + height fog (matching terrain formula)
-    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
-    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
-    float fadeFog = smoothstep(uFadeStart, uFadeEnd, vCameraDistance);
-    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 
@@ -611,13 +599,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Distance + height fog (matching terrain formula)
-    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
-    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
-    float fadeFog = smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
-    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 
@@ -1601,15 +1583,7 @@ export class PropManager {
           .replace(
             /\s*#include <fog_fragment>/,
             /* glsl */ `
-              {
-                float fogDist = length(vViewPosition);
-                float distanceFog = 1.0 - exp(-fogDensity * fogDensity * fogDist * fogDist);
-                float heightFactor = exp(-max(0.0, vWorldPos.y - fogHeightFalloff) * fogHeightDensity);
-                float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, fogDist);
-                float fadeFog = smoothstep(uFadeStart, uFadeEnd, fogDist);
-                float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-                gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
-              }
+              // Fog handled by VolumetricFogPass (post-processing)
             `
           );
         Object.assign(shader.uniforms, fogUniforms);
