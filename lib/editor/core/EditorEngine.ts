@@ -197,13 +197,14 @@ export class EditorEngine {
         this.fpsAccumulator -= 1000;
       }
 
-      // Update terrain shader uniforms for water effects
+      // Update terrain shader uniforms for water effects + LOD
       if (this.terrainMesh) {
         const material = this.terrainMesh.getMaterial() as THREE.ShaderMaterial | null;
         if (material && material.uniforms) {
           material.uniforms.uWaterLevel.value = this.seaLevel;
           material.uniforms.uTime.value = time;
         }
+        this.terrainMesh.updateLOD(this.isGameMode && this.gamePreview ? this.gamePreview.getCamera()! : this.camera);
       }
 
       // Update foliage in editor mode (visibility culling + LOD + wind animation)
