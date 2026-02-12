@@ -307,6 +307,8 @@ uniform float uAmbient;
 // Fog uniforms
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform float uFogHeightFalloff;
+uniform float uFogHeightDensity;
 uniform float uFadeStart;
 uniform float uFadeEnd;
 uniform float uDitherPixelSize;
@@ -432,13 +434,16 @@ void main() {
     float dither = sampleDitherThreshold(gl_FragCoord.xy);
     if (dither > clamp(fadeAlpha, 0.0, 1.0)) discard;
 
-    // Fog (simple distance fog)
-    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
-
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Fog applied after tonemapping+colorspace (matching Three.js built-in order)
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
+    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, distanceToCamera);
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);
 }
 `;
 
@@ -511,25 +516,17 @@ void main() {
     vec3 color = albedo * (uAmbient + diffuse * uSunColor * shadowFactor);
     color += uSpecularColor * specular * uSunColor * shadowFactor;
 
-    // ========== Fog System (matching terrain) ==========
-    float distanceToCamera = length(vWorldPosition - cameraPosition);
-
-    // Distance fog (exponential squared)
-    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-
-    // Height fog (distance-dependent, max 15%)
-    float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
-    float heightFog = heightFactor * 0.15 * smoothstep(0.0, 30.0, distanceToCamera);
-
-    // Final fog factor
-    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
-
-    // Apply fog
-    color = mix(color, uFogColor, fogFactor);
-
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Fog applied after tonemapping+colorspace (matching Three.js built-in order)
+    float distanceToCamera = length(vWorldPosition - cameraPosition);
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
+    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, distanceToCamera);
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);
 }
 `;
 
@@ -608,6 +605,8 @@ uniform vec3 uBaseColor;
 // cameraPosition is auto-injected by Three.js
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform float uFogHeightFalloff;
+uniform float uFogHeightDensity;
 
 varying vec2 vUV;
 varying vec3 vWorldPosition;
@@ -624,14 +623,17 @@ void main() {
     float heightGradient = vUV.y * 0.2 + 0.9;
     vec3 color = uBaseColor * heightGradient;
 
-    // Fog
-    float distanceToCamera = length(vWorldPosition - cameraPosition);
-    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
-
     gl_FragColor = vec4(color, alpha * 0.8);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Fog applied after tonemapping+colorspace (matching Three.js built-in order)
+    float distanceToCamera = length(vWorldPosition - cameraPosition);
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    float heightFactor = exp(-max(0.0, vWorldPosition.y - uFogHeightFalloff) * uFogHeightDensity);
+    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, distanceToCamera);
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);
 }
 `;
 
@@ -1283,7 +1285,7 @@ export class FoliageSystem {
           textureScale: { value: 1.0 },
           uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
           uFogDensity: { value: 0.008 },
-          uFogHeightFalloff: { value: 5.0 },
+          uFogHeightFalloff: { value: 15.0 },
           uFogHeightDensity: { value: 0.1 },
         },
       ]),
@@ -1320,6 +1322,8 @@ export class FoliageSystem {
         uAmbient: { value: 0.4 },
         uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
         uFogDensity: { value: 0.008 },
+        uFogHeightFalloff: { value: 15.0 },
+        uFogHeightDensity: { value: 0.1 },
         uFadeStart: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeGrassFadeStart },
         uFadeEnd: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.biomeGrassFadeEnd },
         uDitherPixelSize: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.grass.ditherPixelSize },
@@ -1345,6 +1349,8 @@ export class FoliageSystem {
         uBaseColor: { value: new THREE.Color(0.35, 0.55, 0.25) },
         uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
         uFogDensity: { value: 0.008 },
+        uFogHeightFalloff: { value: 15.0 },
+        uFogHeightDensity: { value: 0.1 },
       },
       transparent: true,
       side: THREE.DoubleSide,
@@ -1359,6 +1365,8 @@ export class FoliageSystem {
         uBaseColor: { value: new THREE.Color(0.5, 0.48, 0.45) },
         uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
         uFogDensity: { value: 0.008 },
+        uFogHeightFalloff: { value: 15.0 },
+        uFogHeightDensity: { value: 0.1 },
       },
       transparent: true,
       side: THREE.DoubleSide,
@@ -1374,12 +1382,14 @@ export class FoliageSystem {
   syncFogSettings(
     fogColor: THREE.Color,
     fogDensity: number,
-    fogHeightFalloff: number = 5.0,
+    fogHeightFalloff: number = 15.0,
     fogHeightDensity: number = 0.1
   ): void {
     if (this.grassMaterial) {
       this.grassMaterial.uniforms.uFogColor.value.copy(fogColor);
       this.grassMaterial.uniforms.uFogDensity.value = fogDensity;
+      this.grassMaterial.uniforms.uFogHeightFalloff.value = fogHeightFalloff;
+      this.grassMaterial.uniforms.uFogHeightDensity.value = fogHeightDensity;
     }
 
     if (this.rockMaterial) {
@@ -1392,10 +1402,14 @@ export class FoliageSystem {
     if (this.impostorGrassMaterial) {
       this.impostorGrassMaterial.uniforms.uFogColor.value.copy(fogColor);
       this.impostorGrassMaterial.uniforms.uFogDensity.value = fogDensity;
+      this.impostorGrassMaterial.uniforms.uFogHeightFalloff.value = fogHeightFalloff;
+      this.impostorGrassMaterial.uniforms.uFogHeightDensity.value = fogHeightDensity;
     }
     if (this.impostorRockMaterial) {
       this.impostorRockMaterial.uniforms.uFogColor.value.copy(fogColor);
       this.impostorRockMaterial.uniforms.uFogDensity.value = fogDensity;
+      this.impostorRockMaterial.uniforms.uFogHeightFalloff.value = fogHeightFalloff;
+      this.impostorRockMaterial.uniforms.uFogHeightDensity.value = fogHeightDensity;
     }
   }
 

@@ -966,22 +966,8 @@ void main() {
     // Final color composition (shadow affects diffuse and specular, not ambient)
     vec3 color = baseColor * ao * (uAmbientIntensity + diffuse * uSunColor * shadowFactor + pointLightContrib) + specular * uSunColor * shadowFactor + rim;
 
-    // ========== Improved Fog System ==========
-    // 1. Calculate distance from fragment's world position to camera (per-pixel)
+    // Pre-compute distance for fog (used after tonemapping)
     float distanceToCamera = length(vPosition - cameraPosition);
-
-    // 2. Distance fog (exponential squared)
-    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-
-    // 3. Height fog (concentrate fog at lower altitudes)
-    float heightFactor = exp(-max(0.0, vPosition.y - uFogHeightFalloff) * uFogHeightDensity);
-    float heightFog = heightFactor * 0.15 * smoothstep(0.0, 30.0, distanceToCamera);
-
-    // 4. Final fog factor
-    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
-
-    // 5. Apply fog
-    color = mix(color, uFogColor, fogFactor);
 
     // Wet sand/shore effect - only apply near actual water (where water mask exists)
     // This prevents the wet effect from applying to all terrain at similar heights
@@ -1038,6 +1024,13 @@ void main() {
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Fog applied after tonemapping+colorspace (matching Three.js built-in order)
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    float heightFactor = exp(-max(0.0, vPosition.y - uFogHeightFalloff) * uFogHeightDensity);
+    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, distanceToCamera);
+    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);
 }
 `;
 
@@ -1092,7 +1085,7 @@ export function createTerrainMaterial(splatTexture: THREE.Texture, waterMaskText
     uFogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
     uFogDensity: { value: 0.008 },
     uFogStart: { value: 50 },
-    uFogHeightFalloff: { value: 5.0 },
+    uFogHeightFalloff: { value: 15.0 },
     uFogHeightDensity: { value: 0.1 },
 
     // Water / underwater

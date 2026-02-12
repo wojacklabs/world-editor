@@ -53,21 +53,22 @@ varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vLocalPosition;
 varying vec2 vUV;
-varying float vCameraDistance;
 varying vec3 vViewDirection;
+varying float vCameraDistance;
 
 void main() {
     vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
+    vec4 mvPosition = viewMatrix * worldPos;
 
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    gl_Position = projectionMatrix * mvPosition;
 
     mat3 normalMat = mat3(modelMatrix) * mat3(instanceMatrix);
     vNormal = normalize(normalMat * normal);
     vPosition = worldPos.xyz;
     vLocalPosition = position;
     vUV = uv;
-    vCameraDistance = length(cameraPosition - worldPos.xyz);
     vViewDirection = normalize(cameraPosition - worldPos.xyz);
+    vCameraDistance = length(cameraPosition - worldPos.xyz);
 
     vec3 transformedNormal = vNormal;
     vec4 worldPosition = worldPos;
@@ -89,6 +90,10 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform float fogHeightFalloff;
+uniform float fogHeightDensity;
+uniform float uFadeStart;
+uniform float uFadeEnd;
 uniform sampler2D rockTexture;
 uniform float textureScale;
 
@@ -119,8 +124,8 @@ varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vLocalPosition;
 varying vec2 vUV;
-varying float vCameraDistance;
 varying vec3 vViewDirection;
+varying float vCameraDistance;
 
 // 3D noise functions for per-pixel detail
 float hash3D(vec3 p) {
@@ -214,13 +219,17 @@ void main() {
 
     color = color * (ambient + diffuse * shadowFactor + ptLight) + rim;
 
-    // Fog
-    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
-
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Distance + height fog (matching terrain formula)
+    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
+    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
+    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
+    float fadeFog = smoothstep(uFadeStart, uFadeEnd, vCameraDistance);
+    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
 }
 `;
 
@@ -234,20 +243,21 @@ attribute vec4 color;
 
 varying vec3 vNormal;
 varying vec3 vPosition;
-varying float vCameraDistance;
 varying vec3 vViewDirection;
 varying vec4 vColor;
+varying float vCameraDistance;
 
 void main() {
     vec4 worldPos = modelMatrix * instanceMatrix * vec4(position, 1.0);
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    vec4 mvPosition = viewMatrix * worldPos;
+    gl_Position = projectionMatrix * mvPosition;
 
     mat3 normalMat = mat3(modelMatrix) * mat3(instanceMatrix);
     vNormal = normalize(normalMat * normal);
     vPosition = worldPos.xyz;
-    vCameraDistance = length(cameraPosition - worldPos.xyz);
     vViewDirection = normalize(cameraPosition - worldPos.xyz);
     vColor = color;
+    vCameraDistance = length(cameraPosition - worldPos.xyz);
 
     vec3 transformedNormal = vNormal;
     vec4 worldPosition = worldPos;
@@ -267,6 +277,10 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform float fogHeightFalloff;
+uniform float fogHeightDensity;
+uniform float uFadeStart;
+uniform float uFadeEnd;
 
 // Point lights
 uniform vec3 uPointLightPositions[8];
@@ -293,9 +307,9 @@ vec3 calcPointLights(vec3 worldPos, vec3 n) {
 
 varying vec3 vNormal;
 varying vec3 vPosition;
-varying float vCameraDistance;
 varying vec3 vViewDirection;
 varying vec4 vColor;
+varying float vCameraDistance;
 
 void main() {
     vec3 normal = normalize(vNormal);
@@ -324,12 +338,17 @@ void main() {
     vec3 pointLight = calcPointLights(vPosition, normal);
     color = color * (ambientIntensity * ao + diffuse * shadowFactor + pointLight) + vec3(rim);
 
-    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
-
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Distance + height fog (matching terrain formula)
+    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
+    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
+    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
+    float fadeFog = smoothstep(uFadeStart, uFadeEnd, vCameraDistance);
+    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
 }
 `;
 
@@ -355,9 +374,9 @@ varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vLocalPosition;
 varying vec2 vUV;
-varying float vCameraDistance;
 varying vec3 vViewDirection;
 varying vec4 vColor;
+varying float vCameraDistance;
 
 float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -399,7 +418,8 @@ void main() {
     worldPos.z += uWindDirection.y * windAmount * 0.2;
     worldPos.y -= windAmount * 0.04;
 
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    vec4 mvPosition = viewMatrix * worldPos;
+    gl_Position = projectionMatrix * mvPosition;
 
     mat3 normalMat = mat3(modelMatrix) * mat3(instanceMatrix);
     // Normals: leaf vertices have pre-baked sphere normals per bush cluster
@@ -408,9 +428,9 @@ void main() {
     vPosition = worldPos.xyz;
     vLocalPosition = position;
     vUV = uv;
-    vCameraDistance = length(cameraPosition - worldPos.xyz);
     vViewDirection = normalize(cameraPosition - worldPos.xyz);
     vColor = color;
+    vCameraDistance = length(cameraPosition - worldPos.xyz);
 
     vec3 transformedNormal = vNormal;
     vec4 worldPosition = worldPos;
@@ -432,6 +452,8 @@ uniform vec3 sunDirection;
 uniform float ambientIntensity;
 uniform vec3 fogColor;
 uniform float fogDensity;
+uniform float fogHeightFalloff;
+uniform float fogHeightDensity;
 uniform sampler2D dirtTexture;
 uniform float dirtTextureScale;
 uniform sampler2D leafAtlas;
@@ -471,9 +493,9 @@ varying vec3 vNormal;
 varying vec3 vPosition;
 varying vec3 vLocalPosition;
 varying vec2 vUV;
-varying float vCameraDistance;
 varying vec3 vViewDirection;
 varying vec4 vColor;
+varying float vCameraDistance;
 
 float hash3D(vec3 p) {
     return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453);
@@ -511,10 +533,6 @@ float fbm(vec3 p) {
     return value;
 }
 
-float hash2D(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
 void main() {
     vec3 normal = normalize(vNormal);
     float leafMask = step(vColor.r + 0.02, vColor.g);
@@ -523,12 +541,6 @@ void main() {
     float leafMaskAlpha = mix(leafSample.a, dot(leafSample.rgb, vec3(0.299, 0.587, 0.114)), uLeafMaskFromLuma);
 
     if (usesLeafAtlas > 0.5 && leafMaskAlpha < uLeafAlphaCutoff) {
-        discard;
-    }
-
-    float fadeAlpha = 1.0 - smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
-    float dither = hash2D(gl_FragCoord.xy + vPosition.xz * 3.17);
-    if (leafMask > 0.5 && dither > clamp(fadeAlpha, 0.0, 1.0)) {
         discard;
     }
 
@@ -595,13 +607,17 @@ void main() {
     // Fresnel: mix blend for softer rim
     color = mix(color, uFresnelColor, clamp(fresnel * leafMask, 0.0, 1.0));
 
-    // Fog
-    float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    color = mix(color, fogColor, clamp(fogFactor, 0.0, 1.0));
-
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Distance + height fog (matching terrain formula)
+    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
+    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
+    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
+    float fadeFog = smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
+    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
 }
 `;
 
@@ -613,6 +629,7 @@ const csmLeafVertexShader = `
 attribute vec4 color;
 varying vec4 vVertexColor;
 varying vec2 vUv;
+varying vec3 vWorldPos;
 
 uniform float uTime;
 uniform vec2 uWindDirection;
@@ -644,6 +661,7 @@ void main() {
 
     // Wind displacement
     vec3 worldPos = (modelMatrix * instanceMatrix * vec4(position, 1.0)).xyz;
+    vWorldPos = worldPos;
 
     float heightAboveMin = max(0.0, position.y - uMinWindHeight);
     float heightRange = max(0.01, uMaxWindHeight - uMinWindHeight);
@@ -666,10 +684,11 @@ void main() {
 }
 `;
 
-// Fragment: bark/leaf branching via vertex color + fresnel for leaves
+// Fragment: bark/leaf branching via vertex color + fresnel for leaves + fog
 const csmLeafFragmentShader = `
 varying vec4 vVertexColor;
 varying vec2 vUv;
+varying vec3 vWorldPos;
 
 uniform float uFresnelPower;
 uniform float uFresnelStrength;
@@ -724,6 +743,7 @@ void main() {
     float ndv = clamp(dot(N, V), 0.0, 1.0);
     float fresnel = pow(1.0 - ndv, uFresnelPower) * uFresnelStrength * leafMask;
     csm_DiffuseColor.rgb = mix(csm_DiffuseColor.rgb, uFresnelColor, clamp(fresnel, 0.0, 1.0));
+
 }
 `;
 
@@ -882,6 +902,7 @@ export class PropManager {
   private previewAsset: ProceduralAsset | null = null;
   private previewMesh: THREE.Mesh | null = null;
   private previewInstancedMesh: THREE.InstancedMesh | null = null;
+  private previewMaterialClone: THREE.Material | null = null;  // Cloned material for preview (no fog)
   private previewParams: AssetParams | null = null;
   private previewVisible = false;
   private previewPosition = new THREE.Vector3(0, 0, 0);
@@ -1520,6 +1541,15 @@ export class PropManager {
         }
       );
 
+      const fogUniforms = {
+        fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
+        fogDensity: { value: 0.008 },
+        fogHeightFalloff: { value: 15.0 },
+        fogHeightDensity: { value: 0.1 },
+        uFadeStart: { value: 80.0 },
+        uFadeEnd: { value: 160.0 },
+      };
+
       const csm = new CustomShaderMaterial({
         baseMaterial: THREE.MeshStandardMaterial,
         vertexShader: csmLeafVertexShader,
@@ -1539,9 +1569,11 @@ export class PropManager {
           uTrunkColor: { value: new THREE.Color("#8b6b4a") },
           uLeafAlpha: { value: leafAtlas },
           uAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
+          ...fogUniforms,
         },
         // MeshStandardMaterial properties
         color: new THREE.Color("#6a9e18"),
+        fog: false,  // Disable Three.js built-in fog; custom fog via onBeforeCompile
         transparent: false,
         depthWrite: true,
         side: THREE.DoubleSide,
@@ -1549,6 +1581,42 @@ export class PropManager {
         metalness: 0.0,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any);
+
+      // Inject custom fog via onBeforeCompile (replaces Three.js fog includes)
+      const origCompile = csm.onBeforeCompile.bind(csm);
+      csm.onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms, renderer: THREE.WebGLRenderer) => {
+        origCompile(shader, renderer);
+        shader.fragmentShader = shader.fragmentShader
+          .replace(
+            /\s*#include <fog_pars_fragment>/,
+            /* glsl */ `
+              uniform vec3 fogColor;
+              uniform float fogDensity;
+              uniform float fogHeightFalloff;
+              uniform float fogHeightDensity;
+              uniform float uFadeStart;
+              uniform float uFadeEnd;
+            `
+          )
+          .replace(
+            /\s*#include <fog_fragment>/,
+            /* glsl */ `
+              {
+                float fogDist = length(vViewPosition);
+                float distanceFog = 1.0 - exp(-fogDensity * fogDensity * fogDist * fogDist);
+                float heightFactor = exp(-max(0.0, vWorldPos.y - fogHeightFalloff) * fogHeightDensity);
+                float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, fogDist);
+                float fadeFog = smoothstep(uFadeStart, uFadeEnd, fogDist);
+                float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
+                gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+              }
+            `
+          );
+        Object.assign(shader.uniforms, fogUniforms);
+      };
+      const prevCacheKey = csm.customProgramCacheKey?.bind(csm);
+      csm.customProgramCacheKey = () => (prevCacheKey?.() ?? "") + "tree-fog-v2";
+      csm.needsUpdate = true;
 
       // Cast: CSM extends THREE.Material with .uniforms; compatible at runtime
       return csm as unknown as THREE.ShaderMaterial;
@@ -1598,6 +1666,8 @@ export class PropManager {
             ambientIntensity: { value: 0.4 },
             fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
             fogDensity: { value: 0.008 },
+            fogHeightFalloff: { value: 15.0 },
+            fogHeightDensity: { value: 0.1 },
             dirtTexture: { value: dirtTex },
             dirtTextureScale: { value: 0.5 },
             leafAtlas: { value: leafAtlas },
@@ -1616,6 +1686,7 @@ export class PropManager {
           },
         ]),
         lights: true,
+        fog: false,
         side: THREE.DoubleSide,
         alphaTest: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff,
       });
@@ -1633,6 +1704,10 @@ export class PropManager {
             ambientIntensity: { value: 0.42 },
             fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
             fogDensity: { value: 0.008 },
+            fogHeightFalloff: { value: 15.0 },
+            fogHeightDensity: { value: 0.1 },
+            uFadeStart: { value: 80.0 },
+            uFadeEnd: { value: 160.0 },
             uPointLightPositions: { value: new Float32Array(8 * 3) },
             uPointLightColors: { value: new Float32Array(8 * 3) },
             uPointLightRanges: { value: new Float32Array(8) },
@@ -1640,6 +1715,7 @@ export class PropManager {
           },
         ]),
         lights: true,
+        fog: false,
         side: THREE.DoubleSide,
       });
     }
@@ -1667,6 +1743,10 @@ export class PropManager {
           ambientIntensity: { value: 0.4 },
           fogColor: { value: new THREE.Color(0.6, 0.75, 0.9) },
           fogDensity: { value: 0.008 },
+          fogHeightFalloff: { value: 15.0 },
+          fogHeightDensity: { value: 0.1 },
+          uFadeStart: { value: 80.0 },
+          uFadeEnd: { value: 160.0 },
           rockTexture: { value: rockTex },
           textureScale: { value: 1.0 },
           uPointLightPositions: { value: new Float32Array(8 * 3) },
@@ -1676,6 +1756,7 @@ export class PropManager {
         },
       ]),
       lights: true,
+      fog: false,
       side: THREE.DoubleSide,
     });
   }
@@ -1692,6 +1773,7 @@ export class PropManager {
         material.uniforms.fogDensity.value = fogDensity;
       }
     }
+
   }
 
   /**
@@ -2370,8 +2452,12 @@ export class PropManager {
       if (this.scene && typeof this.scene.remove === "function") {
         this.scene.remove(this.previewInstancedMesh);
       }
-      // Don't dispose geometry/material - they're shared from variationGeometries/sharedMaterials
+      // Don't dispose geometry - shared from variationGeometries
       this.previewInstancedMesh = null;
+    }
+    if (this.previewMaterialClone) {
+      this.previewMaterialClone.dispose();
+      this.previewMaterialClone = null;
     }
   }
 
@@ -2401,7 +2487,49 @@ export class PropManager {
     const material = this.sharedMaterials.get(type);
     if (!material) return false;
 
-    const previewMesh = new THREE.InstancedMesh(sourceGeometry, material, 1);
+    // Clone material for preview with fog disabled (skip CSM materials which can't be cloned safely)
+    let previewMat: THREE.Material = material;
+    if (type !== "tree" && type !== "bush") {
+      const cloned = material.clone() as THREE.ShaderMaterial;
+      if (cloned.uniforms?.fogDensity) {
+        cloned.uniforms.fogDensity.value = 0;
+      }
+      if (cloned.uniforms?.uFadeStart) {
+        cloned.uniforms.uFadeStart.value = 99999;
+      }
+      if (cloned.uniforms?.uLeafFadeStart) {
+        cloned.uniforms.uLeafFadeStart.value = 99999;
+      }
+      this.previewMaterialClone = cloned;
+      previewMat = cloned;
+    }
+
+    const previewMesh = new THREE.InstancedMesh(sourceGeometry, previewMat, 1);
+
+    // For tree/bush: temporarily disable fog during preview render via callbacks
+    if (type === "tree" || type === "bush") {
+      const mat = material as unknown as { uniforms?: Record<string, { value: unknown }>, _savedFogDensity?: number, _savedFadeStart?: number };
+      previewMesh.onBeforeRender = () => {
+        if (mat.uniforms?.fogDensity) {
+          mat._savedFogDensity = mat.uniforms.fogDensity.value as number;
+          mat.uniforms.fogDensity.value = 0;
+        }
+        if (mat.uniforms?.uFadeStart) {
+          mat._savedFadeStart = mat.uniforms.uFadeStart.value as number;
+          mat.uniforms.uFadeStart.value = 99999;
+        }
+      };
+      previewMesh.onAfterRender = () => {
+        if (mat.uniforms?.fogDensity && mat._savedFogDensity !== undefined) {
+          mat.uniforms.fogDensity.value = mat._savedFogDensity;
+          delete mat._savedFogDensity;
+        }
+        if (mat.uniforms?.uFadeStart && mat._savedFadeStart !== undefined) {
+          mat.uniforms.uFadeStart.value = mat._savedFadeStart;
+          delete mat._savedFadeStart;
+        }
+      };
+    }
     previewMesh.name = "preview_asset";
     previewMesh.frustumCulled = false;
     previewMesh.visible = this.previewVisible;
@@ -2456,6 +2584,17 @@ export class PropManager {
       this.previewMesh = this.previewAsset.generate();
       if (this.previewMesh) {
         this.previewMesh.position.copy(this.previewPosition);
+        // Disable fog and fadeout on preview material
+        const mat = this.previewMesh.material as THREE.ShaderMaterial;
+        if (mat?.uniforms?.fogDensity) {
+          mat.uniforms.fogDensity.value = 0;
+        }
+        if (mat?.uniforms?.uFadeStart) {
+          mat.uniforms.uFadeStart.value = 99999;
+        }
+        if (mat?.uniforms?.uLeafFadeStart) {
+          mat.uniforms.uLeafFadeStart.value = 99999;
+        }
       }
     }
 
@@ -2557,10 +2696,19 @@ export class PropManager {
     if (this.previewMesh) {
       this.previewMesh.name = "preview_asset";
 
-      // Make semi-transparent
+      // Make semi-transparent and disable fog/fadeout on preview
       if (this.previewMesh.material && this.previewMesh.material instanceof THREE.ShaderMaterial) {
         this.previewMesh.material.transparent = true;
         this.previewMesh.material.opacity = 0.8;
+        if (this.previewMesh.material.uniforms?.fogDensity) {
+          this.previewMesh.material.uniforms.fogDensity.value = 0;
+        }
+        if (this.previewMesh.material.uniforms?.uFadeStart) {
+          this.previewMesh.material.uniforms.uFadeStart.value = 99999;
+        }
+        if (this.previewMesh.material.uniforms?.uLeafFadeStart) {
+          this.previewMesh.material.uniforms.uLeafFadeStart.value = 99999;
+        }
       }
 
       // Position at center of terrain initially

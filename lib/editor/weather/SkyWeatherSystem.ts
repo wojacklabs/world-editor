@@ -412,7 +412,7 @@ export class SkyWeatherSystem {
       this.foliageSystem.syncFogSettings(
         this.fogColor,
         this.fogDensity,
-        5.0,
+        15.0,
         0.1
       );
       // Update sun direction on foliage

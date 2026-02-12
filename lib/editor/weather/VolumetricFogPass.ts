@@ -156,7 +156,7 @@ export class VolumetricFogPass extends Pass {
           // Final fog factor
           float fogFactor = clamp(1.0 - exp(-fogAccum), 0.0, 1.0);
 
-          // Output fog contribution + alpha (fog factor), composited in full-res pass
+          // Output fog contribution + alpha
           vec3 fogColor = uFogColor * fogFactor + scatterAccum * uGodRayIntensity;
           gl_FragColor = vec4(fogColor, fogFactor);
         }
