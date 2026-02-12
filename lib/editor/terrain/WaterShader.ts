@@ -272,15 +272,15 @@ void main() {
     alpha = mix(alpha, 1.0, fresnel);
     alpha = clamp(alpha, 0.0, 0.98);
 
-    // Distance fog (matches terrain/foliage exponential squared fog)
-    float distanceToCamera = length(vWorldPos - cameraPosition);
-    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    float fogFactor = clamp(distanceFog, 0.0, 1.0);
-    color = mix(color, uFogColor, fogFactor);
-
     gl_FragColor = vec4(color, alpha);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+
+    // Fog applied after tonemapping+colorspace (matching Three.js built-in order)
+    float distanceToCamera = length(vWorldPos - cameraPosition);
+    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+    float fogFactor = clamp(distanceFog, 0.0, 1.0);
+    gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);
 }
 `;
 
