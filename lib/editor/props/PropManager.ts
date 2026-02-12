@@ -223,13 +223,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Distance + height fog (matching terrain formula)
-    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
-    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
-    float fadeFog = smoothstep(uFadeStart, uFadeEnd, vCameraDistance);
-    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 
@@ -342,13 +336,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Distance + height fog (matching terrain formula)
-    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
-    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
-    float fadeFog = smoothstep(uFadeStart, uFadeEnd, vCameraDistance);
-    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 
@@ -540,7 +528,9 @@ void main() {
     float usesLeafAtlas = uUseLeafAtlas * leafMask;
     float leafMaskAlpha = mix(leafSample.a, dot(leafSample.rgb, vec3(0.299, 0.587, 0.114)), uLeafMaskFromLuma);
 
-    if (usesLeafAtlas > 0.5 && leafMaskAlpha < uLeafAlphaCutoff) {
+    float distFactor = smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
+    float cutoff = mix(uLeafAlphaCutoff, 0.1, distFactor);
+    if (usesLeafAtlas > 0.5 && leafMaskAlpha < cutoff) {
         discard;
     }
 
@@ -611,13 +601,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Distance + height fog (matching terrain formula)
-    float distanceFog = 1.0 - exp(-fogDensity * fogDensity * vCameraDistance * vCameraDistance);
-    float heightFactor = exp(-max(0.0, vPosition.y - fogHeightFalloff) * fogHeightDensity);
-    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, vCameraDistance);
-    float fadeFog = smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
-    float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 
@@ -1601,15 +1585,7 @@ export class PropManager {
           .replace(
             /\s*#include <fog_fragment>/,
             /* glsl */ `
-              {
-                float fogDist = length(vViewPosition);
-                float distanceFog = 1.0 - exp(-fogDensity * fogDensity * fogDist * fogDist);
-                float heightFactor = exp(-max(0.0, vWorldPos.y - fogHeightFalloff) * fogHeightDensity);
-                float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, fogDist);
-                float fadeFog = smoothstep(uFadeStart, uFadeEnd, fogDist);
-                float fogFactor = clamp(distanceFog + heightFog + fadeFog, 0.0, 1.0);
-                gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, fogFactor);
-              }
+              // Fog handled by VolumetricFogPass (post-processing)
             `
           );
         Object.assign(shader.uniforms, fogUniforms);
@@ -2350,7 +2326,7 @@ export class PropManager {
 
         groupMesh = new THREE.InstancedMesh(baseGeometry, material, capacity);
         groupMesh.name = `inst_${lodGroupKey}`;
-        groupMesh.frustumCulled = false;  // We handle frustum culling manually
+        groupMesh.frustumCulled = true;
         groupMesh.castShadow = true;
         groupMesh.receiveShadow = true;
         this.scene.add(groupMesh);
@@ -2368,6 +2344,7 @@ export class PropManager {
 
       groupMesh.count = count;
       groupMesh.instanceMatrix.needsUpdate = true;
+      groupMesh.computeBoundingSphere();
       groupMesh.visible = true;
     }
   }

@@ -123,9 +123,7 @@ void main() {
     vec3 ambient = vec3(uAmbientIntensity);
     color = color * (ambient + diffuse) + vec3(rimFactor);
 
-    // Fog
-    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * vCameraDistance * vCameraDistance);
-    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
+    // Fog handled by VolumetricFogPass (post-processing)
 
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>

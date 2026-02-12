@@ -152,7 +152,7 @@ export class EditorEngine {
       antialias: true,
       stencil: true,
     });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(this.canvas.clientWidth, this.canvas.clientHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ReinhardToneMapping;
@@ -197,13 +197,14 @@ export class EditorEngine {
         this.fpsAccumulator -= 1000;
       }
 
-      // Update terrain shader uniforms for water effects
+      // Update terrain shader uniforms for water effects + LOD
       if (this.terrainMesh) {
         const material = this.terrainMesh.getMaterial() as THREE.ShaderMaterial | null;
         if (material && material.uniforms) {
           material.uniforms.uWaterLevel.value = this.seaLevel;
           material.uniforms.uTime.value = time;
         }
+        this.terrainMesh.updateLOD(this.isGameMode && this.gamePreview ? this.gamePreview.getCamera()! : this.camera);
       }
 
       // Update foliage in editor mode (visibility culling + LOD + wind animation)
@@ -413,6 +414,7 @@ export class EditorEngine {
     const renderTarget = new THREE.WebGLRenderTarget(width, height, {
       depthTexture: new THREE.DepthTexture(width, height),
       depthBuffer: true,
+      // MSAA disabled: too expensive with 4096 alpha-tested grass meshes
     });
     if (renderTarget.depthTexture) {
       renderTarget.depthTexture.format = THREE.DepthFormat;

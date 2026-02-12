@@ -35,6 +35,7 @@ export class TerrainMesh {
   private lodLevels: LODLevel[] = [];
   private currentLOD = 0;
   private lodEnabled = true;
+  private readonly _terrainCenter = new THREE.Vector3();
 
   constructor(scene: THREE.Scene, heightmap: Heightmap) {
     this.scene = scene;
@@ -303,13 +304,9 @@ export class TerrainMesh {
   updateLOD(camera: THREE.Camera): void {
     if (!this.lodEnabled || this.lodLevels.length <= 1) return;
 
-    const terrainCenter = new THREE.Vector3(
-      this.heightmap.getScale() / 2,
-      0,
-      this.heightmap.getScale() / 2
-    );
-
-    const distance = camera.position.distanceTo(terrainCenter);
+    const half = this.heightmap.getScale() / 2;
+    this._terrainCenter.set(half, 0, half);
+    const distance = camera.position.distanceTo(this._terrainCenter);
 
     // Find appropriate LOD level
     let targetLOD = 0;
@@ -338,15 +335,15 @@ export class TerrainMesh {
       this.lodLevels[this.currentLOD].mesh!.visible = false;
     }
 
-    // Show new LOD mesh
-    if (this.lodLevels[level].mesh) {
-      this.lodLevels[level].mesh!.visible = true;
+    // Sync target LOD mesh with latest heightmap before showing
+    const targetLod = this.lodLevels[level];
+    if (targetLod.mesh) {
+      this.updateMeshFromHeightmap(targetLod.mesh, targetLod.resolution);
+      targetLod.mesh.visible = true;
     }
 
     this.currentLOD = level;
     this.mesh = this.lodLevels[level].mesh;
-
-    console.log(`[TerrainMesh] Switched to LOD ${level} (${this.lodLevels[level].resolution})`);
   }
 
   private calculateNormals(): void {
@@ -493,8 +490,10 @@ export class TerrainMesh {
 
   updateFromHeightmapRegion(worldX: number, worldZ: number, worldRadius: number): void {
     const radius = Math.max(0, worldRadius);
-    for (const lod of this.lodLevels) {
-      if (!lod.mesh) continue;
+    // Only update the currently visible LOD mesh during editing;
+    // other LOD meshes are fully rebuilt on LOD switch via updateFromHeightmap()
+    const lod = this.lodLevels[this.currentLOD];
+    if (lod?.mesh) {
       this.updateMeshRegionFromHeightmap(
         lod.mesh,
         lod.resolution,

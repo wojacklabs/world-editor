@@ -752,50 +752,71 @@ void main() {
     // 0.5-0.7 = transition zone, >0.7 = full triplanar
     float triplanarBlend = smoothstep(0.5, 0.7, vSlope);
 
-    // Generate detailed textures for each material
-    vec3 grassColor = hexGrassDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
-    vec3 grassARM = hexGrassARM(hexUV);
-    float grassAO = grassARM.r;
-    float grassRoughness = grassARM.g;
-    float grassHeight = hexGrassDisp(hexUV);
-    vec3 dirtColor = dirtPattern(texUV, worldPos, uDirtColor);
-    vec3 sandColor = sandPattern(worldPos, uSandColor);
+    // Weight threshold: skip texture sampling for materials with negligible contribution
+    float wThresh = 0.01;
 
-    // Rock color: blend between hex-tiled planar and triplanar based on slope
-    vec3 rockColorPlanar = hexRockDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
-    // Inline triplanar rock diffuse sampling (avoid function calls for WebGPU compatibility)
-    vec3 rockColorTriplanar =
-        texture2D(uRockDiffuse, triUVs.uvX).rgb * triUVs.weights.x +
-        texture2D(uRockDiffuse, triUVs.uvY).rgb * triUVs.weights.y +
-        texture2D(uRockDiffuse, triUVs.uvZ).rgb * triUVs.weights.z;
-    // Add subtle variation to triplanar rock
-    float triVariation = fbm(worldPos * 0.3, 2) * 0.1;
-    rockColorTriplanar *= (0.95 + triVariation);
-    vec3 rockColor = mix(rockColorPlanar, rockColorTriplanar, triplanarBlend);
+    // Generate detailed textures only for materials with significant weight
+    vec3 grassColor = vec3(0.0);
+    float grassAO = 1.0;
+    float grassRoughness = 0.5;
+    float grassHeight = 0.0;
+    if (normalizedSplat.r > wThresh) {
+        grassColor = hexGrassDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
+        vec3 grassARM = hexGrassARM(hexUV);
+        grassAO = grassARM.r;
+        grassRoughness = grassARM.g;
+        grassHeight = hexGrassDisp(hexUV);
+    }
 
-    // Get texture data for rock (blend planar/triplanar for ARM as well)
-    vec3 rockARMPlanar = hexRockARM(hexUV);
-    // Inline triplanar rock ARM sampling
-    vec3 rockARMTriplanar =
-        texture2D(uRockARM, triUVs.uvX).rgb * triUVs.weights.x +
-        texture2D(uRockARM, triUVs.uvY).rgb * triUVs.weights.y +
-        texture2D(uRockARM, triUVs.uvZ).rgb * triUVs.weights.z;
-    vec3 rockARM = mix(rockARMPlanar, rockARMTriplanar, triplanarBlend);
-    float rockAO = rockARM.r;
-    float rockRoughness = rockARM.g;
-    // float rockMetallic = rockARM.b;  // Not used for rock (non-metallic)
+    vec3 dirtColor = vec3(0.0);
+    float dirtHeight = 0.0;
+    if (normalizedSplat.g > wThresh) {
+        dirtColor = dirtPattern(texUV, worldPos, uDirtColor);
+        dirtHeight = getDirtHeight(texUV);
+    }
 
-    // Dirt height (planar only - dirt doesn't appear on steep slopes)
-    float dirtHeight = getDirtHeight(texUV);
+    vec3 sandColor = vec3(0.0);
+    if (normalizedSplat.a > wThresh) {
+        sandColor = sandPattern(worldPos, uSandColor);
+    }
 
-    // Rock height: blend planar/triplanar
-    float rockHeightPlanar = hexRockDisp(hexUV);
-    // Inline triplanar rock displacement sampling
-    float rockHeightTriplanar =
-        texture2D(uRockDisp, triUVs.uvX).r * triUVs.weights.x +
-        texture2D(uRockDisp, triUVs.uvY).r * triUVs.weights.y +
-        texture2D(uRockDisp, triUVs.uvZ).r * triUVs.weights.z;
-    float rockHeight = mix(rockHeightPlanar, rockHeightTriplanar, triplanarBlend);
+    vec3 rockColor = vec3(0.0);
+    float rockAO = 1.0;
+    float rockRoughness = 0.5;
+    float rockHeight = 0.0;
+    if (normalizedSplat.b > wThresh) {
+        // Rock color: blend between hex-tiled planar and triplanar based on slope
+        vec3 rockColorPlanar = hexRockDiffuse(hexUV) * (0.95 + fbm(worldPos * 0.3, 2) * 0.1);
+        // Inline triplanar rock diffuse sampling (avoid function calls for WebGPU compatibility)
+        vec3 rockColorTriplanar =
+            texture2D(uRockDiffuse, triUVs.uvX).rgb * triUVs.weights.x +
+            texture2D(uRockDiffuse, triUVs.uvY).rgb * triUVs.weights.y +
+            texture2D(uRockDiffuse, triUVs.uvZ).rgb * triUVs.weights.z;
+        // Add subtle variation to triplanar rock
+        float triVariation = fbm(worldPos * 0.3, 2) * 0.1;
+        rockColorTriplanar *= (0.95 + triVariation);
+        rockColor = mix(rockColorPlanar, rockColorTriplanar, triplanarBlend);
+
+        // Get texture data for rock (blend planar/triplanar for ARM as well)
+        vec3 rockARMPlanar = hexRockARM(hexUV);
+        // Inline triplanar rock ARM sampling
+        vec3 rockARMTriplanar =
+            texture2D(uRockARM, triUVs.uvX).rgb * triUVs.weights.x +
+            texture2D(uRockARM, triUVs.uvY).rgb * triUVs.weights.y +
+            texture2D(uRockARM, triUVs.uvZ).rgb * triUVs.weights.z;
+        vec3 rockARM = mix(rockARMPlanar, rockARMTriplanar, triplanarBlend);
+        rockAO = rockARM.r;
+        rockRoughness = rockARM.g;
+
+        // Rock height: blend planar/triplanar
+        float rockHeightPlanar = hexRockDisp(hexUV);
+        // Inline triplanar rock displacement sampling
+        float rockHeightTriplanar =
+            texture2D(uRockDisp, triUVs.uvX).r * triUVs.weights.x +
+            texture2D(uRockDisp, triUVs.uvY).r * triUVs.weights.y +
+            texture2D(uRockDisp, triUVs.uvZ).r * triUVs.weights.z;
+        rockHeight = mix(rockHeightPlanar, rockHeightTriplanar, triplanarBlend);
+    }
 
     // Blend materials based on normalized splat map weights
     vec3 baseColor = grassColor * normalizedSplat.r +
@@ -817,42 +838,50 @@ void main() {
     MacroVariation macroVar = calculateMacroVariation(worldPos);
     baseColor = applyMacroVariation(baseColor, macroVar);
 
-    // Lighting - apply normal maps for textured materials
-
-    // Get tangent-space normals from textures (planar)
-    vec3 rockNormalPlanar = hexRockNormal(hexUV);
-    vec3 dirtNormalTex = getDirtNormal(texUV);
-    vec3 grassNormalTex = hexGrassNormal(hexUV);
-
-    // Inline triplanar normal sampling for rock on steep surfaces (WebGPU compatibility)
-    vec3 triNormalX = texture2D(uRockNormal, triUVs.uvX).rgb * 2.0 - 1.0;
-    vec3 triNormalY = texture2D(uRockNormal, triUVs.uvY).rgb * 2.0 - 1.0;
-    vec3 triNormalZ = texture2D(uRockNormal, triUVs.uvZ).rgb * 2.0 - 1.0;
-    triNormalX.xy *= uNormalStrength;
-    triNormalY.xy *= uNormalStrength;
-    triNormalZ.xy *= uNormalStrength;
-    // Swizzle normals to match world space for each projection axis
-    vec3 worldNormalX = vec3(triNormalX.z, triNormalX.xy) * sign(geometryNormal.x);
-    vec3 worldNormalY = vec3(triNormalY.x, triNormalY.z, triNormalY.y) * sign(geometryNormal.y);
-    vec3 worldNormalZ = vec3(triNormalZ.xy, triNormalZ.z) * sign(geometryNormal.z);
-    vec3 rockNormalTriplanar = normalize(
-        worldNormalX * triUVs.weights.x +
-        worldNormalY * triUVs.weights.y +
-        worldNormalZ * triUVs.weights.z
-    );
-
-    // Transform planar normals from tangent space to world space using TBN matrix
-    vec3 rockPerturbedPlanar = vTBN * rockNormalPlanar;
-    vec3 dirtPerturbedNormal = vTBN * dirtNormalTex;
-    vec3 grassPerturbedNormal = vTBN * grassNormalTex;
-
-    // Blend planar/triplanar rock normal based on slope
-    vec3 rockPerturbedNormal = mix(rockPerturbedPlanar, rockNormalTriplanar, triplanarBlend);
-
-    // Blend normals based on material weights
-    float rockWeight = clamp(normalizedSplat.b, 0.0, 1.0);
+    // Lighting - apply normal maps only for materials with significant weight
+    float rockWeight = normalizedSplat.b;
     float dirtWeight = normalizedSplat.g;
     float grassWeight = normalizedSplat.r;
+
+    vec3 rockNormalPlanar = vec3(0.0, 0.0, 1.0);
+    vec3 rockPerturbedNormal = geometryNormal;
+    vec3 dirtPerturbedNormal = geometryNormal;
+    vec3 grassPerturbedNormal = geometryNormal;
+
+    if (grassWeight > wThresh) {
+        vec3 grassNormalTex = hexGrassNormal(hexUV);
+        grassPerturbedNormal = vTBN * grassNormalTex;
+    }
+
+    if (dirtWeight > wThresh) {
+        vec3 dirtNormalTex = getDirtNormal(texUV);
+        dirtPerturbedNormal = vTBN * dirtNormalTex;
+    }
+
+    if (rockWeight > wThresh) {
+        rockNormalPlanar = hexRockNormal(hexUV);
+        vec3 rockPerturbedPlanar = vTBN * rockNormalPlanar;
+
+        // Inline triplanar normal sampling for rock on steep surfaces (WebGPU compatibility)
+        vec3 triNormalX = texture2D(uRockNormal, triUVs.uvX).rgb * 2.0 - 1.0;
+        vec3 triNormalY = texture2D(uRockNormal, triUVs.uvY).rgb * 2.0 - 1.0;
+        vec3 triNormalZ = texture2D(uRockNormal, triUVs.uvZ).rgb * 2.0 - 1.0;
+        triNormalX.xy *= uNormalStrength;
+        triNormalY.xy *= uNormalStrength;
+        triNormalZ.xy *= uNormalStrength;
+        // Swizzle normals to match world space for each projection axis
+        vec3 worldNormalX = vec3(triNormalX.z, triNormalX.xy) * sign(geometryNormal.x);
+        vec3 worldNormalY = vec3(triNormalY.x, triNormalY.z, triNormalY.y) * sign(geometryNormal.y);
+        vec3 worldNormalZ = vec3(triNormalZ.xy, triNormalZ.z) * sign(geometryNormal.z);
+        vec3 rockNormalTriplanar = normalize(
+            worldNormalX * triUVs.weights.x +
+            worldNormalY * triUVs.weights.y +
+            worldNormalZ * triUVs.weights.z
+        );
+
+        // Blend planar/triplanar rock normal based on slope
+        rockPerturbedNormal = mix(rockPerturbedPlanar, rockNormalTriplanar, triplanarBlend);
+    }
 
     // Combine perturbed normals
     vec3 perturbedNormal = normalize(
@@ -1025,12 +1054,7 @@ void main() {
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
 
-    // Fog applied after tonemapping+colorspace (matching Three.js built-in order)
-    float distanceFog = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    float heightFactor = exp(-max(0.0, vPosition.y - uFogHeightFalloff) * uFogHeightDensity);
-    float heightFog = heightFactor * 0.4 * smoothstep(0.0, 30.0, distanceToCamera);
-    float fogFactor = clamp(distanceFog + heightFog, 0.0, 1.0);
-    gl_FragColor.rgb = mix(gl_FragColor.rgb, uFogColor, fogFactor);
+    // Fog handled by VolumetricFogPass (post-processing)
 }
 `;
 
@@ -1111,7 +1135,7 @@ export function createTerrainMaterial(splatTexture: THREE.Texture, waterMaskText
       uniforms,
     ]),
     lights: true,
-    side: THREE.DoubleSide,
+    side: THREE.FrontSide,
   });
 
   material.name = `terrainShader_${++terrainMaterialCounter}_${Date.now()}`;

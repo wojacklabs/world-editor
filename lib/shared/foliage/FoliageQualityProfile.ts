@@ -98,8 +98,8 @@ export const DEFAULT_FOLIAGE_QUALITY_PROFILE: FoliageQualityProfile = {
     propsNoiseSpeed: 0.2,
   },
   fade: {
-    leafFadeStart: 200,      // Start fading later (was 45)
-    leafFadeEnd: 9999,       // Never fully disappear (was 115)
+    leafFadeStart: 40,       // Distance where leaf-to-fog blending starts
+    leafFadeEnd: 100,        // Distance where leaves fully blend to fog (gaps invisible)
     biomeGrassFadeStart: 300, // Start fading later (was 170)
     biomeGrassFadeEnd: 9999,  // Never fully disappear (was 270)
     biomeVariationStrength: 0.22,

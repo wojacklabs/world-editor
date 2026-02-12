@@ -431,6 +431,8 @@ export default function EditorSidebar() {
             <WeatherPanel />
           </PanelSection>
         )}
+
+
       </div>
     </aside>
   );
