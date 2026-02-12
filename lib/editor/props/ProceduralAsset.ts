@@ -174,13 +174,9 @@ void main() {
     float usesLeafAtlas = uUseLeafAtlas * leafMask;
     float leafMaskAlpha = mix(leafSample.a, dot(leafSample.rgb, vec3(0.299, 0.587, 0.114)), uLeafMaskFromLuma);
 
-    if (usesLeafAtlas > 0.5 && leafMaskAlpha < uLeafAlphaCutoff) {
-        discard;
-    }
-
-    float fadeAlpha = 1.0 - smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
-    float dither = hash2D(gl_FragCoord.xy + vPosition.xz * 3.17);
-    if (leafMask > 0.5 && dither > clamp(fadeAlpha, 0.0, 1.0)) {
+    float distFactor = smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
+    float cutoff = mix(uLeafAlphaCutoff, 0.1, distFactor);
+    if (usesLeafAtlas > 0.5 && leafMaskAlpha < cutoff) {
         discard;
     }
 
@@ -225,8 +221,6 @@ void main() {
     vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
 
     color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
-
-    // Fog handled by VolumetricFogPass (post-processing)
 
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>

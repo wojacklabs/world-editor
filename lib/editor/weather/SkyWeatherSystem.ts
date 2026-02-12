@@ -173,9 +173,7 @@ export class SkyWeatherSystem {
         this.skyShader.updateCameraPosition(this.camera.position);
       }
     }
-    if (this.cloudSystem) {
-      this.cloudSystem.update(this.camera ?? undefined);
-    }
+    // CloudSystem disabled (legacy) — skip update
     if (this.precipitationSystem) {
       this.precipitationSystem.update();
     }

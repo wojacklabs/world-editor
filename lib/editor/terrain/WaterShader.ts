@@ -339,7 +339,7 @@ export const DEFAULT_WATER_CONFIG: WaterConfig = {
   foamIntensity: 1.4,
   shoreFoamWidth: 1.2,
 
-  reflectionEnabled: true,
+  reflectionEnabled: false,  // RT created but never rendered into — disabled to save VRAM
   reflectionStrength: 0.90,
   reflectionResolution: 256,
   reflectionBlur: 4,

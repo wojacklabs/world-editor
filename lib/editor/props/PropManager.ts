@@ -528,7 +528,9 @@ void main() {
     float usesLeafAtlas = uUseLeafAtlas * leafMask;
     float leafMaskAlpha = mix(leafSample.a, dot(leafSample.rgb, vec3(0.299, 0.587, 0.114)), uLeafMaskFromLuma);
 
-    if (usesLeafAtlas > 0.5 && leafMaskAlpha < uLeafAlphaCutoff) {
+    float distFactor = smoothstep(uLeafFadeStart, uLeafFadeEnd, vCameraDistance);
+    float cutoff = mix(uLeafAlphaCutoff, 0.1, distFactor);
+    if (usesLeafAtlas > 0.5 && leafMaskAlpha < cutoff) {
         discard;
     }
 
@@ -2324,7 +2326,7 @@ export class PropManager {
 
         groupMesh = new THREE.InstancedMesh(baseGeometry, material, capacity);
         groupMesh.name = `inst_${lodGroupKey}`;
-        groupMesh.frustumCulled = false;  // We handle frustum culling manually
+        groupMesh.frustumCulled = true;
         groupMesh.castShadow = true;
         groupMesh.receiveShadow = true;
         this.scene.add(groupMesh);
@@ -2342,6 +2344,7 @@ export class PropManager {
 
       groupMesh.count = count;
       groupMesh.instanceMatrix.needsUpdate = true;
+      groupMesh.computeBoundingSphere();
       groupMesh.visible = true;
     }
   }

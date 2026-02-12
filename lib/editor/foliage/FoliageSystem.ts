@@ -671,9 +671,9 @@ export class FoliageSystem {
   // Performance settings
   private maxInstancesPerChunk = 5000;
   private lodDistances = {
-    near: 100,   // full density
-    mid: 200,    // 50% density
-    far: 450,    // fade out distance
+    near: 80,    // full density
+    mid: 260,    // 50% density
+    far: 150,    // fade out distance
   };
 
   // Reusable objects for matrix generation (avoid GC pressure)
@@ -2022,6 +2022,50 @@ export class FoliageSystem {
     this.lodDistances.mid = mid;
     this.lodDistances.far = far;
     this.updateShaderLodDistance();
+    this.reapplyLODFromCamera();
+  }
+
+  /**
+   * Recompute LOD for all chunks based on current camera position and lodDistances
+   */
+  private reapplyLODFromCamera(): void {
+    const camX = this.lastVisibilityCamX;
+    const camZ = this.lastVisibilityCamZ;
+
+    for (const [, chunk] of this.chunks) {
+      const cx = (chunk.x + 0.5) * this.chunkSize;
+      const cz = (chunk.z + 0.5) * this.chunkSize;
+      const dist = Math.sqrt((cx - camX) ** 2 + (cz - camZ) ** 2);
+
+      let lod: FoliageLOD;
+      if (dist < this.lodDistances.near) lod = FoliageLOD.Near;
+      else if (dist < this.lodDistances.mid) lod = FoliageLOD.Mid;
+      else lod = FoliageLOD.Impostor;
+
+      // Force re-evaluation by resetting currentLOD
+      chunk.currentLOD = FoliageLOD.Near; // reset so updateCellLOD sees a change
+      const densityMultiplier = this.getLODDensityMultiplier(lod);
+
+      if (lod === FoliageLOD.Impostor) {
+        for (const mesh of chunk.mesh.values()) {
+          mesh.visible = false;
+        }
+        this.createOrShowChunkImpostor(chunk);
+      } else {
+        if (chunk.impostorMesh) {
+          chunk.impostorMesh.visible = false;
+        }
+        for (const [instanceTypeName, fullMatrices] of chunk.instances) {
+          const mesh = chunk.mesh.get(instanceTypeName);
+          if (mesh && fullMatrices.length > 0) {
+            mesh.visible = chunk.visible;
+            const fullCount = fullMatrices.length / 16;
+            mesh.count = Math.max(1, Math.floor(fullCount * densityMultiplier));
+          }
+        }
+      }
+      chunk.currentLOD = lod;
+    }
   }
 
   /**

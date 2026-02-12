@@ -152,7 +152,7 @@ export class EditorEngine {
       antialias: true,
       stencil: true,
     });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setSize(this.canvas.clientWidth, this.canvas.clientHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ReinhardToneMapping;
@@ -414,6 +414,7 @@ export class EditorEngine {
     const renderTarget = new THREE.WebGLRenderTarget(width, height, {
       depthTexture: new THREE.DepthTexture(width, height),
       depthBuffer: true,
+      // MSAA disabled: too expensive with 4096 alpha-tested grass meshes
     });
     if (renderTarget.depthTexture) {
       renderTarget.depthTexture.format = THREE.DepthFormat;
