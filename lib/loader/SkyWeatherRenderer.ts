@@ -343,7 +343,6 @@ export class SkyWeatherRenderer {
 
   private createDirectionalLight(): void {
     this.dirLight = new THREE.DirectionalLight(0xffffff, 4.5);
-    this.dirLight.position.copy(this.sunDirection);
 
     this.dirLight.castShadow = true;
     this.dirLight.shadow.mapSize.width = 2048;
@@ -360,6 +359,10 @@ export class SkyWeatherRenderer {
     this.dirLight.shadow.camera.far = 200;
 
     this.dirLight.target.position.set(32, 0, 32);
+    // Position light far away from target along sun direction (like editor)
+    this.dirLight.position
+      .copy(this.dirLight.target.position)
+      .addScaledVector(this.sunDirection, 100);
     this.scene.add(this.dirLight);
     this.scene.add(this.dirLight.target);
 
@@ -729,6 +732,7 @@ export class SkyWeatherRenderer {
       this.hemiLight.groundColor.setRGB(groundBrightness, groundBrightness, groundBrightness + 0.05);
     }
     if (this.ambLight) {
+      // Keep a subtle blue-tinted ambient at night for color preservation
       this.ambLight.intensity = 3.5 * dayFactor + 0.2;
       const nightBlue = this.nightFactor * 0.15;
       this.ambLight.color.setRGB(1.0 - nightBlue, 1.0 - nightBlue * 0.5, 1.0 + nightBlue * 0.3);
@@ -796,14 +800,20 @@ export class SkyWeatherRenderer {
       this.precipMaterial.uniforms.uCameraPosition.value.copy(cameraPosition);
     }
 
-    // Sync directional light with sun direction
+    // Sync directional light with sun direction (offset from target like editor)
     if (this.dirLight) {
-      this.dirLight.position.copy(this.sunDirection);
+      this.dirLight.position
+        .copy(this.dirLight.target.position)
+        .addScaledVector(this.sunDirection, 100);
     }
   }
 
   getSunDirection(): THREE.Vector3 {
     return this.sunDirection.clone();
+  }
+
+  getNightFactor(): number {
+    return this.nightFactor;
   }
 
   getDirectionalLight(): THREE.DirectionalLight | null {

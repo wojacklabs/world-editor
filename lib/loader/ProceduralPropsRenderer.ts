@@ -222,7 +222,7 @@ export class ProceduralPropsRenderer {
       instancedMesh.instanceMatrix.needsUpdate = true;
       instancedMesh.computeBoundingSphere();
       instancedMesh.castShadow = true;
-      instancedMesh.receiveShadow = true;
+      instancedMesh.receiveShadow = type !== "rock";
 
       this.scene.add(instancedMesh);
       this.instanceMeshes.push(instancedMesh);
@@ -240,7 +240,7 @@ export class ProceduralPropsRenderer {
       const mesh = this.createPropMesh(prop);
       if (mesh) {
         mesh.castShadow = true;
-        mesh.receiveShadow = true;
+        mesh.receiveShadow = prop.assetType !== "rock";
         this.scene.add(mesh);
         this.propMeshes.push(mesh);
       }
@@ -294,19 +294,11 @@ export class ProceduralPropsRenderer {
     return mesh;
   }
 
-  setFog(color: THREE.Color, density: number): void {
-    this.generator.setFog(color, density);
-  }
-
   /**
    * Set wind parameters
    */
-  setWind(angleDegrees: number, strength: number): void {
-    const angleRad = angleDegrees * Math.PI / 180;
-    this.generator.setWind(
-      new THREE.Vector2(Math.cos(angleRad), Math.sin(angleRad)),
-      strength
-    );
+  setFog(color: THREE.Color, density: number): void {
+    this.generator.setFog(color, density);
   }
 
   setSunDirection(direction: THREE.Vector3): void {
@@ -338,6 +330,14 @@ export class ProceduralPropsRenderer {
         mat.uniforms.ambientIntensity.value = value;
       }
     }
+  }
+
+  setWind(angleDegrees: number, strength: number): void {
+    const angleRad = angleDegrees * Math.PI / 180;
+    this.generator.setWind(
+      new THREE.Vector2(Math.cos(angleRad), Math.sin(angleRad)),
+      strength
+    );
   }
 
   /**

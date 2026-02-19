@@ -442,6 +442,9 @@ export class FoliageRenderer {
 
   private terrainScale: number = 256;
 
+  /** Circular exclusion zones: grass is not placed inside these */
+  private exclusionZones: { x: number; z: number; radius: number }[] = [];
+
   constructor(scene: THREE.Scene, options: FoliageRendererOptions = {}) {
     this.scene = scene;
     this.options = {
@@ -460,6 +463,11 @@ export class FoliageRenderer {
   // ============================================
   // Public API
   // ============================================
+
+  /** Add a circular area where grass will not be placed */
+  addExclusionZone(x: number, z: number, radius: number): void {
+    this.exclusionZones.push({ x, z, radius });
+  }
 
   loadTile(
     foliageData: Map<string, Float32Array>,
@@ -1118,6 +1126,18 @@ export class FoliageRenderer {
       const worldX = matrices[baseIdx + 12];
       const worldZ = matrices[baseIdx + 14];
 
+      // Skip instances inside exclusion zones
+      let excluded = false;
+      for (const zone of this.exclusionZones) {
+        const dx = worldX - zone.x;
+        const dz = worldZ - zone.z;
+        if (dx * dx + dz * dz < zone.radius * zone.radius) {
+          excluded = true;
+          break;
+        }
+      }
+      if (excluded) continue;
+
       const chunkX = Math.floor(worldX / chunkSize);
       const chunkZ = Math.floor(worldZ / chunkSize);
       const key = `${chunkX}_${chunkZ}`;
@@ -1179,10 +1199,10 @@ export class FoliageRenderer {
     }
     instMesh.instanceMatrix.needsUpdate = true;
 
-    // Shadow support: rocks cast shadows, all foliage receives
+    // Shadow support: rocks cast but don't receive (prevents self-shadow acne)
     const isRock = typeName.startsWith("rock");
     instMesh.castShadow = isRock;
-    instMesh.receiveShadow = true;
+    instMesh.receiveShadow = !isRock;
 
     this.scene.add(instMesh);
 
