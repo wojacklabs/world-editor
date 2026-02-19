@@ -1,6 +1,9 @@
 "use client";
 
+import { useState, useEffect, useCallback } from "react";
+import * as THREE from "three";
 import { useEditorStore } from "@/lib/editor/store/editorStore";
+import type { EditorEngine } from "@/lib/editor/core/EditorEngine";
 import type {
   HanokPlanPreset,
   ToolType,
@@ -107,7 +110,36 @@ function PanelSection({
   );
 }
 
-export default function EditorSidebar() {
+function NumberField({
+  label,
+  value,
+  step,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2">
+      <span className="text-[12px] text-slate-400 w-4">{label}</span>
+      <input
+        type="number"
+        value={parseFloat(value.toFixed(2))}
+        step={step ?? 0.1}
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        className="flex-1 h-7 px-2 text-[12px] tabular-nums bg-slate-800/90 border border-slate-700/50 rounded-md text-slate-200 outline-none focus:border-sky-400/50"
+      />
+    </label>
+  );
+}
+
+interface EditorSidebarProps {
+  engine?: EditorEngine | null;
+}
+
+export default function EditorSidebar({ engine }: EditorSidebarProps) {
   const {
     activeTool,
     activeHeightmapTool,
@@ -132,9 +164,69 @@ export default function EditorSidebar() {
     setAssetPlanPreset,
     setWaterType,
     setWaterFlowAngle,
+    selectedPropInstance,
+    setSelectedPropInstance,
+    setModified,
     randomizeAssetSeed,
     clearPendingAsset,
   } = useEditorStore();
+
+  // Selected prop transform state
+  const [propPos, setPropPos] = useState({ x: 0, y: 0, z: 0 });
+  const [propRotY, setPropRotY] = useState(0);
+  const [propScale, setPropScale] = useState(1);
+  const [propType, setPropType] = useState("");
+
+  // Sync selected prop data from engine
+  useEffect(() => {
+    if (!engine || !selectedPropInstance) return;
+    const inst = engine.getPropManager()?.getInstance(selectedPropInstance);
+    if (!inst) return;
+    setPropPos({ x: inst.position.x, y: inst.position.y, z: inst.position.z });
+    setPropRotY(inst.rotation.y);
+    setPropScale(inst.scale.x);
+    setPropType(inst.assetType);
+  }, [engine, selectedPropInstance]);
+
+  const updatePropPosition = useCallback((axis: "x" | "y" | "z", val: number) => {
+    if (!engine || !selectedPropInstance) return;
+    const next = { ...propPos, [axis]: val };
+    setPropPos(next);
+    engine.updatePropTransform(selectedPropInstance, {
+      position: new THREE.Vector3(next.x, next.y, next.z),
+    });
+    engine.highlightProp(selectedPropInstance);
+    setModified(true);
+  }, [engine, selectedPropInstance, propPos, setModified]);
+
+  const updatePropRotationY = useCallback((val: number) => {
+    if (!engine || !selectedPropInstance) return;
+    setPropRotY(val);
+    const inst = engine.getPropManager()?.getInstance(selectedPropInstance);
+    if (!inst) return;
+    engine.updatePropTransform(selectedPropInstance, {
+      rotation: new THREE.Vector3(inst.rotation.x, val, inst.rotation.z),
+    });
+    setModified(true);
+  }, [engine, selectedPropInstance, setModified]);
+
+  const updatePropScale = useCallback((val: number) => {
+    if (!engine || !selectedPropInstance) return;
+    setPropScale(val);
+    engine.updatePropTransform(selectedPropInstance, {
+      scale: new THREE.Vector3(val, val, val),
+    });
+    engine.highlightProp(selectedPropInstance);
+    setModified(true);
+  }, [engine, selectedPropInstance, setModified]);
+
+  const handleDeleteProp = useCallback(() => {
+    if (!engine || !selectedPropInstance) return;
+    engine.removeProp(selectedPropInstance);
+    engine.highlightProp(null);
+    setSelectedPropInstance(null);
+    setModified(true);
+  }, [engine, selectedPropInstance, setSelectedPropInstance, setModified]);
 
   const isDimensionDrivenAsset =
     selectedAssetType === "hanok_giwa" ||
@@ -420,10 +512,61 @@ export default function EditorSidebar() {
         )}
 
         {activeTool === "select" && (
-          <PanelSection title="Selection">
-            <p className="text-[12px] text-slate-300">오브젝트를 선택해서 우측 패널에서 수정하세요.</p>
-            <p className="text-[12px] text-slate-500 mt-2">Delete: 제거 / Esc: 선택 해제</p>
-          </PanelSection>
+          <>
+            {!selectedPropInstance ? (
+              <PanelSection title="Selection">
+                <p className="text-[12px] text-slate-300">클릭으로 프롭을 선택하세요.</p>
+                <p className="text-[12px] text-slate-500 mt-2">Delete: 제거 / Esc: 선택 해제</p>
+              </PanelSection>
+            ) : (
+              <>
+                <PanelSection title="Selected Prop">
+                  <p className="text-[12px] text-slate-400 mb-3">
+                    Type: <span className="text-slate-200">{propType}</span>
+                  </p>
+                </PanelSection>
+
+                <PanelSection title="Position">
+                  <div className="space-y-2">
+                    <NumberField label="X" value={propPos.x} onChange={(v) => updatePropPosition("x", v)} />
+                    <NumberField label="Y" value={propPos.y} onChange={(v) => updatePropPosition("y", v)} />
+                    <NumberField label="Z" value={propPos.z} onChange={(v) => updatePropPosition("z", v)} />
+                  </div>
+                </PanelSection>
+
+                <PanelSection title="Rotation">
+                  <SliderField
+                    label="Y Axis"
+                    value={propRotY}
+                    valueText={`${Math.round(propRotY * (180 / Math.PI))}°`}
+                    min={0}
+                    max={Math.PI * 2}
+                    step={0.05}
+                    onChange={updatePropRotationY}
+                  />
+                </PanelSection>
+
+                <PanelSection title="Scale">
+                  <SliderField
+                    label="Uniform"
+                    value={propScale}
+                    valueText={`${propScale.toFixed(1)}x`}
+                    min={0.1}
+                    max={5}
+                    step={0.1}
+                    onChange={updatePropScale}
+                  />
+                </PanelSection>
+
+                <button
+                  onClick={handleDeleteProp}
+                  className="w-full py-2.5 text-[12px] rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:border-red-500/50 transition-all"
+                >
+                  Delete Prop
+                </button>
+              </>
+            )}
+          </>
         )}
 
         {activeTool === "environment" && (

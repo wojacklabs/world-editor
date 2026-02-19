@@ -122,6 +122,9 @@ export class EditorEngine {
   private raycaster: THREE.Raycaster = new THREE.Raycaster();
   private readonly _ndcVec = new THREE.Vector2();
 
+  // Prop selection highlight
+  private selectionHelper: THREE.Box3Helper | null = null;
+
   // Render loop
   private animationFrameId: number = 0;
   private lastFrameTime: number = 0;
@@ -807,6 +810,43 @@ export class EditorEngine {
     if (this.propManager) {
       this.propManager.removeProp(instanceId);
     }
+  }
+
+  pickProp(clientX: number, clientY: number): import("../props/PropManager").PropInstance | null {
+    if (!this.propManager) return null;
+    const point = this.pickTerrain(clientX, clientY);
+    if (!point) return null;
+    return this.propManager.getInstanceAtPosition(point.x, point.z, 2.0);
+  }
+
+  updatePropTransform(id: string, updates: {
+    position?: THREE.Vector3;
+    rotation?: THREE.Vector3;
+    scale?: THREE.Vector3;
+  }): boolean {
+    return this.propManager?.updatePropTransform(id, updates) ?? false;
+  }
+
+  highlightProp(id: string | null): void {
+    if (this.selectionHelper) {
+      this.scene.remove(this.selectionHelper);
+      this.selectionHelper.geometry?.dispose();
+      (this.selectionHelper.material as THREE.Material)?.dispose();
+      this.selectionHelper = null;
+    }
+    if (!id || !this.propManager) return;
+    const inst = this.propManager.getInstance(id);
+    if (!inst) return;
+
+    const s = inst.params.size;
+    const size = new THREE.Vector3(
+      s * inst.scale.x * 2,
+      s * inst.scale.y * 2,
+      s * inst.scale.z * 2
+    );
+    const box = new THREE.Box3().setFromCenterAndSize(inst.position, size);
+    this.selectionHelper = new THREE.Box3Helper(box, new THREE.Color(0x00aaff));
+    this.scene.add(this.selectionHelper);
   }
 
   getPropManager(): PropManager | null {
@@ -2154,6 +2194,8 @@ export class EditorEngine {
     if (this.isGameMode) {
       this.exitGameMode();
     }
+
+    this.highlightProp(null);
 
     if (this.propManager) {
       this.propManager.dispose();

@@ -228,6 +228,9 @@ export interface WaterConfig {
   // Sun
   sunDirection?: THREE.Vector3;
   sunColor?: THREE.Color;
+  // Water type
+  waterType?: "lake" | "river";
+  waterFlowAngle?: number;
 }
 
 const DEFAULT_WAVES: GerstnerWave[] = [
@@ -267,6 +270,13 @@ export class WaterRenderer {
       this.sunDirection = sunDirection.clone().normalize();
     }
 
+    // Compute wave angle (river mode uses flowAngle)
+    const flowAngleRad = config.waterType === "river" && config.waterFlowAngle != null
+      ? (config.waterFlowAngle * Math.PI) / 180
+      : 0;
+    const waveAngleCos = Math.cos(flowAngleRad);
+    const waveAngleSin = Math.sin(flowAngleRad);
+
     // Create water plane geometry (PlaneGeometry is XY, rotate to XZ)
     const geometry = new THREE.PlaneGeometry(size, size, 64, 64);
     geometry.rotateX(-Math.PI / 2);
@@ -277,8 +287,8 @@ export class WaterRenderer {
       fragmentShader: waterFragmentShader,
       uniforms: {
         uTime: { value: 0 },
-        uWaveAngleCos: { value: 1.0 },
-        uWaveAngleSin: { value: 0.0 },
+        uWaveAngleCos: { value: waveAngleCos },
+        uWaveAngleSin: { value: waveAngleSin },
         uFresnelPower: { value: fresnelPower },
         uShallowColor: { value: shallowColor },
         uDeepColor: { value: deepColor },
@@ -306,7 +316,7 @@ export class WaterRenderer {
     // Create mesh and position at center offset + sea level
     this.mesh = new THREE.Mesh(geometry, this.material);
     this.mesh.position.set(size / 2, seaLevel, size / 2);
-    this.mesh.layers.set(1);
+    this.mesh.layers.enableAll();
 
     this.scene.add(this.mesh);
   }

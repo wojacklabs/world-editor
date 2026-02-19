@@ -48,7 +48,7 @@ export default function EditorPage() {
   const [terrainSize, setTerrainSize] = useState(64);
   const [activeTileId, setActiveTileId] = useState<string | null>(null);
   const [tileDirty, setTileDirty] = useState(false);
-  const { setModified, resetState, weather } = useEditorStore();
+  const { setModified, resetState, weather, waterType, waterFlowAngle } = useEditorStore();
 
   // Placed assets management
   const [placedAssets, setPlacedAssets] = useState<PlacedAsset[]>([]);
@@ -86,6 +86,27 @@ export default function EditorPage() {
     const foliageData = engine.exportFoliageData();
     const proceduralProps = engine.exportProceduralProps();
 
+    // Serialize point lights
+    const lightManager = engine.getLightManager();
+    const serializedLights = lightManager
+      ? lightManager.getAllLights().map((l) => ({
+          id: l.id,
+          position: { x: l.position.x, y: l.position.y, z: l.position.z },
+          color: { r: l.color.r, g: l.color.g, b: l.color.b },
+          intensity: l.intensity,
+          range: l.range,
+        }))
+      : [];
+
+    // Encode waterMask as base64
+    const waterMask = splatMap.getWaterMask();
+    const waterMaskBytes = new Uint8Array(waterMask.buffer, waterMask.byteOffset, waterMask.byteLength);
+    let waterMaskBase64 = "";
+    for (let i = 0; i < waterMaskBytes.length; i++) {
+      waterMaskBase64 += String.fromCharCode(waterMaskBytes[i]);
+    }
+    waterMaskBase64 = btoa(waterMaskBase64);
+
     const project = {
       version: "2.0.0",
       name: projectName,
@@ -96,6 +117,7 @@ export default function EditorPage() {
         resolution: heightmap.getResolution() - 1,
         heightmap: heightmap.toBase64(),
         splatmap: splatMap.toBase64(),
+        waterMask: waterMaskBase64,
         seaLevel: engine.getSeaLevel(),
       },
       materials: { slots: [] },
@@ -112,8 +134,11 @@ export default function EditorPage() {
       foliage: foliageData,
       settings: {
         seamlessTiling: false,
-        waterLevel: 0,
+        waterLevel: engine.getSeaLevel(),
+        waterDepth: engine.getWaterDepth(),
         dispStrength: dispStrength,
+        waterType: waterType,
+        waterFlowAngle: waterFlowAngle,
       },
       weather: {
         timeOfDay: weather.timeOfDay,
@@ -124,6 +149,7 @@ export default function EditorPage() {
         windDirection: weather.windDirection,
         fogDensity: weather.fogDensity,
       },
+      pointLights: serializedLights,
     };
 
     const json = JSON.stringify(project, null, 2);
@@ -141,7 +167,7 @@ export default function EditorPage() {
     URL.revokeObjectURL(url);
     setModified(false);
     setIsSaveDialogOpen(false);
-  }, [engine, setModified, placedAssets, projectName, dispStrength, weather]);
+  }, [engine, setModified, placedAssets, projectName, dispStrength, weather, waterType, waterFlowAngle]);
 
   const handleExportGLB = useCallback(async () => {
     if (!engine) return;
@@ -631,7 +657,7 @@ export default function EditorPage() {
       <div className="flex flex-1 overflow-hidden">
         {!isGameMode && leftPanelVisible && (
           <div className="hidden lg:flex h-full">
-            <EditorSidebar />
+            <EditorSidebar engine={engine} />
           </div>
         )}
 

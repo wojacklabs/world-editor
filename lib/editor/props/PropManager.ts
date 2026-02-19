@@ -2919,6 +2919,29 @@ export class PropManager {
     return this.instances.get(id);
   }
 
+  updatePropTransform(id: string, updates: {
+    position?: THREE.Vector3;
+    rotation?: THREE.Vector3;
+    scale?: THREE.Vector3;
+  }): boolean {
+    const instance = this.instances.get(id);
+    if (!instance) return false;
+
+    if (updates.position) {
+      this.unregisterPropFromSpatialHash(id);
+      this.unregisterPropFromTile(id);
+      instance.position.copy(updates.position);
+      this.registerPropToSpatialHash(id, instance.position.x, instance.position.z);
+      this.registerPropToTile(id, instance.position.x, instance.position.z);
+    }
+    if (updates.rotation) instance.rotation.copy(updates.rotation);
+    if (updates.scale) instance.scale.copy(updates.scale);
+
+    this.markGroupDirty(instance.groupKey);
+    this.rebuildDirtyGroups();
+    return true;
+  }
+
   // Clear all props
   clearAll(): void {
     this.instances.clear();

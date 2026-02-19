@@ -85,6 +85,14 @@ export class GLBPropsRenderer {
       parent.rotation.set(prop.rotation.x, prop.rotation.y, prop.rotation.z);
       parent.scale.set(prop.scale.x, prop.scale.y, prop.scale.z);
 
+      // Enable shadows on all meshes in the loaded hierarchy
+      parent.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+
       this.scene.add(parent);
       this.loadedProps.set(prop.id, parent);
     } catch (error) {

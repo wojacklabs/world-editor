@@ -68,6 +68,8 @@ export interface DecodedWorldProject {
   props: PropInstance[];
   /** Procedural props (tree, rock, bush, grass_clump) */
   proceduralProps: ProceduralPropInstance[];
+  /** Point lights */
+  pointLights: SerializedPointLight[];
 }
 
 // ============================================
@@ -139,6 +141,9 @@ export interface SerializedWorldProject {
     seamlessTiling: boolean;
     waterLevel: number;
     waterDepth?: number;
+    dispStrength?: number;
+    waterType?: "lake" | "river";
+    waterFlowAngle?: number;
   };
 
   weather?: WeatherData;
@@ -146,6 +151,7 @@ export interface SerializedWorldProject {
   foliage?: Record<string, string>;
   props?: PropInstance[];
   proceduralProps?: ProceduralPropInstance[];
+  pointLights?: SerializedPointLight[];
 }
 
 // ============================================
@@ -216,6 +222,9 @@ export interface WorldSettings {
   seamlessTiling: boolean;
   waterLevel: number;
   waterDepth: number;
+  dispStrength?: number;
+  waterType?: "lake" | "river";
+  waterFlowAngle?: number;
 }
 
 // ============================================
@@ -277,6 +286,18 @@ export interface ProceduralPropInstance {
   position: { x: number; y: number; z: number };
   rotation: { x: number; y: number; z: number };
   scale: { x: number; y: number; z: number };
+}
+
+// ============================================
+// Point Lights
+// ============================================
+
+export interface SerializedPointLight {
+  id: string;
+  position: { x: number; y: number; z: number };
+  color: { r: number; g: number; b: number };
+  intensity: number;
+  range: number;
 }
 
 // ============================================

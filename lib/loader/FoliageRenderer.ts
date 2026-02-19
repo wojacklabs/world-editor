@@ -335,14 +335,14 @@ void main() {
     vec3 groundColor = vec3(0.05, 0.05, 0.25);
     vec3 ambientLighting = hemiLight(normal, groundColor, skyColor);
 
-    vec3 lightDir = normalize(vec3(1.0, 0.5, 1.0));
+    vec3 lightDir = normalize(uSunDirection);
     float wrap = 0.5;
     float dotNL = clamp((dot(normal, lightDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
     float backlight = clamp((dot(viewDir, -lightDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
     vec3 scatter = vec3(pow(backlight, 2.0));
     vec3 diffuseLighting = (vec3(dotNL) + scatter) * uSunColor;
 
-    vec3 lighting = diffuseLighting * 0.2 + ambientLighting * 0.8;
+    vec3 lighting = (diffuseLighting * 0.2 + ambientLighting * 0.8) * uAmbient;
 
     vec3 color = vColor * lighting;
 
@@ -351,8 +351,10 @@ void main() {
     float dither = sampleDitherThreshold(gl_FragCoord.xy);
     if (dither > clamp(fadeAlpha, 0.0, 1.0)) discard;
 
-    float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
-    color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
+    if (uFogDensity > 0.001) {
+      float fogFactor = 1.0 - exp(-uFogDensity * uFogDensity * distanceToCamera * distanceToCamera);
+      color = mix(color, uFogColor, clamp(fogFactor, 0.0, 1.0));
+    }
 
     gl_FragColor = vec4(color, 1.0);
     #include <tonemapping_fragment>
@@ -539,14 +541,14 @@ export class FoliageRenderer {
     this.frustum.setFromProjectionMatrix(this.vpMatrix);
 
     const sphere = new THREE.Sphere();
-    const radius = chunkSize * 0.7071;
+    // Radius covers chunk diagonal + grass height headroom
+    const radius = chunkSize * 0.7071 + 2;
 
     for (const [, chunk] of this.chunks) {
       const cx = (chunk.x + 0.5) * chunkSize;
       const cz = (chunk.z + 0.5) * chunkSize;
-      const cy = camera.position.y * 0.5;
 
-      sphere.center.set(cx, cy, cz);
+      sphere.center.set(cx, 0, cz);
       sphere.radius = radius;
 
       const visible = this.frustum.intersectsSphere(sphere);
@@ -588,6 +590,12 @@ export class FoliageRenderer {
       this.grassMaterial.uniforms.uSunDirection.value.copy(
         direction.clone().normalize()
       );
+    }
+  }
+
+  setAmbient(value: number): void {
+    if (this.grassMaterial) {
+      this.grassMaterial.uniforms.uAmbient.value = value;
     }
   }
 
@@ -1041,7 +1049,9 @@ export class FoliageRenderer {
       parts.push(petalGeo);
     }
 
-    return BufferGeometryUtils.mergeGeometries(parts);
+    // Ensure all parts have consistent index state (toNonIndexed)
+    const nonIndexedParts = parts.map((g) => (g.index ? g.toNonIndexed() : g));
+    return BufferGeometryUtils.mergeGeometries(nonIndexedParts);
   }
 
   private generateProceduralBush(seed: number): THREE.BufferGeometry {
@@ -1092,7 +1102,8 @@ export class FoliageRenderer {
       parts.push(bumpGeo);
     }
 
-    return BufferGeometryUtils.mergeGeometries(parts);
+    const normalizedBushParts = parts.map((g) => (g.index ? g.toNonIndexed() : g));
+    return BufferGeometryUtils.mergeGeometries(normalizedBushParts);
   }
 
   private loadTypeInstances(typeName: string, matrices: Float32Array): void {
@@ -1167,6 +1178,11 @@ export class FoliageRenderer {
       instMesh.setMatrixAt(i, mat4);
     }
     instMesh.instanceMatrix.needsUpdate = true;
+
+    // Shadow support: rocks cast shadows, all foliage receives
+    const isRock = typeName.startsWith("rock");
+    instMesh.castShadow = isRock;
+    instMesh.receiveShadow = true;
 
     this.scene.add(instMesh);
 

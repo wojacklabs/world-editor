@@ -44,6 +44,7 @@ export type {
   MaterialSlot,
   PropInstance,
   ProceduralPropInstance,
+  SerializedPointLight,
 } from "./types";
 
 // Types - Load Options
@@ -74,5 +75,7 @@ export { GLBPropsRenderer } from "./GLBPropsRenderer";
 export type { GLBPropsRendererOptions } from "./GLBPropsRenderer";
 export { ProceduralAssetGenerator } from "./ProceduralAssetGenerator";
 export type { GeneratorParams } from "./ProceduralAssetGenerator";
+export { PostProcessingPipeline } from "./PostProcessingPipeline";
+export { PointLightsRenderer } from "./PointLightsRenderer";
 
 // Interactive Water (WebGPU Compute Shader) - temporarily excluded pending Three.js WebGPU compute support

@@ -221,6 +221,8 @@ export class ProceduralPropsRenderer {
 
       instancedMesh.instanceMatrix.needsUpdate = true;
       instancedMesh.computeBoundingSphere();
+      instancedMesh.castShadow = true;
+      instancedMesh.receiveShadow = true;
 
       this.scene.add(instancedMesh);
       this.instanceMeshes.push(instancedMesh);
@@ -237,6 +239,9 @@ export class ProceduralPropsRenderer {
     for (const prop of props) {
       const mesh = this.createPropMesh(prop);
       if (mesh) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        this.scene.add(mesh);
         this.propMeshes.push(mesh);
       }
     }
@@ -289,6 +294,10 @@ export class ProceduralPropsRenderer {
     return mesh;
   }
 
+  setFog(color: THREE.Color, density: number): void {
+    this.generator.setFog(color, density);
+  }
+
   /**
    * Set wind parameters
    */
@@ -298,6 +307,37 @@ export class ProceduralPropsRenderer {
       new THREE.Vector2(Math.cos(angleRad), Math.sin(angleRad)),
       strength
     );
+  }
+
+  setSunDirection(direction: THREE.Vector3): void {
+    const dir = direction.clone().normalize();
+    for (const mesh of this.propMeshes) {
+      const mat = mesh.material as THREE.ShaderMaterial;
+      if (mat.uniforms?.sunDirection) {
+        mat.uniforms.sunDirection.value.copy(dir);
+      }
+    }
+    for (const inst of this.instanceMeshes) {
+      const mat = inst.material as THREE.ShaderMaterial;
+      if (mat.uniforms?.sunDirection) {
+        mat.uniforms.sunDirection.value.copy(dir);
+      }
+    }
+  }
+
+  setAmbientIntensity(value: number): void {
+    for (const mesh of this.propMeshes) {
+      const mat = mesh.material as THREE.ShaderMaterial;
+      if (mat.uniforms?.ambientIntensity) {
+        mat.uniforms.ambientIntensity.value = value;
+      }
+    }
+    for (const inst of this.instanceMeshes) {
+      const mat = inst.material as THREE.ShaderMaterial;
+      if (mat.uniforms?.ambientIntensity) {
+        mat.uniforms.ambientIntensity.value = value;
+      }
+    }
   }
 
   /**

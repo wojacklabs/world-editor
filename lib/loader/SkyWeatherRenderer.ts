@@ -46,86 +46,7 @@ varying vec3 vViewDirection;
 
 uniform vec3 uSunDirection;
 uniform vec3 uSunColor;
-uniform float uCloudCoverage;
 uniform float uNightFactor;
-uniform vec2 uWindOffset;
-uniform float uCloudTime;
-
-// Hash functions
-float hash2(vec2 p) {
-    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
-// Gradient noise
-float gradientNoise(vec2 p) {
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-
-    float a = hash2(i);
-    float b = hash2(i + vec2(1.0, 0.0));
-    float c = hash2(i + vec2(0.0, 1.0));
-    float d = hash2(i + vec2(1.0, 1.0));
-
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-// FBM
-float fbm(vec2 p, int octaves) {
-    float value = 0.0;
-    float amplitude = 0.5;
-    float frequency = 1.0;
-    float maxValue = 0.0;
-
-    for (int i = 0; i < 6; i++) {
-        if (i >= octaves) break;
-        value += amplitude * gradientNoise(p * frequency);
-        maxValue += amplitude;
-        amplitude *= 0.5;
-        frequency *= 2.0;
-    }
-
-    return value / maxValue;
-}
-
-// Cloud UV projection
-vec2 getCloudUV(vec3 viewDir) {
-    if (viewDir.y <= 0.02) return vec2(-999.0);
-    float cloudHeight = 0.35;
-    float scale = cloudHeight / max(viewDir.y, 0.1);
-    return viewDir.xz * scale * 0.8;
-}
-
-// Cloud layer with domain warping
-float getCloudLayer(vec2 uv, float scale, vec2 offset) {
-    vec2 p = uv * scale + offset;
-    vec2 warp1 = vec2(fbm(p + vec2(0.0, 0.0), 3), fbm(p + vec2(5.2, 1.3), 3));
-    vec2 warp2 = vec2(fbm(p + warp1 * 2.0 + vec2(1.7, 9.2), 3), fbm(p + warp1 * 2.0 + vec2(8.3, 2.8), 3));
-    return fbm(p + warp2 * 1.5, 4);
-}
-
-// Cloud density
-float getCloudDensity(vec2 uv, float coverage) {
-    vec2 animatedUV = uv + uWindOffset;
-
-    float uvDist = length(uv);
-    float radialFade = 1.0 - smoothstep(2.5, 4.5, uvDist);
-
-    float layer1 = getCloudLayer(animatedUV, 0.8, vec2(0.0));
-    float layer2 = getCloudLayer(animatedUV, 1.2, vec2(50.0, 30.0));
-    float layer3 = getCloudLayer(animatedUV, 2.0, vec2(-30.0, 70.0));
-
-    float baseDensity = layer1 * 0.5 + layer2 * 0.3 + layer3 * 0.2;
-    baseDensity = smoothstep(0.3, 0.7, baseDensity);
-
-    float fineDetail = fbm(animatedUV * 4.0 + vec2(100.0), 4);
-    float density = baseDensity * (0.7 + 0.3 * fineDetail);
-
-    float threshold = 0.2 + (1.0 - coverage) * 0.5;
-    density = smoothstep(threshold - 0.2, threshold + 0.25, density);
-
-    return clamp(density * radialFade, 0.0, 1.0);
-}
 
 // Atmospheric scattering
 vec3 calculateAtmosphere(vec3 viewDir, vec3 sunDir) {
@@ -160,29 +81,56 @@ void main() {
     vec3 horizonColor = uSunColor * vec3(1.0, 0.7, 0.5) * horizonFade;
     skyColor += horizonColor * 0.3 * (1.0 - uNightFactor * 0.5);
 
-    // Clouds
-    vec2 cloudUV = getCloudUV(viewDir);
-    float cloudDensity = 0.0;
-    vec3 cloudColor = vec3(1.0);
-
-    if (cloudUV.x > -900.0 && uCloudCoverage > 0.01) {
-        cloudDensity = getCloudDensity(cloudUV, uCloudCoverage);
-        float horizonCloudFade = smoothstep(0.01, 0.15, viewDir.y);
-        cloudDensity *= horizonCloudFade * (1.0 - uNightFactor * 0.5);
-    }
-
     // Night sky
     vec3 nightColor = vec3(0.01, 0.015, 0.03);
     skyColor = mix(skyColor, nightColor, uNightFactor);
-
-    // Blend clouds
-    skyColor = mix(skyColor, cloudColor, cloudDensity * 0.95);
 
     skyColor *= 1.15;
 
     gl_FragColor = vec4(skyColor, 1.0);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
+}
+`;
+
+// ============================================
+// Cloud Splat Shader (Three.js)
+// ============================================
+
+const cloudVertexShader = `
+attribute vec3 aOffset;
+attribute vec2 aScale;
+attribute vec4 aColor;
+
+varying vec2 vUV;
+varying vec4 vColor;
+
+void main() {
+    vUV = position.xy * 1.5;
+    vColor = aColor;
+
+    vec3 camRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
+    vec3 camUp = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+
+    vec3 worldPos = aOffset
+        + camRight * position.x * aScale.x
+        + camUp * position.y * aScale.y;
+
+    gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);
+}
+`;
+
+const cloudFragmentShader = `
+precision highp float;
+
+varying vec2 vUV;
+varying vec4 vColor;
+
+void main() {
+    vec2 d = vUV;
+    float alpha = exp(-dot(d, d) * 4.0) * vColor.a;
+    if (alpha < 0.005) discard;
+    gl_FragColor = vec4(vColor.rgb * alpha, alpha);
 }
 `;
 
@@ -332,14 +280,32 @@ const DEFAULT_OPTIONS: Required<SkyWeatherOptions> = {
   precipitationParticleCount: 4000,
 };
 
+interface CloudSplat {
+  x: number; y: number; z: number;
+  width: number; height: number;
+  baseBrightness: number;
+}
+
 export class SkyWeatherRenderer {
   private scene: THREE.Scene;
   private options: Required<SkyWeatherOptions>;
+
+  // Lights
+  private dirLight: THREE.DirectionalLight | null = null;
+  private hemiLight: THREE.HemisphereLight | null = null;
+  private ambLight: THREE.AmbientLight | null = null;
 
   // Sky
   private skyMesh: THREE.Mesh | null = null;
   private skyGeometry: THREE.SphereGeometry | null = null;
   private skyMaterial: THREE.ShaderMaterial | null = null;
+
+  // Clouds
+  private cloudMesh: THREE.Mesh | null = null;
+  private cloudGeo: THREE.InstancedBufferGeometry | null = null;
+  private cloudMaterial: THREE.ShaderMaterial | null = null;
+  private cloudSplats: CloudSplat[] = [];
+  private lastCloudCoverage = -1;
 
   // Precipitation
   private precipMesh: THREE.Mesh | null = null;
@@ -350,7 +316,6 @@ export class SkyWeatherRenderer {
   private weather: WeatherData;
   private sunDirection: THREE.Vector3 = new THREE.Vector3(0.5, 0.8, 0.3).normalize();
   private sunColor: THREE.Color = new THREE.Color(1.0, 0.95, 0.85);
-  private windOffset: THREE.Vector2 = new THREE.Vector2(0, 0);
   private nightFactor: number = 0;
 
   // Fog (exposed for caller to apply)
@@ -373,6 +338,37 @@ export class SkyWeatherRenderer {
     };
 
     this.createSky();
+    this.createDirectionalLight();
+  }
+
+  private createDirectionalLight(): void {
+    this.dirLight = new THREE.DirectionalLight(0xffffff, 4.5);
+    this.dirLight.position.copy(this.sunDirection);
+
+    this.dirLight.castShadow = true;
+    this.dirLight.shadow.mapSize.width = 2048;
+    this.dirLight.shadow.mapSize.height = 2048;
+    this.dirLight.shadow.bias = -0.0005;
+    this.dirLight.shadow.normalBias = 0.02;
+
+    const shadowSize = 80;
+    this.dirLight.shadow.camera.left = -shadowSize;
+    this.dirLight.shadow.camera.right = shadowSize;
+    this.dirLight.shadow.camera.top = shadowSize;
+    this.dirLight.shadow.camera.bottom = -shadowSize;
+    this.dirLight.shadow.camera.near = 0.5;
+    this.dirLight.shadow.camera.far = 200;
+
+    this.dirLight.target.position.set(32, 0, 32);
+    this.scene.add(this.dirLight);
+    this.scene.add(this.dirLight.target);
+
+    // Ambient lights matching editor
+    this.hemiLight = new THREE.HemisphereLight(0xffffff, 0x4d4d59, 0.6);
+    this.scene.add(this.hemiLight);
+
+    this.ambLight = new THREE.AmbientLight(0xffffff, 3.5);
+    this.scene.add(this.ambLight);
   }
 
   private createSky(): void {
@@ -389,10 +385,7 @@ export class SkyWeatherRenderer {
       uniforms: {
         uSunDirection: { value: this.sunDirection.clone() },
         uSunColor: { value: this.sunColor.clone() },
-        uCloudCoverage: { value: this.weather.cloudCoverage },
         uNightFactor: { value: this.nightFactor },
-        uWindOffset: { value: this.windOffset.clone() },
-        uCloudTime: { value: 0 },
       },
       side: THREE.BackSide,
       depthWrite: false,
@@ -400,10 +393,184 @@ export class SkyWeatherRenderer {
 
     this.skyMesh = new THREE.Mesh(this.skyGeometry, this.skyMaterial);
     this.skyMesh.renderOrder = -100;
-    this.skyMesh.layers.set(1);
+    this.skyMesh.layers.enableAll();
     this.scene.add(this.skyMesh);
 
     this.updateSkyUniforms();
+  }
+
+  private createClouds(): void {
+    // Dispose existing
+    if (this.cloudMesh) {
+      this.scene.remove(this.cloudMesh);
+      this.cloudMesh = null;
+    }
+    if (this.cloudGeo) {
+      this.cloudGeo.dispose();
+      this.cloudGeo = null;
+    }
+    if (this.cloudMaterial) {
+      this.cloudMaterial.dispose();
+      this.cloudMaterial = null;
+    }
+
+    const coverage = this.weather.cloudCoverage;
+    if (coverage < 0.01) {
+      this.cloudSplats = [];
+      this.lastCloudCoverage = coverage;
+      return;
+    }
+
+    const CLOUD_ALTITUDE = 250;
+    const ALTITUDE_SPREAD = 40;
+    const DOMAIN = 800;
+    const CELL_SIZE = 80;
+    const GRID = DOMAIN / CELL_SIZE; // 10
+
+    // Deterministic hash
+    const hash = (a: number, b: number) => {
+      const n = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
+      return n - Math.floor(n);
+    };
+
+    this.cloudSplats = [];
+    for (let gx = 0; gx < GRID; gx++) {
+      for (let gz = 0; gz < GRID; gz++) {
+        if (hash(gx, gz) > coverage) continue;
+
+        const cx = (gx + 0.5) * CELL_SIZE - DOMAIN * 0.5;
+        const cz = (gz + 0.5) * CELL_SIZE - DOMAIN * 0.5;
+
+        const splatsInCluster = 30 + Math.floor(hash(gx + 50, gz + 50) * 25); // 30~55
+        for (let s = 0; s < splatsInCluster; s++) {
+          const h1 = hash(gx * 100 + s, gz * 100 + s * 7);
+          const h2 = hash(gz * 100 + s * 3, gx * 100 + s * 11);
+          const h3 = hash(s * 17 + gx, s * 31 + gz);
+          const h4 = hash(s * 41 + gz, s * 59 + gx);
+
+          const spreadX = (h1 - 0.5) * CELL_SIZE * 0.8;
+          const spreadZ = (h2 - 0.5) * CELL_SIZE * 0.8;
+          const spreadY = (h3 - 0.5) * ALTITUDE_SPREAD;
+
+          const width = 40 + h4 * 60;  // 40~100
+          const height = width * (0.3 + h1 * 0.3); // flattened
+
+          this.cloudSplats.push({
+            x: cx + spreadX,
+            y: CLOUD_ALTITUDE + spreadY,
+            z: cz + spreadZ,
+            width,
+            height,
+            baseBrightness: 0.8 + h3 * 0.4, // 0.8~1.2
+          });
+        }
+      }
+    }
+
+    // Build instanced geometry
+    const count = this.cloudSplats.length;
+    const baseGeo = new THREE.PlaneGeometry(1, 1);
+
+    this.cloudGeo = new THREE.InstancedBufferGeometry();
+    this.cloudGeo.index = baseGeo.index;
+    this.cloudGeo.attributes.position = baseGeo.attributes.position;
+    this.cloudGeo.attributes.uv = baseGeo.attributes.uv;
+    this.cloudGeo.instanceCount = count;
+
+    const offsets = new Float32Array(count * 3);
+    const scales = new Float32Array(count * 2);
+    const colors = new Float32Array(count * 4);
+
+    for (let i = 0; i < count; i++) {
+      const sp = this.cloudSplats[i];
+      offsets[i * 3] = sp.x;
+      offsets[i * 3 + 1] = sp.y;
+      offsets[i * 3 + 2] = sp.z;
+      scales[i * 2] = sp.width;
+      scales[i * 2 + 1] = sp.height;
+      colors[i * 4] = 1;
+      colors[i * 4 + 1] = 1;
+      colors[i * 4 + 2] = 1;
+      colors[i * 4 + 3] = 0.35;
+    }
+
+    this.cloudGeo.setAttribute("aOffset", new THREE.InstancedBufferAttribute(offsets, 3));
+    this.cloudGeo.setAttribute("aScale", new THREE.InstancedBufferAttribute(scales, 2));
+    this.cloudGeo.setAttribute("aColor", new THREE.InstancedBufferAttribute(colors, 4));
+
+    this.cloudMaterial = new THREE.ShaderMaterial({
+      vertexShader: cloudVertexShader,
+      fragmentShader: cloudFragmentShader,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.CustomBlending,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
+    });
+
+    this.cloudMesh = new THREE.Mesh(this.cloudGeo, this.cloudMaterial);
+    this.cloudMesh.frustumCulled = false;
+    this.cloudMesh.renderOrder = -99;
+    this.scene.add(this.cloudMesh);
+
+    this.lastCloudCoverage = coverage;
+  }
+
+  private updateCloudSplats(deltaTime: number): void {
+    if (!this.cloudGeo || this.cloudSplats.length === 0) return;
+
+    const DOMAIN = 800;
+    const HALF = DOMAIN * 0.5;
+
+    // Wind drift
+    const windRad = (this.weather.windDirection * Math.PI) / 180;
+    const driftX = Math.cos(windRad) * this.weather.windSpeed * deltaTime * 5.0;
+    const driftZ = Math.sin(windRad) * this.weather.windSpeed * deltaTime * 5.0;
+
+    const offsetAttr = this.cloudGeo.getAttribute("aOffset") as THREE.InstancedBufferAttribute;
+    const colorAttr = this.cloudGeo.getAttribute("aColor") as THREE.InstancedBufferAttribute;
+
+    for (let i = 0; i < this.cloudSplats.length; i++) {
+      const sp = this.cloudSplats[i];
+
+      // Drift position
+      sp.x += driftX;
+      sp.z += driftZ;
+
+      // Wrap around domain
+      if (sp.x > HALF) sp.x -= DOMAIN;
+      else if (sp.x < -HALF) sp.x += DOMAIN;
+      if (sp.z > HALF) sp.z -= DOMAIN;
+      else if (sp.z < -HALF) sp.z += DOMAIN;
+
+      offsetAttr.setXYZ(i, sp.x, sp.y, sp.z);
+
+      // Lighting
+      const nx = sp.x / HALF;
+      const nz = sp.z / HALF;
+      const splatDir = Math.sqrt(nx * nx + nz * nz) > 0.001
+        ? nx * this.sunDirection.x + nz * this.sunDirection.z
+        : 0;
+      const sunLit = 0.4 + 0.6 * (splatDir * 0.5 + 0.5);
+
+      // Bottom darkening: lower Y within altitude spread is darker
+      const yNorm = (sp.y - 210) / 80; // 0 at bottom, 1 at top of spread
+      const baseDarken = 0.6 + 0.4 * Math.min(1, Math.max(0, yNorm));
+
+      const nightDim = 1.0 - this.nightFactor * 0.7;
+      const brightness = sunLit * baseDarken * nightDim * sp.baseBrightness;
+
+      // Tint with sun color
+      const r = Math.min(1, brightness * (0.85 + this.sunColor.r * 0.15));
+      const g = Math.min(1, brightness * (0.85 + this.sunColor.g * 0.15));
+      const b = Math.min(1, brightness * (0.85 + this.sunColor.b * 0.15));
+      const alpha = 0.35 * sp.baseBrightness;
+
+      colorAttr.setXYZW(i, r, g, b, alpha);
+    }
+
+    offsetAttr.needsUpdate = true;
+    colorAttr.needsUpdate = true;
   }
 
   private createPrecipitation(): void {
@@ -507,7 +674,7 @@ export class SkyWeatherRenderer {
 
     this.precipMesh = new THREE.Mesh(this.precipGeometry, this.precipMaterial);
     this.precipMesh.frustumCulled = false;
-    this.precipMesh.layers.set(1);
+    this.precipMesh.layers.enableAll();
     this.scene.add(this.precipMesh);
   }
 
@@ -516,10 +683,7 @@ export class SkyWeatherRenderer {
 
     this.skyMaterial.uniforms.uSunDirection.value.copy(this.sunDirection);
     this.skyMaterial.uniforms.uSunColor.value.copy(this.sunColor);
-    this.skyMaterial.uniforms.uCloudCoverage.value = this.weather.cloudCoverage;
     this.skyMaterial.uniforms.uNightFactor.value = this.nightFactor;
-    this.skyMaterial.uniforms.uWindOffset.value.copy(this.windOffset);
-    this.skyMaterial.uniforms.uCloudTime.value = 0;
   }
 
   private updateTimeOfDay(): void {
@@ -531,7 +695,7 @@ export class SkyWeatherRenderer {
     const sunY = Math.sin(sunAngle);
     const sunXZ = Math.cos(sunAngle);
 
-    this.sunDirection = new THREE.Vector3(sunXZ * 0.7, Math.max(0.05, sunY), sunXZ * 0.7).normalize();
+    this.sunDirection = new THREE.Vector3(sunXZ * 0.7, Math.max(0.2, sunY), sunXZ * 0.7).normalize();
 
     // Night factor
     if (hour < 6 || hour > 20) {
@@ -552,6 +716,23 @@ export class SkyWeatherRenderer {
     } else {
       this.sunColor = new THREE.Color(1.0, 0.95, 0.85);
     }
+
+    // Scale lights by nightFactor
+    const dayFactor = 1 - this.nightFactor;
+    if (this.dirLight) {
+      this.dirLight.intensity = 4.5 * dayFactor;
+      this.dirLight.color.copy(this.sunColor);
+    }
+    if (this.hemiLight) {
+      this.hemiLight.intensity = 0.6 * dayFactor + 0.05;
+      const groundBrightness = 0.3 - this.nightFactor * 0.2;
+      this.hemiLight.groundColor.setRGB(groundBrightness, groundBrightness, groundBrightness + 0.05);
+    }
+    if (this.ambLight) {
+      this.ambLight.intensity = 3.5 * dayFactor + 0.2;
+      const nightBlue = this.nightFactor * 0.15;
+      this.ambLight.color.setRGB(1.0 - nightBlue, 1.0 - nightBlue * 0.5, 1.0 + nightBlue * 0.3);
+    }
   }
 
   // ============================================
@@ -563,6 +744,11 @@ export class SkyWeatherRenderer {
     this.updateTimeOfDay();
     this.updateSkyUniforms();
     this.createPrecipitation();
+
+    // Recreate clouds if coverage changed significantly
+    if (Math.abs(this.weather.cloudCoverage - this.lastCloudCoverage) > 0.05) {
+      this.createClouds();
+    }
 
     // Expose fog values for caller
     this.fogDensity = weather.fogDensity;
@@ -584,31 +770,35 @@ export class SkyWeatherRenderer {
     this.updateSkyUniforms();
     this.createPrecipitation();
 
+    // Recreate clouds if coverage changed significantly
+    if (Math.abs(this.weather.cloudCoverage - this.lastCloudCoverage) > 0.05) {
+      this.createClouds();
+    }
+
     // Expose fog values for caller
     this.fogDensity = config.fogDensity;
   }
 
   update(time: number, deltaTime: number, cameraPosition: THREE.Vector3): void {
-    // Update wind offset
-    const windRad = (this.weather.windDirection * Math.PI) / 180;
-    const windX = Math.cos(windRad) * this.weather.windSpeed * deltaTime * 0.1;
-    const windY = Math.sin(windRad) * this.weather.windSpeed * deltaTime * 0.1;
-    this.windOffset.x += windX;
-    this.windOffset.y += windY;
-
     // Sky follows camera (replaces infiniteDistance)
     if (this.skyMesh) {
       this.skyMesh.position.copy(cameraPosition);
     }
 
-    if (this.skyMaterial) {
-      this.skyMaterial.uniforms.uWindOffset.value.copy(this.windOffset);
-      this.skyMaterial.uniforms.uCloudTime.value = time;
+    // Cloud splats follow camera and animate
+    if (this.cloudMesh) {
+      this.cloudMesh.position.copy(cameraPosition);
+      this.updateCloudSplats(deltaTime);
     }
 
     if (this.precipMaterial) {
       this.precipMaterial.uniforms.uTime.value = time;
       this.precipMaterial.uniforms.uCameraPosition.value.copy(cameraPosition);
+    }
+
+    // Sync directional light with sun direction
+    if (this.dirLight) {
+      this.dirLight.position.copy(this.sunDirection);
     }
   }
 
@@ -616,7 +806,36 @@ export class SkyWeatherRenderer {
     return this.sunDirection.clone();
   }
 
+  getDirectionalLight(): THREE.DirectionalLight | null {
+    return this.dirLight;
+  }
+
+  /**
+   * Enable shadow rendering on the WebGL renderer.
+   * Must be called once after creating the renderer.
+   */
+  static enableShadows(renderer: THREE.WebGLRenderer): void {
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  }
+
   dispose(): void {
+    if (this.dirLight) {
+      this.scene.remove(this.dirLight);
+      this.scene.remove(this.dirLight.target);
+      this.dirLight.dispose();
+      this.dirLight = null;
+    }
+    if (this.hemiLight) {
+      this.scene.remove(this.hemiLight);
+      this.hemiLight.dispose();
+      this.hemiLight = null;
+    }
+    if (this.ambLight) {
+      this.scene.remove(this.ambLight);
+      this.ambLight.dispose();
+      this.ambLight = null;
+    }
     if (this.skyMesh) {
       this.scene.remove(this.skyMesh);
       this.skyMesh = null;
@@ -628,6 +847,18 @@ export class SkyWeatherRenderer {
     if (this.skyMaterial) {
       this.skyMaterial.dispose();
       this.skyMaterial = null;
+    }
+    if (this.cloudMesh) {
+      this.scene.remove(this.cloudMesh);
+      this.cloudMesh = null;
+    }
+    if (this.cloudGeo) {
+      this.cloudGeo.dispose();
+      this.cloudGeo = null;
+    }
+    if (this.cloudMaterial) {
+      this.cloudMaterial.dispose();
+      this.cloudMaterial = null;
     }
     if (this.precipMesh) {
       this.scene.remove(this.precipMesh);

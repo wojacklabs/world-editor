@@ -9,6 +9,7 @@
 import * as THREE from "three";
 import * as BufferGeometryUtils from "three/addons/utils/BufferGeometryUtils.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import CustomShaderMaterial from "three-custom-shader-material/vanilla";
 import {
   loadTextureWithFallbackSync,
 } from "../shared/rendering/TextureLoader.three";
@@ -28,6 +29,114 @@ const REFERENCE_TREE_URL = "/assets/references/infinite-terrain/tree.glb";
 // ============================================
 // Shader Strings
 // ============================================
+
+// CSM vertex shader for tree/bush (matches editor's PropManager)
+const csmTreeVertexShader = `
+attribute vec4 color;
+varying vec4 vVertexColor;
+varying vec2 vUv;
+varying vec3 vWorldPos;
+
+uniform float uTime;
+uniform vec2 uWindDirection;
+uniform float uWindStrength;
+uniform float uMinWindHeight;
+uniform float uMaxWindHeight;
+uniform float uPropsPrimarySpeed;
+uniform float uPropsSecondarySpeed;
+uniform float uPropsNoiseSpeed;
+
+float csm_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float csm_noise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = csm_hash(i);
+    float b = csm_hash(i + vec2(1.0, 0.0));
+    float c = csm_hash(i + vec2(0.0, 1.0));
+    float d = csm_hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main() {
+    vVertexColor = color;
+    vUv = uv;
+
+    vec3 worldPos = (modelMatrix * vec4(position, 1.0)).xyz;
+    vWorldPos = worldPos;
+
+    float heightAboveMin = max(0.0, position.y - uMinWindHeight);
+    float heightRange = max(0.01, uMaxWindHeight - uMinWindHeight);
+    float heightFactor = clamp(heightAboveMin / heightRange, 0.0, 1.0);
+    heightFactor = heightFactor * heightFactor * heightFactor;
+
+    vec2 worldPosXZ = worldPos.xz;
+    float windPhase = dot(worldPosXZ, uWindDirection) * 0.5 + uTime * uPropsPrimarySpeed;
+    float primaryWave = sin(windPhase) * 0.5 + 0.5;
+    float secondaryPhase = dot(worldPosXZ, uWindDirection) * 2.0 + uTime * uPropsSecondarySpeed;
+    float secondaryWave = sin(secondaryPhase) * 0.3 + 0.5;
+    float noiseVal = csm_noise2D(worldPosXZ * 0.3 + uTime * uPropsNoiseSpeed);
+    float windAmount = (primaryWave * 0.7 + secondaryWave * 0.3 + noiseVal * 0.2) * heightFactor * uWindStrength;
+
+    vec3 displaced = position;
+    displaced.x += uWindDirection.x * windAmount * 0.2;
+    displaced.z += uWindDirection.y * windAmount * 0.2;
+    displaced.y -= windAmount * 0.04;
+    csm_Position = displaced;
+}
+`;
+
+// CSM fragment shader for tree/bush (matches editor's PropManager)
+const csmTreeFragmentShader = `
+varying vec4 vVertexColor;
+varying vec2 vUv;
+varying vec3 vWorldPos;
+
+uniform float uFresnelPower;
+uniform float uFresnelStrength;
+uniform vec3 uFresnelColor;
+uniform vec3 uTrunkColor;
+uniform sampler2D uLeafAlpha;
+uniform float uAlphaCutoff;
+
+float bark_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main() {
+    float isBark = step(vVertexColor.g + 0.02, vVertexColor.r);
+
+    if (isBark < 0.5) {
+        float alpha = texture2D(uLeafAlpha, vUv).g;
+        if (alpha < uAlphaCutoff) discard;
+    }
+
+    if (isBark > 0.5) {
+        vec3 N = normalize(vNormal);
+        vec3 lightDir = normalize(vec3(0.5, 1.0, 0.5));
+        float wrap = 0.4;
+        float NdotL = clamp((dot(N, lightDir) + wrap) / (1.0 + wrap), 0.0, 1.0);
+        float hemi = N.y * 0.5 + 0.5;
+        float shade = mix(0.55, 1.0, NdotL * 0.6 + hemi * 0.4);
+        float groove = bark_hash(vec2(vUv.x * 30.0, vUv.y * 5.0));
+        float grooveFactor = smoothstep(0.3, 0.7, groove);
+        shade *= mix(0.8, 1.05, grooveFactor);
+        csm_DiffuseColor.rgb = uTrunkColor * shade;
+    } else {
+        csm_DiffuseColor.rgb = csm_DiffuseColor.rgb;
+    }
+
+    float leafMask = 1.0 - isBark;
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(vViewPosition);
+    float ndv = clamp(dot(N, V), 0.0, 1.0);
+    float fresnel = pow(1.0 - ndv, uFresnelPower) * uFresnelStrength * leafMask;
+    csm_DiffuseColor.rgb = mix(csm_DiffuseColor.rgb, uFresnelColor, clamp(fresnel, 0.0, 1.0));
+}
+`;
 
 // Wind-enabled vertex shader for foliage (grass, bush, tree leaves)
 const foliageWindVertexShader = `
@@ -219,11 +328,11 @@ void main() {
     float tipFactor = smoothstep(0.0, 0.6, vLocalPosition.y) * leafMask;
     float sss = max(0.0, dot(-vViewDirection, sunDirection)) * tipFactor * 0.15;
 
-    float diffuse = halfLambert * 0.6 + 0.4;
+    float diffuse = halfLambert * 0.6 * ambientIntensity;
     vec3 ambient = vec3(ambientIntensity);
-    vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0);
+    vec3 rim = vec3(rimFactor) * vec3(0.8, 0.9, 1.0) * ambientIntensity;
 
-    color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss;
+    color = color * (ambient + diffuse) + rim + vec3(0.1, 0.15, 0.05) * sss * ambientIntensity;
 
     // Fresnel: mix blend for softer rim
     color = mix(color, uFresnelColor, clamp(fresnel * leafMask, 0.0, 1.0));
@@ -366,14 +475,14 @@ void main() {
 
     // Diffuse lighting
     float NdotL = max(dot(normal, sunDirection), 0.0);
-    float diffuse = NdotL * 0.6 + 0.4;
+    float diffuse = NdotL * 0.6;
 
     // Edge softening
-    diffuse = mix(diffuse, diffuse * 0.7 + 0.3, edgeFactor * 0.4);
+    diffuse = mix(diffuse, diffuse * 0.7, edgeFactor * 0.4);
 
     // Rim lighting
     float rimFactor = 1.0 - max(dot(normal, vViewDirection), 0.0);
-    rimFactor = pow(rimFactor, 3.0) * 0.1;
+    rimFactor = pow(rimFactor, 3.0) * 0.1 * ambientIntensity;
 
     // Ambient occlusion
     float ao = 0.5 + 0.5 * smoothNormal.y;
@@ -477,9 +586,9 @@ void main() {
     }
 
     float NdotL = max(dot(normal, sunDirection), 0.0);
-    float diffuse = NdotL * 0.65 + 0.35;
+    float diffuse = NdotL * 0.65;
     float ao = 0.55 + 0.45 * clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
-    float rim = pow(1.0 - max(dot(normal, vViewDirection), 0.0), 2.8) * 0.08;
+    float rim = pow(1.0 - max(dot(normal, vViewDirection), 0.0), 2.8) * 0.08 * ambientIntensity;
 
     diffuse *= 1.0 - mudLike * 0.10 + (mudMicro - 0.5) * 0.08 * mudLike;
     ao = mix(ao, ao * (0.90 + mudLower * 0.18), mudLike);
@@ -858,6 +967,14 @@ export class ProceduralAssetGenerator {
     // Recompute normals after transform
     cloned.computeVertexNormals();
 
+    // Strip extra GLB attributes (tangent, uv2, etc.) to ensure merge compatibility
+    const coreAttributes = new Set(["position", "normal", "uv", "color"]);
+    for (const name of Object.keys(cloned.attributes)) {
+      if (!coreAttributes.has(name)) {
+        cloned.deleteAttribute(name);
+      }
+    }
+
     return cloned;
   }
 
@@ -990,10 +1107,11 @@ export class ProceduralAssetGenerator {
     const sy = 0.9 + this.seeded01(seedBase + 2.5) * 0.34;
     const sz = 0.88 + this.seeded01(seedBase + 3.3) * 0.26;
 
-    // Apply scaling + rotation transform
-    const variationTransform = new THREE.Matrix4()
-      .makeScale(sx, sy, sz)
-      .multiply(new THREE.Matrix4().makeRotationY(yaw));
+    // Apply rotation first, then scale (must match editor's PropManager order)
+    const scaleMatrix = new THREE.Matrix4().makeScale(sx, sy, sz);
+    const rotMatrix = new THREE.Matrix4().makeRotationY(yaw);
+    const variationTransform = new THREE.Matrix4();
+    variationTransform.multiplyMatrices(rotMatrix, scaleMatrix);
     geometry.applyMatrix4(variationTransform);
 
     this.applyReferenceVariationDeformation(geometry, seedBase, assetType);
@@ -1067,7 +1185,7 @@ export class ProceduralAssetGenerator {
           for (let i = 0; i < trunkSources.length; i++) {
             const baked = this.bakeMeshToWorld(trunkSources[i]);
             if (!baked) continue;
-            setGeometryVertexColor(baked, 0.44, 0.32, 0.18);
+            setGeometryVertexColor(baked, 0.6, 0.3, 0.15);
             ensureAttributes(baked);
             bakedParts.push(baked);
           }
@@ -1076,7 +1194,7 @@ export class ProceduralAssetGenerator {
         for (let i = 0; i < bushSources.length; i++) {
           const baked = this.bakeMeshToWorld(bushSources[i]);
           if (!baked) continue;
-          setGeometryVertexColor(baked, 0.23, 0.48, 0.2);
+          setGeometryVertexColor(baked, 0.2, 0.8, 0.2);
           ensureAttributes(baked);
           bakedParts.push(baked);
         }
@@ -1085,7 +1203,9 @@ export class ProceduralAssetGenerator {
           return null;
         }
 
-        const merged = BufferGeometryUtils.mergeGeometries(bakedParts, false);
+        // Ensure consistent index state before merging
+        const normalizedParts = bakedParts.map((g) => (g.index ? g.toNonIndexed() : g));
+        const merged = BufferGeometryUtils.mergeGeometries(normalizedParts, false);
         for (const part of bakedParts) part.dispose();
         if (!merged) {
           return null;
@@ -1306,13 +1426,6 @@ export class ProceduralAssetGenerator {
         maxHeight = 2.5;
       }
 
-      const dirtTex = loadTextureWithFallbackSync(this.textureUrls.dirt, {
-        preferredExtensions: ["ktx2", "jpg", "png"],
-        wrapS: THREE.RepeatWrapping,
-        wrapT: THREE.RepeatWrapping,
-        anisotropy: 8,
-      });
-
       const leafAtlasTex = loadTextureWithFallbackSync(this.textureUrls.leafAtlas, {
         preferredExtensions: ["png", "ktx2", "jpg"],
         wrapS: THREE.ClampToEdgeWrapping,
@@ -1320,9 +1433,10 @@ export class ProceduralAssetGenerator {
         anisotropy: 4,
       });
 
-      const material = new THREE.ShaderMaterial({
-        vertexShader: foliageWindVertexShader,
-        fragmentShader: foliageWindFragmentShader,
+      const csm = new CustomShaderMaterial({
+        baseMaterial: THREE.MeshStandardMaterial,
+        vertexShader: csmTreeVertexShader,
+        fragmentShader: csmTreeFragmentShader,
         uniforms: {
           uTime: { value: this.time },
           uWindDirection: { value: this.windDirection.clone() },
@@ -1332,27 +1446,24 @@ export class ProceduralAssetGenerator {
           uPropsPrimarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsPrimarySpeed },
           uPropsSecondarySpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsSecondarySpeed },
           uPropsNoiseSpeed: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.wind.propsNoiseSpeed },
-          baseColor: { value: new THREE.Color(params.colorBase.r, params.colorBase.g, params.colorBase.b) },
-          detailColor: { value: new THREE.Color(params.colorDetail.r, params.colorDetail.g, params.colorDetail.b) },
-          sunDirection: { value: new THREE.Vector3(0.5, 0.8, 0.3).normalize() },
-          ambientIntensity: { value: 0.4 },
-          fogColor: { value: this.fogColor.clone() },
-          fogDensity: { value: this.fogDensity },
-          dirtTexture: { value: dirtTex },
-          dirtTextureScale: { value: 0.5 },
-          leafAtlas: { value: leafAtlasTex },
-          uLeafAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
-          uLeafFadeStart: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeStart },
-          uLeafFadeEnd: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.fade.leafFadeEnd },
-          uUseLeafAtlas: { value: params.type === "tree" || params.type === "bush" ? 1.0 : 0.0 },
-          uLeafMaskFromLuma: { value: 1.0 },
-          uFresnelPower: { value: 3.0 },
-          uFresnelStrength: { value: 0.4 },
-          uFresnelColor: { value: new THREE.Color(0.8, 0.95, 0.7) },
+          uFresnelPower: { value: 2.5 },
+          uFresnelStrength: { value: 0.15 },
+          uFresnelColor: { value: new THREE.Color("#90c020") },
+          uTrunkColor: { value: new THREE.Color("#8b6b4a") },
+          uLeafAlpha: { value: leafAtlasTex },
+          uAlphaCutoff: { value: DEFAULT_FOLIAGE_QUALITY_PROFILE.leafAtlas.alphaCutoff },
         },
-      });
+        color: new THREE.Color("#6a9e18"),
+        fog: false,
+        transparent: false,
+        depthWrite: true,
+        side: THREE.DoubleSide,
+        roughness: 1.0,
+        metalness: 0.0,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
 
-      return material;
+      return csm as unknown as THREE.ShaderMaterial;
     } else if (isKoreanStructureType(params.type)) {
       return new THREE.ShaderMaterial({
         vertexShader: structureAssetVertexShader,
@@ -1779,7 +1890,8 @@ export class ProceduralAssetGenerator {
       }
     }
 
-    const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+    const normalizedTreeGeos = geometries.map((g) => (g.index ? g.toNonIndexed() : g));
+    const merged = BufferGeometryUtils.mergeGeometries(normalizedTreeGeos, false);
     for (const geo of geometries) geo.dispose();
     if (merged) {
       return merged;
@@ -1878,7 +1990,8 @@ export class ProceduralAssetGenerator {
       }
     }
 
-    const merged = BufferGeometryUtils.mergeGeometries(geometries, false);
+    const normalizedBushGeos = geometries.map((g) => (g.index ? g.toNonIndexed() : g));
+    const merged = BufferGeometryUtils.mergeGeometries(normalizedBushGeos, false);
     for (const geo of geometries) geo.dispose();
     if (merged) {
       return merged;
@@ -1981,7 +2094,8 @@ export class ProceduralAssetGenerator {
       bladeGeometries.push(bladeGeo);
     }
 
-    const merged = BufferGeometryUtils.mergeGeometries(bladeGeometries, false);
+    const normalizedBladeGeos = bladeGeometries.map((g) => (g.index ? g.toNonIndexed() : g));
+    const merged = BufferGeometryUtils.mergeGeometries(normalizedBladeGeos, false);
     for (const geo of bladeGeometries) geo.dispose();
     if (merged) {
       return merged;

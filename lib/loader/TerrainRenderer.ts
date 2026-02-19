@@ -50,12 +50,37 @@ varying vec4 vSplatWeights;
 varying float vWaterMask;
 varying float vHeight;
 
+// Simple hash for procedural displacement (no texture needed)
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 void main() {
     vec3 positionUpdated = position;
 
     // Sample splatmap
     vSplatWeights = texture2D(uSplatMap, uv);
     vWaterMask = texture2D(uWaterMask, uv).r;
+
+    // Procedural displacement: rock (B channel) full strength, grass (R channel) half
+    float rockWeight = vSplatWeights.b;
+    float grassWeight = vSplatWeights.r;
+    vec2 dispUV = uv * uTerrainSize;
+    float noiseVal = noise(dispUV) - 0.5;
+    float displacement = noiseVal * uDispStrength * rockWeight +
+                         noiseVal * uDispStrength * 0.5 * grassWeight;
+    positionUpdated.y += displacement;
 
     // World position
     vec4 worldPos = modelMatrix * vec4(positionUpdated, 1.0);
@@ -526,6 +551,7 @@ export class TerrainRenderer {
 
       mesh.material = this.material ?? this.fallbackMaterial!;
       mesh.visible = i === 0;
+      mesh.receiveShadow = true;
 
       this.scene.add(mesh);
       this.lodMeshes.push(mesh);

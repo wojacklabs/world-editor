@@ -407,10 +407,14 @@ export class WorldLoader {
         seamlessTiling: data.settings.seamlessTiling,
         waterLevel: data.settings.waterLevel,
         waterDepth: data.settings.waterDepth ?? 2.0,
+        dispStrength: data.settings.dispStrength,
+        waterType: data.settings.waterType,
+        waterFlowAngle: data.settings.waterFlowAngle,
       },
       weather,
       props: data.props ?? [],
       proceduralProps: data.proceduralProps ?? [],
+      pointLights: data.pointLights ?? [],
     };
   }
 

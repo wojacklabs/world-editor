@@ -238,6 +238,50 @@ export default function WorldEditor({ onEngineReady, onLibraryAssetPlace, onProc
     engineRef.current.updatePropPreviewSize(assetSettings.size);
   }, [engineReady, activeTool, assetSettings.size]);
 
+  // Select tool: click to pick prop
+  useEffect(() => {
+    if (!engineReady || !engineRef.current || activeTool !== "select") return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleClick = (e: MouseEvent) => {
+      if (!engineRef.current || engineRef.current.getIsGameMode()) return;
+      if (e.shiftKey || e.ctrlKey) return;
+      const prop = engineRef.current.pickProp(e.clientX, e.clientY);
+      useEditorStore.getState().setSelectedPropInstance(prop?.id ?? null);
+    };
+
+    canvas.addEventListener("click", handleClick);
+    return () => canvas.removeEventListener("click", handleClick);
+  }, [engineReady, activeTool]);
+
+  // Select tool: Delete/Escape keys
+  useEffect(() => {
+    if (!engineReady || activeTool !== "select") return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const store = useEditorStore.getState();
+      if ((e.key === "Delete" || e.key === "Backspace") && store.selectedPropInstance) {
+        engineRef.current?.removeProp(store.selectedPropInstance);
+        engineRef.current?.highlightProp(null);
+        store.setSelectedPropInstance(null);
+        store.setModified(true);
+      }
+      if (e.key === "Escape") {
+        store.setSelectedPropInstance(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [engineReady, activeTool]);
+
+  // Select tool: sync highlight with store
+  const selectedPropInstance = useEditorStore((s) => s.selectedPropInstance);
+  useEffect(() => {
+    engineRef.current?.highlightProp(selectedPropInstance);
+  }, [selectedPropInstance, engineReady]);
+
   // Update preview position on mouse move
   useEffect(() => {
     if (!engineReady || !engineRef.current || activeTool !== "props") return;

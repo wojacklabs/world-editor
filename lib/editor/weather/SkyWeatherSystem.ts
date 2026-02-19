@@ -88,6 +88,7 @@ export class SkyWeatherSystem {
   private propManager: PropManager | null = null;
   private directionalLight: THREE.DirectionalLight | null = null;
   private hemisphericLight: THREE.HemisphereLight | null = null;
+  private ambientLight: THREE.AmbientLight | null = null;
 
   // Stored camera reference
   private camera: THREE.Camera | null = null;
@@ -142,6 +143,8 @@ export class SkyWeatherSystem {
         this.directionalLight = child;
       } else if (child instanceof THREE.HemisphereLight && !this.hemisphericLight) {
         this.hemisphericLight = child;
+      } else if (child instanceof THREE.AmbientLight && !this.ambientLight) {
+        this.ambientLight = child;
       }
     });
   }
@@ -485,6 +488,11 @@ export class SkyWeatherSystem {
         groundBrightness,
         groundBrightness + 0.05
       );
+    }
+
+    if (this.ambientLight) {
+      const dayFactor = 1 - this.nightFactor;
+      this.ambientLight.intensity = 3.5 * dayFactor + 0.15;
     }
   }
 
