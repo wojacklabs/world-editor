@@ -723,7 +723,7 @@ void main() {
         // Show debug gray color with basic lighting
         vec3 debugColor = vec3(0.5, 0.5, 0.55);
         float NdotL = max(dot(normalize(vNormal), uSunDirection), 0.0);
-        float diffuse = NdotL * 0.6 + 0.4;
+        float diffuse = NdotL * (1.0 - uAmbientIntensity) + uAmbientIntensity;
         vec3 color = debugColor * (uAmbientIntensity + diffuse * uSunColor);
         gl_FragColor = vec4(color, 1.0);
         return;
@@ -919,8 +919,8 @@ void main() {
     // Enhanced lighting using ARM texture
     float NdotL = max(dot(normal, uSunDirection), 0.0);
 
-    // Soft diffuse with wrap lighting
-    float diffuse = NdotL * 0.6 + 0.4;
+    // Soft diffuse with wrap lighting (floor scales with ambient for day/night)
+    float diffuse = NdotL * (1.0 - uAmbientIntensity) + uAmbientIntensity;
 
     // Subtle rim lighting
     float rim = 1.0 - max(dot(normal, vViewDirection), 0.0);

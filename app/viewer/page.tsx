@@ -67,14 +67,6 @@ export default function ViewerPage() {
       console.log(`Loaded: "${world.name}" (${tile.resolution}x${tile.resolution}, size=${tile.size})`);
 
       // Terrain
-      const textureUrls = world.rendering.textureUrls;
-      terrain.loadBiomeTextures({
-        grass: textureUrls.grass + ".jpg",
-        dirt: textureUrls.dirt + ".jpg",
-        rock: textureUrls.rock + ".jpg",
-        sand: textureUrls.sand + ".jpg",
-        tileScale: 16,
-      });
       terrain.create({
         heightmap: tile.heightmap,
         resolution: tile.resolution,
