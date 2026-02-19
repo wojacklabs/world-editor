@@ -10,7 +10,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-import { VolumetricFogPass } from "@/lib/editor/weather/VolumetricFogPass";
+import { VolumetricFogPass } from "../editor/weather/VolumetricFogPass";
 
 export class PostProcessingPipeline {
   private composer: EffectComposer;
@@ -23,10 +23,11 @@ export class PostProcessingPipeline {
     width: number,
     height: number
   ) {
-    // Create render target with depth texture for volumetric fog
+    // Create render target at CSS dimensions — composer.setSize will fix to device pixels
     const renderTarget = new THREE.WebGLRenderTarget(width, height, {
       depthTexture: new THREE.DepthTexture(width, height),
       depthBuffer: true,
+      samples: 4,
     });
     if (renderTarget.depthTexture) {
       renderTarget.depthTexture.format = THREE.DepthFormat;
@@ -54,9 +55,9 @@ export class PostProcessingPipeline {
     // 3. Bloom pass (subtle)
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(width, height),
-      0.3,   // strength
+      0.15,  // strength
       0.15,  // radius — tight spread to avoid sky haze
-      0.85   // threshold
+      1.0    // threshold
     );
     this.composer.addPass(bloomPass);
 
@@ -66,6 +67,11 @@ export class PostProcessingPipeline {
 
     // OutputPass handles tone mapping, so disable on renderer
     renderer.toneMapping = THREE.NoToneMapping;
+
+    // Fix render target + all pass dimensions to device pixel resolution.
+    // EffectComposer.setSize multiplies by pixelRatio internally,
+    // so render targets and passes get correct device pixel dimensions.
+    this.composer.setSize(width, height);
   }
 
   getVolumetricFogPass(): VolumetricFogPass {
@@ -96,8 +102,8 @@ export class PostProcessingPipeline {
   }
 
   resize(width: number, height: number): void {
+    // composer.setSize handles pixelRatio and calls setSize on all passes
     this.composer.setSize(width, height);
-    this.volumetricFogPass.setSize(width, height);
   }
 
   dispose(): void {
