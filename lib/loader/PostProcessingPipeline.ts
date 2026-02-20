@@ -49,7 +49,7 @@ export class PostProcessingPipeline {
     this.volumetricFogPass.fogHeightFalloff = 0.08;
     this.volumetricFogPass.fogBaseHeight = 0.0;
     this.volumetricFogPass.godRayIntensity = 0.25;
-    this.volumetricFogPass.steps = 16;
+    this.volumetricFogPass.steps = 12;
     this.composer.addPass(this.volumetricFogPass);
 
     // 3. Bloom pass (subtle)

@@ -439,6 +439,7 @@ export class FoliageRenderer {
 
   private frustum = new THREE.Frustum();
   private vpMatrix = new THREE.Matrix4();
+  private _cullSphere = new THREE.Sphere();
 
   private terrainScale: number = 256;
 
@@ -548,7 +549,6 @@ export class FoliageRenderer {
     );
     this.frustum.setFromProjectionMatrix(this.vpMatrix);
 
-    const sphere = new THREE.Sphere();
     // Radius covers chunk diagonal + grass height headroom
     const radius = chunkSize * 0.7071 + 2;
 
@@ -556,10 +556,10 @@ export class FoliageRenderer {
       const cx = (chunk.x + 0.5) * chunkSize;
       const cz = (chunk.z + 0.5) * chunkSize;
 
-      sphere.center.set(cx, 0, cz);
-      sphere.radius = radius;
+      this._cullSphere.center.set(cx, 0, cz);
+      this._cullSphere.radius = radius;
 
-      const visible = this.frustum.intersectsSphere(sphere);
+      const visible = this.frustum.intersectsSphere(this._cullSphere);
 
       for (const mesh of chunk.meshes.values()) {
         mesh.visible = visible;
